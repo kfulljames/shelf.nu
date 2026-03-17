@@ -8,6 +8,7 @@ import type {
   OrganizationRoles,
 } from "@prisma/client";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { validateBookingOwnership } from "~/utils/booking-authorization.server";
 import { calculateTotalValueOfAssets } from "~/utils/bookings";
 import { getClientHint } from "~/utils/client-hints";
@@ -101,16 +102,15 @@ export async function fetchAllPdfRelatedData(
           },
         },
       }),
-      db.organization.findUnique({
-        where: { id: organizationId },
-        select: {
-          imageId: true,
-          name: true,
-          id: true,
-          currency: true,
-          updatedAt: true,
-        },
-      }),
+      sbDb
+        .from("Organization")
+        .select("imageId, name, id, currency, updatedAt")
+        .eq("id", organizationId)
+        .single()
+        .then(({ data, error }) => {
+          if (error) throw error;
+          return { ...data, updatedAt: new Date(data.updatedAt) };
+        }),
     ]);
 
     if (!organization) {

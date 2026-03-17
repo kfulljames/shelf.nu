@@ -2,6 +2,7 @@
 import { BookingStatus } from "@prisma/client";
 import type PgBoss from "pg-boss";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
 import { getTimeRemainingMessage } from "~/utils/date-fns";
@@ -190,15 +191,13 @@ const overdueHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
 const autoArchiveHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
   try {
     // Fetch the booking to check if it's still in COMPLETE status
-    const booking = await db.booking.findUnique({
-      where: { id: data.id },
-      select: {
-        id: true,
-        status: true,
-        custodianUserId: true,
-        organizationId: true,
-      },
-    });
+    const { data: booking, error: findErr } = await sbDb
+      .from("Booking")
+      .select("id, status, custodianUserId, organizationId")
+      .eq("id", data.id)
+      .maybeSingle();
+
+    if (findErr) throw findErr;
 
     if (!booking) {
       Logger.warn(
@@ -217,10 +216,11 @@ const autoArchiveHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
     }
 
     // Check if auto-archive is still enabled for this organization
-    const bookingSettings = await db.bookingSettings.findUnique({
-      where: { organizationId: booking.organizationId },
-      select: { autoArchiveBookings: true },
-    });
+    const { data: bookingSettings } = await sbDb
+      .from("BookingSettings")
+      .select("autoArchiveBookings")
+      .eq("organizationId", booking.organizationId)
+      .maybeSingle();
 
     if (!bookingSettings?.autoArchiveBookings) {
       Logger.info(
@@ -231,16 +231,19 @@ const autoArchiveHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
 
     // Archive the booking atomically — include status in where clause
     // to prevent race with concurrent manual archive (TOCTOU)
-    const now = new Date();
-    const updatedBooking = await db.booking
+    const now = new Date().toISOString();
+    const { data: updatedBooking, error: updateErr } = await sbDb
+      .from("Booking")
       .update({
-        where: { id: booking.id, status: BookingStatus.COMPLETE },
-        data: {
-          status: BookingStatus.ARCHIVED,
-          autoArchivedAt: now,
-        },
+        status: BookingStatus.ARCHIVED,
+        autoArchivedAt: now,
       })
-      .catch(() => null);
+      .eq("id", booking.id)
+      .eq("status", BookingStatus.COMPLETE)
+      .select("id")
+      .maybeSingle();
+
+    if (updateErr) throw updateErr;
 
     if (!updatedBooking) {
       Logger.info(

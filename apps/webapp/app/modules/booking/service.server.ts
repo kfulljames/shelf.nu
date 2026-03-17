@@ -21,6 +21,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import type { SortingDirection } from "~/components/list/filters/sort-by";
 import { partialCheckinAssetsSchema } from "~/components/scanner/drawer/uses/partial-checkin-drawer";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
 import { validateBookingOwnership } from "~/utils/booking-authorization.server";
@@ -249,10 +250,11 @@ export async function scheduleNextBookingJob({
       {},
       when
     );
-    await db.booking.update({
-      where: { id: data.id },
-      data: { activeSchedulerReference: id },
-    });
+    const { error } = await sbDb
+      .from("Booking")
+      .update({ activeSchedulerReference: id })
+      .eq("id", data.id);
+    if (error) throw error;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -268,13 +270,15 @@ async function updateBookingAssetStates(
   status: AssetStatus
 ) {
   try {
-    return await db.asset.updateMany({
-      where: {
-        status: { not: status },
-        id: { in: booking.assets.map((a) => a.id) },
-      },
-      data: { status },
-    });
+    const { error } = await sbDb
+      .from("Asset")
+      .update({ status })
+      .in(
+        "id",
+        booking.assets.map((a) => a.id)
+      )
+      .neq("status", status);
+    if (error) throw error;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -293,10 +297,11 @@ async function updateBookingKitStates({
   status: KitStatus;
 }) {
   try {
-    return await db.kit.updateMany({
-      where: { id: { in: kitIds } },
-      data: { status },
-    });
+    const { error } = await sbDb
+      .from("Kit")
+      .update({ status })
+      .in("id", kitIds);
+    if (error) throw error;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -668,20 +673,38 @@ export async function updateBasicBooking({
 
       try {
         // Fetch new custodian details
-        const newCustodian = await db.teamMember.findUnique({
-          where: { id: custodianTeamMemberId },
-          select: {
-            id: true,
-            name: true,
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
-          },
-        });
+        const { data: tmData } = await sbDb
+          .from("TeamMember")
+          .select("id, name, userId")
+          .eq("id", custodianTeamMemberId)
+          .maybeSingle();
+
+        let newCustodian: {
+          id: string;
+          name: string;
+          user?: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+          } | null;
+        } | null = null;
+
+        if (tmData) {
+          let user: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+          } | null = null;
+          if (tmData.userId) {
+            const { data: userData } = await sbDb
+              .from("User")
+              .select("id, firstName, lastName")
+              .eq("id", tmData.userId)
+              .maybeSingle();
+            user = userData;
+          }
+          newCustodian = { id: tmData.id, name: tmData.name, user };
+        }
 
         if (newCustodian) {
           let custodianChangeMessage = `${userLink} changed booking custodian`;
@@ -732,11 +755,12 @@ export async function updateBasicBooking({
         booking.tags.map((tag) => tag.name).join(", ") || "(none)";
 
       // Get new tag names - we need to fetch them since we only have IDs
-      const newTags = await db.tag.findMany({
-        where: { id: { in: newTagIds } },
-        select: { name: true },
-      });
-      const newTagNames = newTags.map((tag) => tag.name).join(", ") || "(none)";
+      const { data: newTags } = await sbDb
+        .from("Tag")
+        .select("name")
+        .in("id", newTagIds);
+      const newTagNames =
+        (newTags ?? []).map((tag) => tag.name).join(", ") || "(none)";
 
       await createSystemBookingNote({
         bookingId: booking.id,
@@ -1410,15 +1434,18 @@ export async function checkinBooking({
     });
 
     // Pre-fetch partial check-ins for linked bookings outside the transaction
-    const partialCheckinsForLinkedBookings =
-      linkedActiveBookingIds.size > 0
-        ? await db.partialBookingCheckin.findMany({
-            where: {
-              bookingId: { in: Array.from(linkedActiveBookingIds) },
-            },
-            select: { bookingId: true, assetIds: true },
-          })
-        : [];
+    let partialCheckinsForLinkedBookings: {
+      bookingId: string;
+      assetIds: string[];
+    }[] = [];
+    if (linkedActiveBookingIds.size > 0) {
+      const { data: pcData, error: pcErr } = await sbDb
+        .from("PartialBookingCheckin")
+        .select("bookingId, assetIds")
+        .in("bookingId", Array.from(linkedActiveBookingIds));
+      if (pcErr) throw pcErr;
+      partialCheckinsForLinkedBookings = pcData ?? [];
+    }
 
     // Build a map of bookingId -> Set of asset IDs that were partially checked in
     const partiallyCheckedInAssetsByBooking = new Map<string, Set<string>>();
@@ -1526,14 +1553,30 @@ export async function checkinBooking({
         });
 
         // Get asset and kit data for consistent formatting
-        const assetsWithKitInfo = await db.asset.findMany({
-          where: { id: { in: specificAssetIds } },
-          select: {
-            id: true,
-            title: true,
-            kit: { select: { id: true, name: true } },
-          },
-        });
+        const { data: assetRowsData } = await sbDb
+          .from("Asset")
+          .select("id, title, kitId")
+          .in("id", specificAssetIds);
+        const assetRows = assetRowsData ?? [];
+
+        // Fetch kit details for assets that belong to kits
+        const kitIdsForLookup = [
+          ...new Set(assetRows.filter((a) => a.kitId).map((a) => a.kitId!)),
+        ];
+        let kitMap = new Map<string, { id: string; name: string }>();
+        if (kitIdsForLookup.length > 0) {
+          const { data: kitRowsData } = await sbDb
+            .from("Kit")
+            .select("id, name")
+            .in("id", kitIdsForLookup);
+          const kitRows = kitRowsData ?? [];
+          kitMap = new Map(kitRows.map((k) => [k.id, k]));
+        }
+        const assetsWithKitInfo = assetRows.map((a) => ({
+          id: a.id,
+          title: a.title,
+          kit: a.kitId ? kitMap.get(a.kitId) ?? null : null,
+        }));
 
         // Separate complete kits from individual assets
         const kitIds = getKitIdsByAssets(
@@ -1625,13 +1668,11 @@ export async function checkinBooking({
      * Check if auto-archive is enabled for this organization
      * and schedule the auto-archive job if needed
      */
-    const bookingSettings = await db.bookingSettings.findUnique({
-      where: { organizationId: updatedBooking.organizationId },
-      select: {
-        autoArchiveBookings: true,
-        autoArchiveDays: true,
-      },
-    });
+    const { data: bookingSettings } = await sbDb
+      .from("BookingSettings")
+      .select("autoArchiveBookings, autoArchiveDays")
+      .eq("organizationId", updatedBooking.organizationId)
+      .maybeSingle();
 
     if (bookingSettings?.autoArchiveBookings) {
       const when = new Date();
@@ -2099,10 +2140,12 @@ export async function updateBookingAssets({
     // Skip note creation if kits are involved - kit notes are created separately
     if (!kitIds || kitIds.length === 0) {
       // Fetch asset data to use proper wrapper for single assets
-      const assets = await db.asset.findMany({
-        where: { id: { in: assetIds }, organizationId },
-        select: { id: true, title: true },
-      });
+      const { data: assetsData } = await sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", assetIds)
+        .eq("organizationId", organizationId);
+      const assets = assetsData ?? [];
 
       const assetContent = wrapAssetsWithDataForNote(assets, "added");
 
@@ -2189,20 +2232,21 @@ export async function archiveBooking({
   userId?: string;
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: { id: true, status: true, activeSchedulerReference: true },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          title: "Not found",
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    const { data: booking, error: findErr } = await sbDb
+      .from("Booking")
+      .select("id, status, activeSchedulerReference")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (findErr || !booking) {
+      throw new ShelfError({
+        cause: findErr,
+        label,
+        title: "Not found",
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
 
     /** Booking can be archived only if it is COMPLETE */
     if (booking.status !== BookingStatus.COMPLETE) {
@@ -2213,10 +2257,13 @@ export async function archiveBooking({
       });
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: { status: BookingStatus.ARCHIVED },
-    });
+    const { data: updatedBooking, error: updateErr } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.ARCHIVED })
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateErr) throw updateErr;
 
     // Cancel any pending auto-archive job
     await cancelScheduler(booking);
@@ -2380,19 +2427,20 @@ export async function revertBookingToDraft({
   userId?: User["id"];
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: { id: true, status: true },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          message:
-            "Booking not found, are you sure the booking exists in current workspace?",
-        });
+    const { data: booking, error: findErr } = await sbDb
+      .from("Booking")
+      .select("id, status")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (findErr || !booking) {
+      throw new ShelfError({
+        cause: findErr,
+        label,
+        message:
+          "Booking not found, are you sure the booking exists in current workspace?",
       });
+    }
 
     /** User can only revert the booking to DRAFT from RESERVED */
     if (booking.status !== BookingStatus.RESERVED) {
@@ -2403,10 +2451,13 @@ export async function revertBookingToDraft({
       });
     }
 
-    const cancelledBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: { status: BookingStatus.DRAFT },
-    });
+    const { data: cancelledBooking, error: updateErr } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.DRAFT })
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateErr) throw updateErr;
 
     // Add activity log for booking revert to draft
     if (userId) {
@@ -2736,12 +2787,13 @@ export async function getBookingsFilterData({
   // Only fetch team member data if the user doesn't have permission to see all bookings
   if (!canSeeAllBookings) {
     // Get the team member for the current user
-    const teamMember = await db.teamMember.findFirst({
-      where: {
-        userId,
-        organizationId,
-      },
-    });
+    const { data: teamMember, error: tmError } = await sbDb
+      .from("TeamMember")
+      .select()
+      .eq("userId", userId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+    if (tmError) throw tmError;
 
     if (!teamMember) {
       throw new ShelfError({
@@ -3127,16 +3179,20 @@ export async function removeAssets({
       b.status === BookingStatus.ONGOING ||
       b.status === BookingStatus.OVERDUE
     ) {
-      await db.asset.updateMany({
-        where: { id: { in: assetIds }, organizationId },
-        data: { status: AssetStatus.AVAILABLE },
-      });
+      const { error: assetErr } = await sbDb
+        .from("Asset")
+        .update({ status: AssetStatus.AVAILABLE })
+        .in("id", assetIds)
+        .eq("organizationId", organizationId);
+      if (assetErr) throw assetErr;
 
       if (kitIds.length > 0) {
-        await db.kit.updateMany({
-          where: { id: { in: kitIds }, organizationId },
-          data: { status: KitStatus.AVAILABLE },
-        });
+        const { error: kitErr } = await sbDb
+          .from("Kit")
+          .update({ status: KitStatus.AVAILABLE })
+          .in("id", kitIds)
+          .eq("organizationId", organizationId);
+        if (kitErr) throw kitErr;
       }
     }
 
@@ -4147,18 +4203,49 @@ async function createNotesForScannedAssetsAndKits({
   userId: string;
 }) {
   // Fetch assets and kits in parallel for better performance
-  const [assets, kits] = await Promise.all([
-    db.asset.findMany({
-      where: { id: { in: assetIds }, organizationId },
-      select: { id: true, title: true },
-    }),
+  const [assetsResult, kitsResult, kitAssetsResult] = await Promise.all([
+    sbDb
+      .from("Asset")
+      .select("id, title")
+      .in("id", assetIds)
+      .eq("organizationId", organizationId),
     kitIds.length > 0
-      ? db.kit.findMany({
-          where: { id: { in: kitIds }, organizationId },
-          select: { id: true, name: true, assets: { select: { id: true } } },
-        })
-      : Promise.resolve([]),
+      ? sbDb
+          .from("Kit")
+          .select("id, name")
+          .in("id", kitIds)
+          .eq("organizationId", organizationId)
+      : Promise.resolve({
+          data: [] as { id: string; name: string }[],
+          error: null,
+        }),
+    kitIds.length > 0
+      ? sbDb
+          .from("Asset")
+          .select("id, kitId")
+          .in("kitId", kitIds)
+          .eq("organizationId", organizationId)
+      : Promise.resolve({
+          data: [] as { id: string; kitId: string | null }[],
+          error: null,
+        }),
   ]);
+
+  if (assetsResult.error) throw assetsResult.error;
+  if (kitsResult.error) throw kitsResult.error;
+  if (kitAssetsResult.error) throw kitAssetsResult.error;
+
+  const assets = assetsResult.data ?? [];
+  const kitsData = kitsResult.data ?? [];
+  const kitAssetsData = kitAssetsResult.data ?? [];
+
+  // Build kits with their assets for compatibility
+  const kits = kitsData.map((kit) => ({
+    ...kit,
+    assets: kitAssetsData
+      .filter((a) => a.kitId === kit.id)
+      .map((a) => ({ id: a.id })),
+  }));
 
   // Create a map of asset ID to kit name for assets that came from kits
   const assetIdToKitName = new Map<string, string>();
@@ -4376,16 +4463,14 @@ export async function addScannedAssetsToBooking({
 
 export async function getExistingBookingDetails(bookingId: string) {
   try {
-    const booking = await db.booking.findUniqueOrThrow({
-      where: { id: bookingId },
-      select: {
-        id: true,
-        status: true,
-        assets: { select: { id: true, title: true } },
-      },
-    });
+    const { data: booking, error: bookingErr } = await sbDb
+      .from("Booking")
+      .select("id, status")
+      .eq("id", bookingId)
+      .single();
+    if (bookingErr) throw bookingErr;
 
-    if (!["DRAFT", "RESERVED"].includes(booking.status!)) {
+    if (!["DRAFT", "RESERVED"].includes(booking.status)) {
       throw new ShelfError({
         cause: null,
         message: "Booking is not in Draft or Reserved status.",
@@ -4393,7 +4478,25 @@ export async function getExistingBookingDetails(bookingId: string) {
       });
     }
 
-    return booking;
+    // Fetch assets through join table
+    const { data: joins, error: joinErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", bookingId);
+    if (joinErr) throw joinErr;
+
+    const assetIds = (joins ?? []).map((j) => j.A);
+    let assets: { id: string; title: string }[] = [];
+    if (assetIds.length > 0) {
+      const { data: assetData, error: assetErr } = await sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", assetIds);
+      if (assetErr) throw assetErr;
+      assets = assetData ?? [];
+    }
+
+    return { ...booking, assets };
   } catch (cause: ShelfError | any) {
     throw new ShelfError({
       cause,
@@ -4410,10 +4513,11 @@ export async function getAvailableAssetsIdsForBooking(
   assetIds: Asset["id"][]
 ): Promise<string[]> {
   try {
-    const selectedAssets = await db.asset.findMany({
-      where: { id: { in: assetIds } },
-      select: { status: true, id: true, kitId: true },
-    });
+    const { data: selectedAssets, error: assetErr } = await sbDb
+      .from("Asset")
+      .select("status, id, kitId")
+      .in("id", assetIds);
+    if (assetErr) throw assetErr;
 
     if (selectedAssets.some((asset) => asset.kitId)) {
       throw new ShelfError({
@@ -4611,29 +4715,47 @@ export async function duplicateBooking({
  * Check if a booking has any partial check-ins
  */
 export async function hasPartialCheckins(bookingId: string): Promise<boolean> {
-  const count = await db.partialBookingCheckin.count({
-    where: { bookingId },
-  });
-  return count > 0;
+  const { count, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("id", { count: "exact", head: true })
+    .eq("bookingId", bookingId);
+  if (error) throw error;
+  return (count ?? 0) > 0;
 }
 
 /**
  * Get partial check-in history for a booking
  */
-export function getPartialCheckinHistory(bookingId: string) {
-  return db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    include: {
-      checkedInBy: {
-        select: {
-          firstName: true,
-          lastName: true,
-          email: true,
-        },
-      },
+export async function getPartialCheckinHistory(bookingId: string) {
+  const { data: checkins, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("*")
+    .eq("bookingId", bookingId)
+    .order("checkinTimestamp", { ascending: false });
+  if (error) throw error;
+
+  // Manually join user data
+  const userIds = [...new Set((checkins ?? []).map((c) => c.checkedInById))];
+  let userMap = new Map<
+    string,
+    { firstName: string | null; lastName: string | null; email: string }
+  >();
+  if (userIds.length > 0) {
+    const { data: users } = await sbDb
+      .from("User")
+      .select("id, firstName, lastName, email")
+      .in("id", userIds);
+    (users ?? []).forEach((u) => userMap.set(u.id, u));
+  }
+
+  return (checkins ?? []).map((c) => ({
+    ...c,
+    checkedInBy: userMap.get(c.checkedInById) ?? {
+      firstName: null,
+      lastName: null,
+      email: "",
     },
-    orderBy: { checkinTimestamp: "desc" },
-  });
+  }));
 }
 
 /**
@@ -4642,11 +4764,12 @@ export function getPartialCheckinHistory(bookingId: string) {
 export async function getTotalPartialCheckinCount(
   bookingId: string
 ): Promise<number> {
-  const result = await db.partialBookingCheckin.aggregate({
-    where: { bookingId },
-    _sum: { checkinCount: true },
-  });
-  return result._sum.checkinCount || 0;
+  const { data, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("checkinCount")
+    .eq("bookingId", bookingId);
+  if (error) throw error;
+  return (data ?? []).reduce((sum, row) => sum + row.checkinCount, 0);
 }
 
 /**
@@ -4655,13 +4778,14 @@ export async function getTotalPartialCheckinCount(
 export async function getPartiallyCheckedInAssetIds(
   bookingId: string
 ): Promise<string[]> {
-  const partialCheckins = await db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    select: { assetIds: true },
-  });
+  const { data: partialCheckins, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("assetIds")
+    .eq("bookingId", bookingId);
+  if (error) throw error;
 
   // Flatten all asset ID arrays and get unique values
-  const allAssetIds = partialCheckins.flatMap((pc) => pc.assetIds);
+  const allAssetIds = (partialCheckins ?? []).flatMap((pc) => pc.assetIds);
   return [...new Set(allAssetIds)];
 }
 
@@ -4670,45 +4794,59 @@ export async function getPartiallyCheckedInAssetIds(
  * Returns both the asset IDs and the detailed check-in data in one query
  */
 export async function getDetailedPartialCheckinData(bookingId: string) {
-  const partialCheckins = await db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    include: {
-      checkedInBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          profilePicture: true,
-        },
-      },
-    },
-    orderBy: { checkinTimestamp: "asc" },
-  });
+  const { data: rawCheckins, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("*")
+    .eq("bookingId", bookingId)
+    .order("checkinTimestamp", { ascending: true });
+  if (error) throw error;
+
+  const checkins = rawCheckins ?? [];
+
+  // Manually join user data
+  const userIds = [...new Set(checkins.map((c) => c.checkedInById))];
+  type UserInfo = {
+    id: string;
+    firstName: string | null;
+    lastName: string | null;
+    profilePicture: string | null;
+  };
+  let userMap = new Map<string, UserInfo>();
+  if (userIds.length > 0) {
+    const { data: users } = await sbDb
+      .from("User")
+      .select("id, firstName, lastName, profilePicture")
+      .in("id", userIds);
+    (users ?? []).forEach((u) => userMap.set(u.id, u));
+  }
+
+  const defaultUser: UserInfo = {
+    id: "",
+    firstName: null,
+    lastName: null,
+    profilePicture: null,
+  };
 
   // Create a record of asset ID to its check-in details
   const assetCheckinRecord: Record<
     string,
     {
-      checkinDate: Date;
-      checkedInBy: {
-        id: string;
-        firstName: string | null;
-        lastName: string | null;
-        profilePicture: string | null;
-      };
+      checkinDate: Date | string;
+      checkedInBy: UserInfo;
     }
   > = {};
 
   // Collect all unique asset IDs
   const checkedInAssetIds: string[] = [];
 
-  partialCheckins.forEach((checkin) => {
+  checkins.forEach((checkin) => {
+    const checkedInBy = userMap.get(checkin.checkedInById) ?? defaultUser;
     checkin.assetIds.forEach((assetId) => {
       // Only store the first (earliest) check-in for each asset
       if (!assetCheckinRecord[assetId]) {
         assetCheckinRecord[assetId] = {
           checkinDate: checkin.checkinTimestamp,
-          checkedInBy: checkin.checkedInBy,
+          checkedInBy,
         };
         checkedInAssetIds.push(assetId);
       }
@@ -4806,15 +4944,45 @@ export async function getOngoingBookingForAsset({
   organizationId: Asset["organizationId"];
 }) {
   try {
-    const booking = await db.booking.findFirst({
-      where: {
-        status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
-        organizationId,
-        assets: { some: { id: assetId } },
-        partialCheckins: { none: { assetIds: { has: assetId } } }, // Exclude bookings where this asset has been partially checked in
-      },
-    });
+    // Step 1: Find booking IDs linked to this asset
+    const { data: joins, error: joinErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("B")
+      .eq("A", assetId);
+    if (joinErr) throw joinErr;
 
+    const bookingIds = (joins ?? []).map((j) => j.B);
+    if (bookingIds.length === 0) return null;
+
+    // Step 2: Find ongoing/overdue bookings among those
+    const { data: bookings, error: bookingErr } = await sbDb
+      .from("Booking")
+      .select()
+      .in("id", bookingIds)
+      .eq("organizationId", organizationId)
+      .in("status", [BookingStatus.ONGOING, BookingStatus.OVERDUE])
+      .limit(10);
+    if (bookingErr) throw bookingErr;
+
+    if (!bookings || bookings.length === 0) return null;
+
+    // Step 3: Exclude bookings where this asset was partially checked in
+    const { data: partialCheckins, error: pcErr } = await sbDb
+      .from("PartialBookingCheckin")
+      .select("bookingId, assetIds")
+      .in(
+        "bookingId",
+        bookings.map((b) => b.id)
+      );
+    if (pcErr) throw pcErr;
+
+    const excludedBookingIds = new Set(
+      (partialCheckins ?? [])
+        .filter((pc) => pc.assetIds.includes(assetId))
+        .map((pc) => pc.bookingId)
+    );
+
+    const booking = bookings.find((b) => !excludedBookingIds.has(b.id)) ?? null;
     return booking;
   } catch (cause) {
     throw new ShelfError({

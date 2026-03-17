@@ -1,4 +1,5 @@
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
 import type { BookingForEmail } from "~/emails/types";
@@ -295,10 +296,11 @@ export async function sendBookingUpdatedEmail({
     // so we use the email directly)
     if (oldCustodianEmail) {
       // Look up the old custodian's user to check if they are the editor
-      const oldCustodianUser = await db.user.findUnique({
-        where: { email: oldCustodianEmail },
-        select: { id: true },
-      });
+      const { data: oldCustodianUser } = await sbDb
+        .from("User")
+        .select("id")
+        .eq("email", oldCustodianEmail)
+        .maybeSingle();
 
       if (!oldCustodianUser || oldCustodianUser.id !== userId) {
         sendEmail({
