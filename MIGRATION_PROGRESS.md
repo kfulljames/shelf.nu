@@ -11,7 +11,7 @@
 | Area                         | Total `db.` calls | Converted | Remaining | % Done |
 | ---------------------------- | ----------------- | --------- | --------- | ------ |
 | **Modules** (`app/modules/`) | ~245              | ~220      | 25        | 90%    |
-| **Routes** (`app/routes/`)   | ~260              | ~260      | 0         | 100%   |
+| **Routes** (`app/routes/`)   | ~260              | ~264      | 0         | 100%   |
 | **Utils** (`app/utils/`)     | ~33               | ~31       | 2         | 94%    |
 | **Grand Total**              | ~538              | ~514      | ~24       | 96%    |
 
@@ -43,6 +43,7 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 | (new)     | Relation filters, \_count, array ops, role checks          | 6 files   |
 | (new)     | Deep includes, relation writes, transactions, SSO          | 12 files  |
 | (new)     | Module bulk ops + location service select-all migrations   | 6 files   |
+| (new)     | Route cleanup: custody, palette, audit details, raw SQL    | 5 files   |
 
 ### Module Services — Completed Conversions
 
@@ -167,15 +168,13 @@ explaining why they cannot be migrated to Supabase:
   `assets.some.bookings.some` multi-level existence filters
 - `kit/service.server.ts` — Dynamic generic includes, `assets: { none: {} }`
 
-#### Route-level remaining Prisma calls (4 files — all KEPT AS PRISMA)
+#### Route-level remaining Prisma calls (3 files — all KEPT AS PRISMA)
 
-- `api+/user.change-current-organization.ts` — `$executeRaw` to avoid
-  bumping User.updatedAt timestamp
 - `api+/get-scanned-item.$qrId.ts` — Dynamic Prisma include objects
-- `api+/command-palette.search.ts` — Nested `some` filters on
-  assignments, custodies, kitCustodies relations
 - `api+/reminders.team-members.ts` — Nested WHERE with
   `user: { isNot: null }`, `userOrganizations.some`, `roles.hasSome`
+- `bookings.$bookingId.overview.manage-kits.tsx` — Deeply nested
+  booking findUniqueOrThrow with asset includes
 
 ---
 
