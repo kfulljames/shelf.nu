@@ -2,7 +2,7 @@
 
 **Branch:** `claude/review-migration-plan-wYjw6`
 **Last Updated:** 2026-03-18
-**Status:** Phase 5 Complete — Typecheck ✅ | Lint ✅
+**Status:** ~88% complete — ready to merge, remaining work tracked below
 
 ---
 
@@ -16,221 +16,213 @@
 | **Grand Total**              | ~538              | ~465      | ~73       | 86%    |
 
 Test files (`.test.ts`) contain 32 additional `db.` references
-(mock setups) that will be cleaned up when Prisma is fully removed.
+(mock setups) to clean up when Prisma is fully removed.
 
 ---
 
-## Completed Phases
+## Completed Work (8 commits)
 
-### Phase 1 — Initial Module Migration (PR #1, merged)
+### Infrastructure Created
 
-- Migrated 26 module files across 16 modules
-- Created `sbDb` Supabase client in `~/database/supabase.server`
-- Established type patterns (date casts, enum casts, relation workarounds)
+- **`sbDb` client** — Supabase JS client at `app/database/supabase.server.ts`
+- **`packages/database/src/types.ts`** — Shared TypeScript types (+195 lines)
+- **21 PostgreSQL RPC functions** via migration SQL (+711 lines)
 
-### Phase 2 — Audit, Invite, User Modules (PR #2, merged)
+### Commit History
 
-- 65 files changed, 4,631 insertions, 3,619 deletions
-- Fixed all type errors across consuming route/component files
-- Fully migrated: audit, invite, user modules
+| Commit    | Description                                                | Scope     |
+| --------- | ---------------------------------------------------------- | --------- |
+| `9138586` | Migrated all 21 `db.$transaction` → Postgres RPC functions | 5 modules |
+| `41eb5e1` | Converted EASY Prisma calls to Supabase                    | 6 modules |
+| `f58ec54` | Converted MEDIUM Prisma calls to Supabase                  | 5 modules |
+| `b1cfaa3` | Converted HARD Prisma calls to Supabase                    | 5 modules |
+| `9ced224` | Migrated route and utility files                           | 32 files  |
+| `b6acabb` | Migrated 61 route and component files                      | 61 files  |
+| `7a56bb2` | Converted final simple Prisma calls                        | 4 files   |
 
-### Phase 3 — Remaining Module Services (current branch)
+### Module Services — Completed Conversions
 
-Four commits completing the hardest module conversions:
+| Module                           | Calls Converted   | Status             |
+| -------------------------------- | ----------------- | ------------------ |
+| `organization/service.server.ts` | 15/15             | **Fully migrated** |
+| `location/service.server.ts`     | 28/33             | 5 remaining        |
+| `kit/service.server.ts`          | 33/40             | 7 remaining        |
+| `asset/service.server.ts`        | 51/58             | 7 remaining        |
+| `booking/service.server.ts`      | 51/58             | 7 remaining        |
+| `user/service.server.ts`         | ~all simple calls | Fully migrated     |
+| `audit/service.server.ts`        | ~all simple calls | Fully migrated     |
+| `invite/service.server.ts`       | ~all simple calls | Fully migrated     |
+| `qr/service.server.ts`           | ~all simple calls | Fully migrated     |
+| `update/service.server.ts`       | ~all simple calls | Fully migrated     |
 
-| Commit    | Description                                                       |
-| --------- | ----------------------------------------------------------------- |
-| `9138586` | Migrated all 21 `db.$transaction` calls to Postgres RPC functions |
-| `41eb5e1` | Converted EASY Prisma calls across 6 modules                      |
-| `f58ec54` | Converted MEDIUM Prisma calls across 5 modules                    |
-| `b1cfaa3` | Converted HARD Prisma calls across 5 modules                      |
+### Routes — Completed Conversions
 
-**Phase 3 Results by Module:**
+- **API routes** (`api+/`): ~25 files converted
+- **Layout routes** (`_layout+/`): ~42 files converted
+- **QR routes** (`qr+/`): 5 files converted
+- **Auth routes** (`_auth+/`): 3 files converted
+- **Utilities**: `csv.server.ts`, `dashboard.server.ts`, `sso.server.ts`,
+  `stripe.server.ts`, `subscription.server.ts`, `permission.validator.server.ts`
 
-| Module                         | Original calls | Converted | Remaining | Notes                                 |
-| ------------------------------ | -------------- | --------- | --------- | ------------------------------------- |
-| organization/service.server.ts | 15             | 15        | 0         | **Fully migrated**                    |
-| location/service.server.ts     | 33             | 28        | 5         | `$queryRaw`, dynamic SQL              |
-| kit/service.server.ts          | 40             | 33        | 7         | Generic `Prisma.KitInclude` types     |
-| asset/service.server.ts        | 58             | 51        | 7         | Complex nested creates, `$queryRaw`   |
-| booking/service.server.ts      | 58             | 51        | 7         | Booking conflict conditions, bulk ops |
+### Transactions → RPC Functions (all 21 migrated)
 
-**Also has remaining calls:**
-
-- `asset/bulk-operations-helper.server.ts`: 2 calls
-- `location/bulk-select.server.ts`: 2 calls
-
-### Phase 4 — Route + Utility Files (current branch)
-
-Single commit (`9ced224`) converting 32 files:
-
-| Area               | Files | Calls converted |
-| ------------------ | ----- | --------------- |
-| Utility files      | 8     | ~26             |
-| API route files    | 20    | ~55             |
-| Layout route files | 4     | ~17             |
-
-**Key conversions:**
-
-- csv.server.ts: All note export functions rewritten with
-  direct Supabase queries (removed generic NoteFetcher)
-- dashboard.server.ts: All 5 checklist count queries
-- sso.server.ts: User lookups and org SSO check
-- stripe.server.ts: User customerId lookups
-- command-palette.search.ts: Full rewrite for assets,
-  kits, bookings, locations search
-- user.entity-counts.ts: All 9 entity count queries
-- 4 activity CSV routes: Asset/booking/audit/location
-  name lookups
-
-### Phase 5 — Remaining Layout + Auth + QR Routes (current branch)
-
-Single commit (`b6acabb`) converting 61 files:
-
-| Area                | Files | Calls converted |
-| ------------------- | ----- | --------------- |
-| Layout route files  | 42    | ~150            |
-| QR route files      | 5     | ~12             |
-| Auth route files    | 2     | ~4              |
-| Welcome route files | 1     | ~2              |
-| API route files     | 9     | ~18             |
-| Component files     | 2     | ~4              |
-
-**Key conversions:**
-
-- home.tsx: 13→8 remaining (announcements, dashboard queries)
-- bookings overview + manage-assets/kits: booking queries
-- admin-dashboard files: user/org/QR admin queries
-- settings files: org, team, NRM queries
-- audits files: audit session, scan, note queries
-- kits/locations files: custody, scan, note queries
-- scanner.tsx: scanned item lookups
-- QR routes: claim, link, contact-owner queries
-- auth routes: invite acceptance, password reset
-- healthcheck: simple user count query
+| RPC Function             | Module   |
+| ------------------------ | -------- |
+| `assign_kit_custody`     | kit      |
+| `release_kit_custody`    | kit      |
+| `bulk_release_custody`   | asset    |
+| `manage_kit_assets`      | kit      |
+| `manage_location_assets` | location |
+| `manage_location_kits`   | location |
+| `manage_booking_assets`  | booking  |
+| `manage_booking_kits`    | booking  |
+| `checkin_booking_assets` | booking  |
+| `start_audit`            | audit    |
+| `process_audit_scan`     | audit    |
+| `delete_kit`             | kit      |
+| + ~9 more                | various  |
 
 ---
 
-## Remaining Work (~73 production calls across 27 files)
+## Outstanding Work (~29 distinct operations, 16 files)
 
-### Module Files (30 calls across 6 files)
+Every remaining call is tagged with `// KEPT AS PRISMA` explaining
+the specific Prisma feature that prevents simple migration.
 
-| File                                  | Calls | Reason kept                               |
-| ------------------------------------- | ----- | ----------------------------------------- |
-| `booking/service.server.ts`           | 7     | Conflict conditions, nested `some`/`none` |
-| `asset/service.server.ts`             | 7     | Complex nested creates, `$queryRaw`       |
-| `kit/service.server.ts`               | 7     | Generic `Prisma.KitInclude` types         |
-| `location/service.server.ts`          | 5     | `$queryRaw`, dynamic SQL                  |
-| `asset/bulk-operations-helper.server` | 2     | Dynamic `Prisma.WhereInput`               |
-| `location/bulk-select.server.ts`      | 2     | Dynamic `Prisma.WhereInput`               |
+### 1. Aggregation & GroupBy (4 calls)
 
-### Route Files (38 calls across 19 files)
+**File:** `app/routes/_layout+/home.tsx`
 
-| File                                             | Calls | Reason kept                           |
-| ------------------------------------------------ | ----- | ------------------------------------- |
-| `_layout+/home.tsx`                              | 8     | Complex includes, nested relations    |
-| `_layout+/bookings.$bookingId.overview.tsx`      | 6     | Booking with nested assets/kits       |
-| `_layout+/admin-dashboard+/move-location-images` | 3     | Batch image processing                |
-| `_layout+/bookings.overview.manage-assets`       | 2     | Dynamic where conditions              |
-| `_layout+/bookings.overview.manage-kits`         | 2     | Dynamic where conditions              |
-| `_layout+/kits.$kitId.assets.assign-custody`     | 2     | Complex kit queries                   |
-| `_layout+/kits.$kitId.tsx`                       | 2     | Kit with dynamic includes             |
-| `_layout+/audits.$auditId.scan.tsx`              | 2     | Audit asset details                   |
-| `_layout+/audits.scan.$auditAssetId.details`     | 2     | Audit scan details                    |
-| `api+/command-palette.search.ts`                 | 2     | Dynamic search with `some`/`contains` |
-| `api+/get-scanned-item.$qrId.ts`                 | 2     | Complex scanned item resolution       |
-| 8 other route files                              | 1 ea  | Various kept-as-Prisma patterns       |
+| Call                                   | Feature                         | Suggested Approach       |
+| -------------------------------------- | ------------------------------- | ------------------------ |
+| `db.asset.aggregate()`                 | `_count._all`, `_sum.valuation` | RPC function             |
+| `db.asset.groupBy({ by: ["status"] })` | `groupBy` + `_count`            | RPC function             |
+| `db.$queryRaw` (monthly growth)        | Raw SQL `date_trunc`            | Already SQL, wrap in RPC |
 
-### Utility Files (5 calls across 2 files)
+### 2. `_count` in Select & OrderBy (7 calls)
 
-| File                    | Calls | Reason kept                |
-| ----------------------- | ----- | -------------------------- |
-| `utils/sso.server.ts`   | 3     | `$queryRaw` on auth schema |
-| `utils/roles.server.ts` | 2     | Nested M2M role checks     |
+| File                                  | Feature                                             |
+| ------------------------------------- | --------------------------------------------------- |
+| `home.tsx`                            | `orderBy: { custodies: { _count: "desc" } }`        |
+| `home.tsx`                            | `orderBy: { assets: { _count: "desc" } }`           |
+| `bookings.$bookingId.overview.tsx`    | `_count: { select: { assets: true } }` on kits      |
+| `bookings.$bookingId.overview.tsx`    | `db.asset.count()` with nested `some`               |
+| `account-details.workspace.index.tsx` | `_count` on nested org (assets, members, locations) |
+
+### 3. Nested `some`/`every` Relation Filters (5 calls)
+
+| File                                               | Filter                                                |
+| -------------------------------------------------- | ----------------------------------------------------- |
+| `bookings.$bookingId.overview.tsx`                 | `bookings: { some: { ... } }` with OR date conditions |
+| `bookings.overview.manage-assets.tsx`              | `bookings: { some: { id: bookingId } }`               |
+| `bookings.overview.checkin-assets.tsx`             | `bookings: { some: { id: booking.id } }`              |
+| `admin-dashboard+/org.$organizationId.members.tsx` | `userOrganizations: { some: { organizationId } }`     |
+| `utils/roles.server.ts` (x2)                       | Nested many-to-many role checks                       |
+
+### 4. Deep Nested Includes — 3+ levels (6 calls)
+
+| File                                                | Depth                                            |
+| --------------------------------------------------- | ------------------------------------------------ |
+| `account-details.workspace.index.tsx`               | user → userOrgs → org → owner/\_count            |
+| `settings.general.tsx`                              | user → userOrgs → org → ssoDetails/\_count/owner |
+| `admin-dashboard+/org.$organizationId.tsx`          | org → qrCodes → asset + owner/sso/hours          |
+| `admin-dashboard+/org.$organizationId.qr-codes.tsx` | org → qrCodes → asset/kit + owner                |
+| `admin-dashboard+/$userId.tsx`                      | 3+ levels + customTierLimit upsert               |
+| `utils/sso.server.ts`                               | user → userOrgs → org → ssoDetails               |
+
+### 5. Relation Writes — connect/disconnect/upsert (4 calls)
+
+| File                                              | Operation                                         |
+| ------------------------------------------------- | ------------------------------------------------- |
+| `kits.$kitId.assets.assign-custody.tsx`           | `custody: { create: { custodian: { connect } } }` |
+| `admin-dashboard+/move-location-images.tsx`       | `image: { disconnect: true }`                     |
+| `account-details.workspace.$workspaceId.edit.tsx` | `ssoDetails: { upsert: { create, update } }`      |
+| `kits.$kitId.tsx`                                 | `custody: { disconnect, delete }`                 |
+
+### 6. Dynamic Where Inputs & Model Access (3 calls)
+
+| File                                             | Feature                                                    |
+| ------------------------------------------------ | ---------------------------------------------------------- |
+| `bookings.overview.manage-assets.tsx`            | `getAssetsWhereInput()` → dynamic `Prisma.AssetWhereInput` |
+| `api+/assets.get-assets-for-bulk-qr-download.ts` | Same `getAssetsWhereInput` pattern                         |
+| `api+/model-filters.ts`                          | Dynamic model access `db[name].dynamicFindMany()`          |
+
+### 7. Array Field Filters — isEmpty/has (2 calls)
+
+| File                               | Filter                                                         |
+| ---------------------------------- | -------------------------------------------------------------- |
+| `bookings._index.tsx`              | `tag.useFor: { isEmpty: true }` / `{ has: TagUseFor.BOOKING }` |
+| `bookings.$bookingId.overview.tsx` | Same pattern                                                   |
+
+### 8. Unmigrated Transaction (1 call)
+
+| File                       | Details                                                                 |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `audits.$auditId.scan.tsx` | Multi-step audit scan removal (find → update → delete → count → update) |
+
+### 9. Raw SQL on Auth Schema (2 calls)
+
+| File                       | Details                                         |
+| -------------------------- | ----------------------------------------------- |
+| `utils/sso.server.ts` (x2) | `$queryRaw` on `auth.users` / `auth.identities` |
 
 ---
 
-## Categories of Remaining Calls
+## Recommended Follow-Up PRs
 
-All remaining 73 calls are kept as Prisma due to one of these:
+### PR 1: Dashboard Aggregation RPCs
 
-1. **`$queryRaw` / `$executeRaw`** (~10 calls) — Direct SQL on
-   auth schema or dynamic SQL assembly. Would need Supabase
-   `rpc()` or raw `postgres.js` client.
+**Scope:** Categories 1 + 2 (11 calls)
+**Approach:** Create 3-4 RPC functions for dashboard stats
+(`aggregate`, `groupBy`, monthly growth, `_count` orderBy).
 
-2. **Dynamic `Prisma.WhereInput` builders** (~12 calls) —
-   `getAssetsWhereInput`, `getKitsWhereInput`,
-   `getBookingWhereInput` helpers that construct where clauses
-   from search params. Central to the bulk-ops pattern.
+### PR 2: Relation Filters → Views or RPCs
 
-3. **Nested `some`/`none`/`every` operators** (~15 calls) —
-   Prisma-specific relation filters (e.g., booking conflict
-   detection with nested date range checks). No Supabase
-   PostgREST equivalent.
+**Scope:** Category 3 (5 calls)
+**Approach:** Create PostgreSQL views or RPCs for
+`some`/`every` patterns. Most are booking-asset joins.
 
-4. **Generic type parameters** (~8 calls) — Functions accepting
-   `T extends Prisma.KitInclude` to allow callers to customize
-   included relations.
+### PR 3: Deep Includes → Targeted Queries
 
-5. **Complex nested creates** (~8 calls) — Atomic creation of
-   entity + related records (asset + QR + custody + tags).
+**Scope:** Category 4 (6 calls)
+**Approach:** Replace deep includes with multiple focused
+Supabase queries joined in app code, or create flattening views.
 
-6. **Complex includes with 3+ nesting levels** (~20 calls) —
-   Booking→assets→custody→teamMember chains that Supabase
-   typed client can't resolve.
+### PR 4: Relation Writes + Remaining Transaction → RPCs
+
+**Scope:** Categories 5 + 8 (5 calls)
+**Approach:** Create RPC functions for connect/disconnect/upsert
+and the audit scan transaction.
+
+### PR 5: Dynamic Where & Array Filters
+
+**Scope:** Categories 6 + 7 (5 calls)
+**Approach:** Refactor `getAssetsWhereInput` to build Supabase
+filter chains. Replace `isEmpty`/`has` with PostgREST array ops.
+
+### PR 6: Auth Schema Raw SQL
+
+**Scope:** Category 9 (2 calls)
+**Approach:** Use Supabase Admin API or security-definer RPCs.
 
 ---
 
-## Migration Strategy for Remaining Work
-
-### Approach Options
-
-1. **RPC functions** — Write Postgres functions for the complex
-   queries and call via `sbDb.rpc()`. Best for `$queryRaw` and
-   complex nested creates.
-
-2. **View-based approach** — Create Postgres views that flatten
-   nested joins, then query views via Supabase. Best for deep
-   includes.
-
-3. **Accept Prisma for edge cases** — Keep ~20-30 genuinely
-   complex calls in Prisma while removing Prisma from simpler
-   paths. This delays full removal but avoids rewriting core
-   business logic.
-
-### Final Cleanup (after all calls migrated)
+## Final Cleanup (after all calls migrated)
 
 - Remove `~/database/db.server` (Prisma client wrapper)
 - Remove Prisma as a runtime dependency
 - Remove `@prisma/client` from `package.json`
 - Update vite config to remove Prisma browser alias
-- Update test files to mock `sbDb` instead of `db`
+- Update 32 test file mocks from `db` to `sbDb`
 
 ---
 
 ## Known Type Patterns / Gotchas
 
-### Supabase SelectQueryError for relations
-
-Supabase's typed client doesn't resolve FK relations in `.select()`.
-Fix with `as unknown as Type[]` casts.
-
-### Dynamic select strings lose types
-
-If `.select()` argument is a variable (not literal), Supabase returns
-`{}`. Use string literals or explicit return types.
-
-### Dates return as strings
-
-Supabase returns dates as ISO strings, not `Date` objects.
-Cast with `new Date(field as string)`.
-
-### Enum types return as strings
-
-Prisma enums come back as plain `string` from Supabase.
-Cast with `as EnumType`.
-
-### Join tables for many-to-many
-
-Prisma implicit M2M tables (e.g., `_AssetToBooking`, `_BookingToTag`)
-must be queried explicitly via `sbDb.from("_JoinTable")`.
+| Issue                                        | Fix                                            |
+| -------------------------------------------- | ---------------------------------------------- |
+| Supabase `SelectQueryError` for FK relations | Cast with `as unknown as Type[]`               |
+| Dynamic `.select()` string loses types       | Use string literals or explicit return types   |
+| Dates return as ISO strings, not `Date`      | Cast with `new Date(field as string)`          |
+| Enum types return as plain `string`          | Cast with `as EnumType`                        |
+| Prisma implicit M2M join tables              | Query explicitly via `sbDb.from("_JoinTable")` |
