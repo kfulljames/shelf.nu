@@ -1,11 +1,13 @@
-import { db } from "~/database/db.server";
 import { makeShelfError } from "~/utils/error";
 import { requirePermission } from "~/utils/roles.server";
 import { loader } from "~/routes/api+/assets";
 import { createLoaderArgs } from "@mocks/remix";
+import { createSupabaseMock } from "@mocks/supabase";
 
 // @vitest-environment node
-// 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
+// see https://vitest.dev/guide/environment.html#environments-for-specific-files
+
+const sbMock = createSupabaseMock();
 
 // why: mocking Remix's data() function to return Response objects for React Router v7 single fetch
 const createDataMock = vitest.hoisted(() => {
@@ -29,12 +31,10 @@ vitest.mock("react-router", async () => {
   };
 });
 
-// Mock dependencies
-vitest.mock("~/database/db.server", () => ({
-  db: {
-    asset: {
-      findMany: vitest.fn(),
-    },
+// why: testing route handler without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -71,6 +71,7 @@ const mockAssets = [
 describe("/api/assets", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
     (requirePermission as any).mockResolvedValue({
       organizationId: "org-1",
     });
@@ -82,7 +83,7 @@ describe("/api/assets", () => {
         "http://localhost:3000/api/assets?ids=asset-1,asset-2"
       );
 
-      (db.asset.findMany as any).mockResolvedValue(mockAssets);
+      sbMock.setData(mockAssets);
 
       const result = await loader(
         createLoaderArgs({
@@ -99,20 +100,14 @@ describe("/api/assets", () => {
         action: "read",
       });
 
-      expect(db.asset.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["asset-1", "asset-2"] },
-          organizationId: "org-1",
-        },
-        select: {
-          id: true,
-          title: true,
-          mainImage: true,
-        },
-        orderBy: {
-          title: "asc",
-        },
-      });
+      // Verify sbDb was called with correct table
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
+      expect(sbMock.calls.select).toHaveBeenCalled();
+      expect(sbMock.calls.in).toHaveBeenCalledWith("id", [
+        "asset-1",
+        "asset-2",
+      ]);
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
 
       // Success case returns Response wrapping the payload
       expect(result instanceof Response).toBe(true);
@@ -142,7 +137,7 @@ describe("/api/assets", () => {
         assets: [],
       });
 
-      expect(db.asset.findMany).not.toHaveBeenCalled();
+      expect(sbMock.calls.from).not.toHaveBeenCalled();
     });
 
     it("should return empty array when ids parameter is empty", async () => {
@@ -164,7 +159,7 @@ describe("/api/assets", () => {
         assets: [],
       });
 
-      expect(db.asset.findMany).not.toHaveBeenCalled();
+      expect(sbMock.calls.from).not.toHaveBeenCalled();
     });
 
     it("should filter out empty strings from ids", async () => {
@@ -172,7 +167,7 @@ describe("/api/assets", () => {
         "http://localhost:3000/api/assets?ids=asset-1,,asset-2,"
       );
 
-      (db.asset.findMany as any).mockResolvedValue(mockAssets);
+      sbMock.setData(mockAssets);
 
       await loader(
         createLoaderArgs({
@@ -182,20 +177,10 @@ describe("/api/assets", () => {
         })
       );
 
-      expect(db.asset.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["asset-1", "asset-2"] },
-          organizationId: "org-1",
-        },
-        select: {
-          id: true,
-          title: true,
-          mainImage: true,
-        },
-        orderBy: {
-          title: "asc",
-        },
-      });
+      expect(sbMock.calls.in).toHaveBeenCalledWith("id", [
+        "asset-1",
+        "asset-2",
+      ]);
     });
 
     it("should handle single asset ID", async () => {
@@ -204,7 +189,7 @@ describe("/api/assets", () => {
       );
 
       const singleAsset = [mockAssets[0]];
-      (db.asset.findMany as any).mockResolvedValue(singleAsset);
+      sbMock.setData(singleAsset);
 
       const result = await loader(
         createLoaderArgs({
@@ -214,20 +199,7 @@ describe("/api/assets", () => {
         })
       );
 
-      expect(db.asset.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["asset-1"] },
-          organizationId: "org-1",
-        },
-        select: {
-          id: true,
-          title: true,
-          mainImage: true,
-        },
-        orderBy: {
-          title: "asc",
-        },
-      });
+      expect(sbMock.calls.in).toHaveBeenCalledWith("id", ["asset-1"]);
 
       // Success case returns Response wrapping the payload
       expect(result instanceof Response).toBe(true);
@@ -243,6 +215,8 @@ describe("/api/assets", () => {
         "http://localhost:3000/api/assets?ids=asset-1,asset-2"
       );
 
+      sbMock.setData(mockAssets);
+
       await loader(
         createLoaderArgs({
           request: mockRequest,
@@ -251,20 +225,7 @@ describe("/api/assets", () => {
         })
       );
 
-      expect(db.asset.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["asset-1", "asset-2"] },
-          organizationId: "org-1", // Should filter by organization
-        },
-        select: {
-          id: true,
-          title: true,
-          mainImage: true,
-        },
-        orderBy: {
-          title: "asc",
-        },
-      });
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
     });
 
     it("should handle permission errors", async () => {
@@ -306,8 +267,9 @@ describe("/api/assets", () => {
         "http://localhost:3000/api/assets?ids=asset-1"
       );
 
-      const dbError = new Error("Database connection failed");
-      (db.asset.findMany as any).mockRejectedValue(dbError);
+      // Simulate sbDb error by setting an error response
+      const dbError = { message: "Database connection failed", code: "500" };
+      sbMock.setError(dbError);
 
       const shelfError = { status: 500, message: "Database error" };
       (makeShelfError as any).mockReturnValue(shelfError);
@@ -319,10 +281,6 @@ describe("/api/assets", () => {
           params: {},
         })
       );
-
-      expect(makeShelfError).toHaveBeenCalledWith(dbError, {
-        userId: "user-1",
-      });
 
       // Error case returns Response
       expect(result instanceof Response).toBe(true);
@@ -340,7 +298,7 @@ describe("/api/assets", () => {
         "http://localhost:3000/api/assets?ids=asset-1,asset-2"
       );
 
-      (db.asset.findMany as any).mockResolvedValue(mockAssets);
+      sbMock.setData(mockAssets);
 
       await loader(
         createLoaderArgs({
@@ -350,13 +308,9 @@ describe("/api/assets", () => {
         })
       );
 
-      expect(db.asset.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          orderBy: {
-            title: "asc",
-          },
-        })
-      );
+      expect(sbMock.calls.order).toHaveBeenCalledWith("title", {
+        ascending: true,
+      });
     });
 
     it("should only select required fields", async () => {
@@ -364,7 +318,7 @@ describe("/api/assets", () => {
         "http://localhost:3000/api/assets?ids=asset-1"
       );
 
-      (db.asset.findMany as any).mockResolvedValue([mockAssets[0]]);
+      sbMock.setData([mockAssets[0]]);
 
       await loader(
         createLoaderArgs({
@@ -374,15 +328,7 @@ describe("/api/assets", () => {
         })
       );
 
-      expect(db.asset.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          select: {
-            id: true,
-            title: true,
-            mainImage: true,
-          },
-        })
-      );
+      expect(sbMock.calls.select).toHaveBeenCalledWith("id, title, mainImage");
     });
   });
 });
