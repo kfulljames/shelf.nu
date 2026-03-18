@@ -9,6 +9,11 @@ vi.mock("~/database/supabase.server", () => ({
   },
 }));
 
+// why: service.server.ts imports db for other functions; mock to prevent Prisma connection attempts
+vi.mock("~/database/db.server", () => ({
+  db: {},
+}));
+
 const { getLocationTotalValuation } = await import("./service.server");
 
 describe("getLocationTotalValuation", () => {

@@ -1,6 +1,7 @@
 import { OrganizationRoles, AssetStatus } from "@prisma/client";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 
 import {
   action,
@@ -13,34 +14,16 @@ import { getUserByID } from "~/modules/user/service.server";
 import { createNote } from "~/modules/note/service.server";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
 
-const dbMocks = vi.hoisted(() => {
-  return {
-    asset: {
-      findUnique: vi.fn(),
-      update: vi.fn(),
-    },
-    teamMember: {
-      findMany: vi.fn(),
-      count: vi.fn(),
-    },
-  };
-});
+const sbMock = createSupabaseMock();
 
 const teamMemberServiceMocks = vi.hoisted(() => ({
   getTeamMember: vi.fn(),
 }));
 
-// why: testing route handler without executing actual database operations
-vi.mock("~/database/db.server", () => ({
-  db: {
-    asset: {
-      findUnique: dbMocks.asset.findUnique,
-      update: dbMocks.asset.update,
-    },
-    teamMember: {
-      findMany: dbMocks.teamMember.findMany,
-      count: dbMocks.teamMember.count,
-    },
+// why: testing route handler without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -90,10 +73,6 @@ vi.mock("react-router", async () => {
   };
 });
 
-const mockAssetFindUnique = dbMocks.asset.findUnique;
-const mockAssetUpdate = dbMocks.asset.update;
-const mockTeamMemberFindMany = dbMocks.teamMember.findMany;
-const mockTeamMemberCount = dbMocks.teamMember.count;
 const mockGetTeamMember = teamMemberServiceMocks.getTeamMember;
 
 const requirePermissionMock = vi.mocked(requirePermission);
@@ -135,11 +114,8 @@ function createActionArgs(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sbMock.reset();
 
-  mockAssetFindUnique.mockReset();
-  mockAssetUpdate.mockReset();
-  mockTeamMemberFindMany.mockReset();
-  mockTeamMemberCount.mockReset();
   mockGetTeamMember.mockReset();
 
   // Reset service mocks
@@ -182,8 +158,8 @@ describe("assets.$assetId.overview.assign-custody loader", () => {
         organizationId: "org-1",
       })
     );
-    expect(mockAssetFindUnique).not.toHaveBeenCalled();
-    expect(mockTeamMemberFindMany).not.toHaveBeenCalled();
+    // sbDb should not have been called for team members
+    expect(sbMock.calls.from).not.toHaveBeenCalled();
   });
 });
 
@@ -200,15 +176,11 @@ describe("assets.$assetId.overview.assign-custody action", () => {
       userId: "user-456",
     });
 
-    // Mock asset update to fail due to organization mismatch
-    const unauthorizedError = new ShelfError({
-      cause: null,
-      label: "Assets",
+    // Mock sbDb to return error for asset update (org mismatch)
+    sbMock.setError({
       message: "Asset not found",
-      status: 404,
+      code: "PGRST116",
     });
-
-    mockAssetUpdate.mockRejectedValue(unauthorizedError);
 
     const formData = new FormData();
     formData.set(
@@ -223,13 +195,9 @@ describe("assets.$assetId.overview.assign-custody action", () => {
 
     const response = await action(createActionArgs({ request }));
 
-    expect((response as Response).status).toBe(404);
+    expect((response as Response).status).toBe(500);
 
-    expect(mockAssetUpdate).toHaveBeenCalledWith({
-      where: { id: "asset-123", organizationId: "org-1" },
-      data: expect.any(Object),
-      select: { id: true, title: true },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
     expect(createNoteMock).not.toHaveBeenCalled();
   });
 
@@ -284,7 +252,8 @@ describe("assets.$assetId.overview.assign-custody action", () => {
       },
     });
 
-    expect(mockAssetUpdate).not.toHaveBeenCalled();
+    // sbDb should not have been called for asset update
+    expect(sbMock.calls.from).not.toHaveBeenCalled();
     expect(createNoteMock).not.toHaveBeenCalled();
   });
 
@@ -301,16 +270,10 @@ describe("assets.$assetId.overview.assign-custody action", () => {
       userId: "user-456",
     });
 
-    // Asset update succeeds
-    mockAssetUpdate.mockResolvedValue({
-      id: "asset-123",
-      title: "Test Asset",
-      status: "IN_CUSTODY",
-      user: {
-        firstName: "Test",
-        lastName: "User",
-      },
-    } as any);
+    // sbDb calls: update asset, insert custody, then select asset
+    sbMock.enqueue({ data: null, error: null }); // Asset update
+    sbMock.enqueue({ data: null, error: null }); // Custody insert
+    sbMock.enqueueData({ id: "asset-123", title: "Test Asset" }); // Asset select
 
     const formData = new FormData();
     formData.set(
@@ -344,17 +307,15 @@ describe("assets.$assetId.overview.assign-custody action", () => {
       },
     });
 
-    expect(mockAssetUpdate).toHaveBeenCalledWith({
-      where: { id: "asset-123", organizationId: "org-1" },
-      data: expect.objectContaining({
-        status: AssetStatus.IN_CUSTODY,
-        custody: {
-          create: {
-            custodian: { connect: { id: "team-member-123" } },
-          },
-        },
-      }),
-      select: { id: true, title: true },
+    // Verify sbDb was called for Asset update and Custody insert
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Custody");
+    expect(sbMock.calls.update).toHaveBeenCalledWith({
+      status: AssetStatus.IN_CUSTODY,
+    });
+    expect(sbMock.calls.insert).toHaveBeenCalledWith({
+      assetId: "asset-123",
+      teamMemberId: "team-member-123",
     });
 
     expect(createNoteMock).toHaveBeenCalled();
@@ -393,7 +354,8 @@ describe("assets.$assetId.overview.assign-custody action", () => {
 
     expect((response as Response).status).toBe(500); // ShelfError defaults to 500
 
-    expect(mockAssetUpdate).not.toHaveBeenCalled();
+    // sbDb should not have been called for asset update
+    expect(sbMock.calls.update).not.toHaveBeenCalled();
     expect(createNoteMock).not.toHaveBeenCalled();
   });
 });

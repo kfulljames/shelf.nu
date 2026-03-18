@@ -250,10 +250,10 @@ describe("note service", () => {
       expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "note-1");
       expect(sbMock.calls.eq).toHaveBeenCalledWith("userId", "user-1");
 
-      expect(result.count).toBeUndefined();
+      expect(result.count).toBe(1);
     });
 
-    it("returns undefined count when note doesn't exist or user doesn't own it", async () => {
+    it("returns count of 0 when note doesn't exist or user doesn't own it", async () => {
       sbMock.setResponse({ data: null, error: null, count: 0 } as any);
 
       const result = await deleteNote({
@@ -261,7 +261,7 @@ describe("note service", () => {
         userId: "user-1",
       });
 
-      expect(result.count).toBeUndefined();
+      expect(result.count).toBe(0);
     });
 
     it("throws ShelfError when database operation fails", async () => {
@@ -770,7 +770,12 @@ describe("note service", () => {
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      sbMock.setError({ message: "Database error" });
+      // User lookup succeeds, but createNotes insert returns an error
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "John", lastName: "Doe" },
+        error: null,
+      });
+      sbMock.enqueue({ data: null, error: { message: "Database error" } });
 
       const audit = {
         id: "audit-1",
@@ -785,7 +790,11 @@ describe("note service", () => {
         })
       ).rejects.toThrow(ShelfError);
 
-      sbMock.setError({ message: "Database error" });
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "John", lastName: "Doe" },
+        error: null,
+      });
+      sbMock.enqueue({ data: null, error: { message: "Database error" } });
 
       await expect(
         createAssetNotesForAuditAddition({
@@ -889,7 +898,12 @@ describe("note service", () => {
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      sbMock.setError({ message: "Database error" });
+      // User lookup succeeds, but createNotes insert returns an error
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "Jane", lastName: "Smith" },
+        error: null,
+      });
+      sbMock.enqueue({ data: null, error: { message: "Database error" } });
 
       const audit = {
         id: "audit-1",
@@ -904,7 +918,11 @@ describe("note service", () => {
         })
       ).rejects.toThrow(ShelfError);
 
-      sbMock.setError({ message: "Database error" });
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "Jane", lastName: "Smith" },
+        error: null,
+      });
+      sbMock.enqueue({ data: null, error: { message: "Database error" } });
 
       await expect(
         createAssetNotesForAuditRemoval({

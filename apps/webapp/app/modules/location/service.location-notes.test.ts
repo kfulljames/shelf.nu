@@ -18,6 +18,11 @@ vi.mock("~/database/supabase.server", () => ({
   },
 }));
 
+// why: service.server.ts imports db for some Prisma-only queries; mock to prevent connection attempts
+vi.mock("~/database/db.server", () => ({
+  db: {},
+}));
+
 vi.mock("~/utils/geolocate.server", () => ({
   geolocate: geolocateMock,
 }));
@@ -198,6 +203,12 @@ describe("location service activity logging", () => {
       // Sixth call: update assets to set locationId (thenable)
       sbMock.enqueue({
         data: null,
+        error: null,
+      });
+
+      // Seventh call: createBulkLocationChangeNotes fetches user (single)
+      sbMock.enqueue({
+        data: { firstName: "Ada", lastName: "Lovelace" },
         error: null,
       });
 
