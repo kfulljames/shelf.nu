@@ -87,14 +87,14 @@ Single commit (`9ced224`) converting 32 files:
 
 Single commit (`b6acabb`) converting 61 files:
 
-| Area                    | Files | Calls converted |
-| ----------------------- | ----- | --------------- |
-| Layout route files      | 42    | ~150            |
-| QR route files          | 5     | ~12             |
-| Auth route files        | 2     | ~4              |
-| Welcome route files     | 1     | ~2              |
-| API route files         | 9     | ~18             |
-| Component files         | 2     | ~4              |
+| Area                | Files | Calls converted |
+| ------------------- | ----- | --------------- |
+| Layout route files  | 42    | ~150            |
+| QR route files      | 5     | ~12             |
+| Auth route files    | 2     | ~4              |
+| Welcome route files | 1     | ~2              |
+| API route files     | 9     | ~18             |
+| Component files     | 2     | ~4              |
 
 **Key conversions:**
 
@@ -115,38 +115,38 @@ Single commit (`b6acabb`) converting 61 files:
 
 ### Module Files (30 calls across 6 files)
 
-| File                                   | Calls | Reason kept                                |
-| -------------------------------------- | ----- | ------------------------------------------ |
-| `booking/service.server.ts`            | 7     | Conflict conditions, nested `some`/`none`  |
-| `asset/service.server.ts`              | 7     | Complex nested creates, `$queryRaw`        |
-| `kit/service.server.ts`                | 7     | Generic `Prisma.KitInclude` types          |
-| `location/service.server.ts`           | 5     | `$queryRaw`, dynamic SQL                   |
-| `asset/bulk-operations-helper.server`  | 2     | Dynamic `Prisma.WhereInput`                |
-| `location/bulk-select.server.ts`       | 2     | Dynamic `Prisma.WhereInput`                |
+| File                                  | Calls | Reason kept                               |
+| ------------------------------------- | ----- | ----------------------------------------- |
+| `booking/service.server.ts`           | 7     | Conflict conditions, nested `some`/`none` |
+| `asset/service.server.ts`             | 7     | Complex nested creates, `$queryRaw`       |
+| `kit/service.server.ts`               | 7     | Generic `Prisma.KitInclude` types         |
+| `location/service.server.ts`          | 5     | `$queryRaw`, dynamic SQL                  |
+| `asset/bulk-operations-helper.server` | 2     | Dynamic `Prisma.WhereInput`               |
+| `location/bulk-select.server.ts`      | 2     | Dynamic `Prisma.WhereInput`               |
 
 ### Route Files (38 calls across 19 files)
 
-| File                                             | Calls | Reason kept                            |
-| ------------------------------------------------ | ----- | -------------------------------------- |
-| `_layout+/home.tsx`                              | 8     | Complex includes, nested relations     |
-| `_layout+/bookings.$bookingId.overview.tsx`      | 6     | Booking with nested assets/kits        |
-| `_layout+/admin-dashboard+/move-location-images` | 3     | Batch image processing                 |
-| `_layout+/bookings.overview.manage-assets`       | 2     | Dynamic where conditions               |
-| `_layout+/bookings.overview.manage-kits`         | 2     | Dynamic where conditions               |
-| `_layout+/kits.$kitId.assets.assign-custody`     | 2     | Complex kit queries                    |
-| `_layout+/kits.$kitId.tsx`                       | 2     | Kit with dynamic includes              |
-| `_layout+/audits.$auditId.scan.tsx`              | 2     | Audit asset details                    |
-| `_layout+/audits.scan.$auditAssetId.details`     | 2     | Audit scan details                     |
-| `api+/command-palette.search.ts`                 | 2     | Dynamic search with `some`/`contains`  |
-| `api+/get-scanned-item.$qrId.ts`                | 2     | Complex scanned item resolution        |
-| 8 other route files                              | 1 ea  | Various kept-as-Prisma patterns        |
+| File                                             | Calls | Reason kept                           |
+| ------------------------------------------------ | ----- | ------------------------------------- |
+| `_layout+/home.tsx`                              | 8     | Complex includes, nested relations    |
+| `_layout+/bookings.$bookingId.overview.tsx`      | 6     | Booking with nested assets/kits       |
+| `_layout+/admin-dashboard+/move-location-images` | 3     | Batch image processing                |
+| `_layout+/bookings.overview.manage-assets`       | 2     | Dynamic where conditions              |
+| `_layout+/bookings.overview.manage-kits`         | 2     | Dynamic where conditions              |
+| `_layout+/kits.$kitId.assets.assign-custody`     | 2     | Complex kit queries                   |
+| `_layout+/kits.$kitId.tsx`                       | 2     | Kit with dynamic includes             |
+| `_layout+/audits.$auditId.scan.tsx`              | 2     | Audit asset details                   |
+| `_layout+/audits.scan.$auditAssetId.details`     | 2     | Audit scan details                    |
+| `api+/command-palette.search.ts`                 | 2     | Dynamic search with `some`/`contains` |
+| `api+/get-scanned-item.$qrId.ts`                 | 2     | Complex scanned item resolution       |
+| 8 other route files                              | 1 ea  | Various kept-as-Prisma patterns       |
 
 ### Utility Files (5 calls across 2 files)
 
-| File                    | Calls | Reason kept                  |
-| ----------------------- | ----- | ---------------------------- |
-| `utils/sso.server.ts`   | 3     | `$queryRaw` on auth schema   |
-| `utils/roles.server.ts` | 2     | Nested M2M role checks       |
+| File                    | Calls | Reason kept                |
+| ----------------------- | ----- | -------------------------- |
+| `utils/sso.server.ts`   | 3     | `$queryRaw` on auth schema |
+| `utils/roles.server.ts` | 2     | Nested M2M role checks     |
 
 ---
 

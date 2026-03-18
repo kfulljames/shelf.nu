@@ -25,8 +25,8 @@ import {
 } from "~/components/audit/audit-image-upload-box";
 import { AuditImageUploadDialog } from "~/components/audit/audit-image-upload-dialog";
 import { Button } from "~/components/shared/button";
-// KEPT AS PRISMA: db.auditAsset.findFirst with nested include (auditSession -> assignments),
-// db.auditNote.create with include (user select)
+// KEPT AS PRISMA: db.auditAsset.findFirst with nested include
+// (auditSession -> assignments) — not convertible to Supabase
 import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
@@ -200,25 +200,41 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         });
       }
 
-      const note = await db.auditNote.create({
-        data: {
+      const { data: note, error: noteInsertErr } = (await sbDb
+        .from("AuditNote")
+        .insert({
           content: content.trim(),
           auditSessionId: auditId,
           auditAssetId: auditAssetId,
           userId,
-        },
-        include: {
+        })
+        .select("*, user:User(id, firstName, lastName, email, profilePicture)")
+        .single()) as unknown as {
+        data: {
+          id: string;
+          content: string;
+          createdAt: string;
+          userId: string;
+          type: "COMMENT" | "UPDATE";
           user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              profilePicture: true,
-            },
-          },
-        },
-      });
+            id: string;
+            firstName: string;
+            lastName: string;
+            email: string;
+            profilePicture: string | null;
+          };
+        } | null;
+        error: any;
+      };
+
+      if (noteInsertErr || !note) {
+        throw new ShelfError({
+          cause: noteInsertErr,
+          message: "Failed to create audit note",
+          additionalData: { auditAssetId, auditId },
+          label: "Audit",
+        });
+      }
 
       return payload({ note });
     }

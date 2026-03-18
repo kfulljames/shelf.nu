@@ -6,8 +6,7 @@ import { useZorm } from "react-zorm";
 import { z } from "zod";
 import Input from "~/components/forms/input";
 import { Button } from "~/components/shared/button";
-// KEPT AS PRISMA: location count/findMany with isNot filter,
-// location update with relation disconnect
+// KEPT AS PRISMA: location update with relation disconnect
 import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
@@ -16,7 +15,7 @@ import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { PUBLIC_BUCKET } from "~/utils/constants";
 import { cropImage } from "~/utils/crop-image";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
 import { id } from "~/utils/id/id.server";
 import { requireAdmin } from "~/utils/roles.server";
@@ -38,12 +37,22 @@ export async function loader({ context }: LoaderFunctionArgs) {
   try {
     await requireAdmin(userId);
 
-    const locationWithImages = await db.location.count({
-      where: { image: { isNot: null } },
-    });
+    const { count: locationWithImages, error: locCountErr } = await sbDb
+      .from("Location")
+      .select("*", { count: "exact", head: true })
+      .not("imageId", "is", null);
+
+    if (locCountErr) {
+      throw new ShelfError({
+        cause: locCountErr,
+        message: "Failed to count locations with images",
+        additionalData: { userId },
+        label: "Location",
+      });
+    }
 
     return payload({
-      numberOfLocationWithImages: locationWithImages,
+      numberOfLocationWithImages: locationWithImages ?? 0,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -327,15 +336,27 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     console.log(`Migration started: count=${count}, shouldFix=${shouldFix}`);
 
-    const locationWithImages = await db.location.findMany({
-      where: { image: { isNot: null } },
-      select: {
-        id: true,
-        organizationId: true,
-        image: true,
-      },
-      take: count,
-    });
+    const { data: locationWithImages, error: locErr } = (await sbDb
+      .from("Location")
+      .select("id, organizationId, image:Image(*)")
+      .not("imageId", "is", null)
+      .limit(count)) as unknown as {
+      data: Array<{
+        id: string;
+        organizationId: string;
+        image: { blob: string; contentType: string } | null;
+      }> | null;
+      error: any;
+    };
+
+    if (locErr || !locationWithImages) {
+      throw new ShelfError({
+        cause: locErr,
+        message: "Failed to load locations with images",
+        additionalData: { userId },
+        label: "Location",
+      });
+    }
 
     if (locationWithImages.length === 0) {
       return payload({
@@ -447,7 +468,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
         const thumbnailFile = await cropImage(
           (async function* () {
             await Promise.resolve();
-            yield new Uint8Array(processedBlob);
+            yield new Uint8Array(processedBlob as unknown as ArrayBuffer);
           })(),
           {
             width: 108,
