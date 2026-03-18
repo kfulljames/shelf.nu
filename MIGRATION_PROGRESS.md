@@ -129,15 +129,15 @@ Both `isEmpty`/`has` filters migrated via PostgREST array operators.
 
 `audits.$auditId.scan.tsx` → `shelf_remove_audit_scan` RPC
 
+#### 6. Dynamic Where Inputs & Model Access — DONE
+
+All 3 dynamic where/model access calls migrated via RPCs:
+
+- `bookings.overview.manage-assets.tsx` → `getFilteredAssetIds()` using `shelf_get_filtered_asset_ids` RPC
+- `api+/assets.get-assets-for-bulk-qr-download.ts` → Same `getFilteredAssetIds()` pattern
+- `api+/model-filters.ts` → `shelf_model_filter_search` RPC
+
 ### Remaining Work
-
-#### 6. Dynamic Where Inputs & Model Access (3 calls)
-
-| File                                             | Feature                                                    |
-| ------------------------------------------------ | ---------------------------------------------------------- |
-| `bookings.overview.manage-assets.tsx`            | `getAssetsWhereInput()` → dynamic `Prisma.AssetWhereInput` |
-| `api+/assets.get-assets-for-bulk-qr-download.ts` | Same `getAssetsWhereInput` pattern                         |
-| `api+/model-filters.ts`                          | Dynamic model access `db[name].dynamicFindMany()`          |
 
 #### 9. Raw SQL on Auth Schema (2 calls — must stay as Prisma)
 

@@ -1,12 +1,9 @@
-// KEPT AS PRISMA: uses dynamic model access (db[name].dynamicFindMany), nested
-// relation filters (isNot, some, hasSome, isEmpty), and complex OR/AND conditions
-// that are not directly translatable to Supabase PostgREST.
 import { TagUseFor } from "@prisma/client";
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
 
 const BasicModelFilters = z.object({
@@ -81,86 +78,46 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const modelFilters = parseData(searchParams, ModelFiltersSchema);
     const { name, queryKey, queryValue, selectedValues } = modelFilters;
 
-    const where: Record<string, any> = {
-      organizationId,
-      OR: [{ id: { in: (selectedValues ?? "").split(",") } }],
-    };
-    /**
-     * When searching for teamMember, we have to search for
-     * - teamMember's name
-     * - teamMember's user firstName, lastName and email
-     */
-    if (modelFilters.name === "teamMember") {
-      where.OR.push(
-        { name: { contains: queryValue, mode: "insensitive" } },
-        { user: { firstName: { contains: queryValue, mode: "insensitive" } } },
-        { user: { firstName: { contains: queryValue, mode: "insensitive" } } },
-        { user: { email: { contains: queryValue, mode: "insensitive" } } }
-      );
+    const selectedValuesArray = selectedValues
+      ? selectedValues.split(",").filter(Boolean)
+      : [];
 
-      where.deletedAt = modelFilters.deletedAt;
-      if (modelFilters.userWithAdminAndOwnerOnly) {
-        where.AND = [
-          { user: { isNot: null } },
-          {
-            user: {
-              userOrganizations: {
-                some: {
-                  AND: [
-                    { organizationId },
-                    { roles: { hasSome: ["ADMIN", "OWNER"] } },
-                  ],
-                },
-              },
-            },
-          },
-        ];
-      } else if (modelFilters.usersOnly) {
-        // Filter to show only team members with users (exclude NRMs)
-        where.user = { isNot: null };
+    const { data: rpcData, error: rpcErr } = await sbDb.rpc(
+      "shelf_model_filter_search",
+      {
+        p_organization_id: organizationId,
+        p_model_name: name,
+        p_query_key: queryKey,
+        p_query_value: queryValue ?? null,
+        p_selected_values:
+          selectedValuesArray.length > 0 ? selectedValuesArray : null,
+        p_use_for:
+          modelFilters.name === "tag" ? modelFilters.useFor ?? null : null,
+        p_deleted_at:
+          modelFilters.name === "teamMember"
+            ? modelFilters.deletedAt ?? null
+            : null,
+        p_admin_owner_only:
+          modelFilters.name === "teamMember"
+            ? modelFilters.userWithAdminAndOwnerOnly ?? false
+            : false,
+        p_users_only:
+          modelFilters.name === "teamMember"
+            ? modelFilters.usersOnly ?? false
+            : false,
       }
-    } else {
-      where.OR.push({
-        [queryKey]: { contains: queryValue, mode: "insensitive" },
+    );
+
+    if (rpcErr) {
+      throw new ShelfError({
+        cause: rpcErr,
+        message: "Failed to search model filters",
+        additionalData: { name, queryKey },
+        label: "Assets",
       });
     }
 
-    if (modelFilters.name === "booking") {
-      where.status = { in: ["RESERVED", "ONGOING", "OVERDUE"] };
-    }
-
-    if (modelFilters.name === "tag" && modelFilters.useFor) {
-      // Tags with "All" selected are stored with an empty useFor array, so filtering only by `has`
-      // would hide those tags in bulk/tag pickers even though they are intended to be available.
-      // This keeps tag searches consistent with create/edit flows that also include "All" tags.
-      where.AND = [
-        ...(where.AND ?? []),
-        {
-          OR: [
-            { useFor: { isEmpty: true } },
-            { useFor: { has: modelFilters.useFor } },
-          ],
-        },
-      ];
-    }
-
-    const queryData = (await db[name].dynamicFindMany({
-      where,
-      include:
-        /** We need user's information to resolve teamMember's name */
-        name === "teamMember"
-          ? {
-              user: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                  email: true,
-                },
-              },
-            }
-          : undefined,
-    })) as Array<Record<string, string>>;
+    const queryData = (rpcData as unknown as Array<Record<string, any>>) ?? [];
 
     return data(
       payload({

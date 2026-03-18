@@ -60,13 +60,11 @@ import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
 
 import When from "~/components/when/when";
-// KEPT AS PRISMA: asset findMany with dynamic Prisma.AssetWhereInput from getAssetsWhereInput
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { getPaginatedAndFilterableAssets } from "~/modules/asset/service.server";
 import type { AssetsFromViewItem } from "~/modules/asset/types";
-import { getAssetsWhereInput } from "~/modules/asset/utils.server";
+import { getFilteredAssetIds } from "~/modules/asset/utils.server";
 import { sendBookingUpdatedEmail } from "~/modules/booking/email-helpers";
 import {
   getBooking,
@@ -265,15 +263,9 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     const hasSelectedAll = assetIds.includes(ALL_SELECTED_KEY);
     if (hasSelectedAll) {
       const searchParams = getCurrentSearchParams(request);
-      const assetsWhere = getAssetsWhereInput({
+      const allAssetIds = await getFilteredAssetIds({
         organizationId,
         currentSearchParams: searchParams.toString(),
-      });
-
-      // KEPT AS PRISMA: assetsWhere is a complex Prisma where input from getAssetsWhereInput
-      const allAssets = await db.asset.findMany({
-        where: assetsWhere,
-        select: { id: true },
       });
       // Get assets currently in this booking via join table, excluding removed ones
       const { data: bookingAssetLinks, error: baErr } = await sbDb
@@ -299,10 +291,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
        * - All assets with applied filters
        */
       assetIds = [
-        ...new Set([
-          ...allAssets.map((asset) => asset.id),
-          ...bookingAssets.map((asset) => asset.id),
-        ]),
+        ...new Set([...allAssetIds, ...bookingAssets.map((asset) => asset.id)]),
       ];
     }
 

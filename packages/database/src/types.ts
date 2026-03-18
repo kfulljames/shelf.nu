@@ -2019,6 +2019,43 @@ export type Database = {
         };
         Returns: undefined;
       };
+      shelf_get_filtered_asset_ids: {
+        Args: {
+          p_organization_id: string;
+          p_search?: string | null;
+          p_status?: string | null;
+          p_category_ids?: string[] | null;
+          p_tag_ids?: string[] | null;
+          p_location_ids?: string[] | null;
+          p_team_member_ids?: string[] | null;
+        };
+        Returns: string[];
+      };
+      shelf_model_filter_search: {
+        Args: {
+          p_organization_id: string;
+          p_model_name: string;
+          p_query_key: string;
+          p_query_value?: string | null;
+          p_selected_values?: string[] | null;
+          p_use_for?: string | null;
+          p_deleted_at?: string | null;
+          p_admin_owner_only?: boolean;
+          p_users_only?: boolean;
+        };
+        Returns: {
+          id: string;
+          [key: string]:
+            | string
+            | null
+            | {
+                id: string;
+                firstName: string | null;
+                lastName: string | null;
+                email: string;
+              };
+        }[];
+      };
     };
     Enums: {
       AssetStatus: AssetStatus;

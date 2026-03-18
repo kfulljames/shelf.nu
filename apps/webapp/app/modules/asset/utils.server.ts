@@ -8,7 +8,9 @@ import type {
 import _ from "lodash";
 import { z } from "zod";
 import { filterOperatorSchema } from "~/components/assets/assets-index/advanced-filters/schema";
+import { sbDb } from "~/database/supabase.server";
 import { getCustomFieldDisplayValue } from "~/utils/custom-fields";
+import { ShelfError } from "~/utils/error";
 import { getParamsValues } from "~/utils/list";
 import { wrapUserLinkForNote, wrapLinkForNote } from "~/utils/markdoc-wrappers";
 import { parseFiltersWithHierarchy } from "./query.server";
@@ -544,6 +546,79 @@ export function getAssetsWhereInput({
   }
 
   return where;
+}
+
+/**
+ * RPC-based version of getAssetsWhereInput that returns matching asset IDs.
+ * Replaces Prisma-based filtering for route files.
+ * Uses shelf_get_filtered_asset_ids PostgreSQL function for complex
+ * M2M tag filters, nested custody relations, and location/category filters.
+ */
+export async function getFilteredAssetIds({
+  organizationId,
+  currentSearchParams,
+}: {
+  organizationId: Asset["organizationId"];
+  currentSearchParams?: string | null;
+}): Promise<string[]> {
+  const rpcArgs: {
+    p_organization_id: string;
+    p_search?: string;
+    p_status?: string;
+    p_category_ids?: string[];
+    p_tag_ids?: string[];
+    p_location_ids?: string[];
+    p_team_member_ids?: string[];
+  } = {
+    p_organization_id: organizationId,
+  };
+
+  if (currentSearchParams) {
+    const searchParams = new URLSearchParams(currentSearchParams);
+    const paramsValues = getParamsValues(searchParams);
+    const { categoriesIds, locationIds, tagsIds, search, teamMemberIds } =
+      paramsValues;
+
+    const status =
+      searchParams.get("status") === "ALL"
+        ? null
+        : (searchParams.get("status") as AssetStatus | null);
+
+    if (search) {
+      rpcArgs.p_search = search.toLowerCase().trim();
+    }
+    if (status) {
+      rpcArgs.p_status = status;
+    }
+    if (categoriesIds && categoriesIds.length > 0) {
+      rpcArgs.p_category_ids = categoriesIds;
+    }
+    if (tagsIds && tagsIds.length > 0) {
+      rpcArgs.p_tag_ids = tagsIds;
+    }
+    if (locationIds && locationIds.length > 0) {
+      rpcArgs.p_location_ids = locationIds;
+    }
+    if (teamMemberIds && teamMemberIds.length > 0) {
+      rpcArgs.p_team_member_ids = teamMemberIds;
+    }
+  }
+
+  const { data, error } = await sbDb.rpc(
+    "shelf_get_filtered_asset_ids",
+    rpcArgs
+  );
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to filter assets",
+      additionalData: { organizationId },
+      label: "Assets",
+    });
+  }
+
+  return (data as unknown as string[]) ?? [];
 }
 
 /**
