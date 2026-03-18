@@ -510,6 +510,7 @@ export async function getAsset<T extends Prisma.AssetInclude | undefined>({
       (org) => org.organizationId
     );
 
+    // KEPT AS PRISMA: Dynamic generic `include` parameter varies per caller
     const asset = await db.asset.findFirstOrThrow({
       where: {
         OR: [
@@ -876,6 +877,8 @@ export async function getAssets(params: {
       where.kit = { isNot: null };
     }
 
+    // KEPT AS PRISMA: Dynamic where with nested relations (tags, custody,
+    // bookings) + dynamic include from assetIndexFields and extraInclude
     const [assets, totalAssets] = await Promise.all([
       db.asset.findMany({
         skip,
@@ -1006,6 +1009,7 @@ export async function getAdvancedPaginatedAndFilterableAssets({
       FROM sorted_asset_query aq;
     `;
 
+    // KEPT AS PRISMA: $queryRaw with dynamic Prisma.sql template
     const result = await db.$queryRaw<AdvancedIndexQueryResult>(query);
     const totalAssets = result[0].total_count;
     const assets: AdvancedIndexAsset[] = result[0].assets;
@@ -1247,6 +1251,8 @@ export async function createAsset({
         }
       }
 
+      // KEPT AS PRISMA: Nested relation creates (barcodes, tags, customFields)
+      // + sequential ID retry with P2002 unique constraint detection
       const asset = await db.asset.create({
         data,
         include: {
@@ -1512,6 +1518,8 @@ export async function updateAsset({
       });
     }
 
+    // KEPT AS PRISMA: Nested relation writes (customFieldValues
+    // create/update/deleteMany, tags connect/set, barcodes upsert)
     const asset = await db.asset.update({
       where: { id, organizationId },
       data,
@@ -3303,6 +3311,7 @@ export async function createAssetsFromBackupImport({
         }
 
         /** Create the Asset */
+        // KEPT AS PRISMA: Nested relation creates (tags, customFields) in import
         const { id: assetId } = await db.asset.create(d);
 
         /** Create notes */

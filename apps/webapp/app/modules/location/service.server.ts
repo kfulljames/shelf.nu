@@ -6,6 +6,7 @@ import type {
   UserOrganization,
   Asset,
   Kit,
+  KitStatus,
 } from "@prisma/client";
 import { BookingStatus } from "@prisma/client";
 import { db } from "~/database/db.server";
@@ -44,11 +45,10 @@ import {
 } from "./utils";
 import type { CreateAssetFromContentImportPayload } from "../asset/types";
 import {
-  getAssetsWhereInput,
+  getFilteredAssetIds,
   getLocationUpdateNoteContent,
   getKitLocationUpdateNoteContent,
 } from "../asset/utils.server";
-import { getKitsWhereInput } from "../kit/utils.server";
 import { createSystemLocationNote as createSystemLocationActivityNote } from "../location-note/service.server";
 import { createNote } from "../note/service.server";
 import { getUserByID } from "../user/service.server";
@@ -1637,20 +1637,9 @@ export async function updateLocationAssets({
     const hasSelectedAll = assetIds.includes(ALL_SELECTED_KEY);
     if (hasSelectedAll) {
       const searchParams = getCurrentSearchParams(request);
-      const assetsWhere = getAssetsWhereInput({
+      const allAssetIds = await getFilteredAssetIds({
         organizationId,
         currentSearchParams: searchParams.toString(),
-      });
-
-      /**
-       * KEPT AS PRISMA: `assetsWhere` comes from `getAssetsWhereInput()`
-       * which returns a `Prisma.AssetWhereInput` with complex nested OR
-       * conditions (tags some/none, bookings, custody relations).
-       * Converting this requires rewriting the shared utility.
-       */
-      const allAssets = await db.asset.findMany({
-        where: assetsWhere,
-        select: { id: true },
       });
 
       const locationAssets = location.assets.map((asset) => asset.id);
@@ -1661,7 +1650,7 @@ export async function updateLocationAssets({
        */
       assetIds = [
         ...new Set([
-          ...allAssets.map((asset) => asset.id),
+          ...allAssetIds,
           ...locationAssets.filter((asset) => !removedAssetIds.includes(asset)),
         ]),
       ];
@@ -1886,20 +1875,42 @@ export async function updateLocationKits({
     const hasSelectedAll = kitIds.includes(ALL_SELECTED_KEY);
     if (hasSelectedAll) {
       const searchParams = getCurrentSearchParams(request);
-      const kitWhere = getKitsWhereInput({
-        organizationId,
-        currentSearchParams: searchParams.toString(),
-      });
+      const currentSearchParams = searchParams.toString();
+      const sp = new URLSearchParams(currentSearchParams);
 
-      /**
-       * KEPT AS PRISMA: `kitWhere` comes from `getKitsWhereInput()`
-       * which returns a `Prisma.KitWhereInput`. Converting requires
-       * rewriting the shared utility.
-       */
-      const allKits = await db.kit.findMany({
-        where: kitWhere,
-        select: { id: true },
-      });
+      let kitQuery = sbDb
+        .from("Kit")
+        .select("id")
+        .eq("organizationId", organizationId);
+
+      const search = sp.get("s");
+      const status = sp.get("status") === "ALL" ? null : sp.get("status");
+      const teamMember = sp.get("teamMember");
+
+      if (search) {
+        kitQuery = kitQuery.ilike("name", `%${search.toLowerCase().trim()}%`);
+      }
+      if (status) {
+        kitQuery = kitQuery.eq("status", status as KitStatus);
+      }
+      if (teamMember) {
+        const { data: custodyRows } = await sbDb
+          .from("KitCustody")
+          .select("kitId")
+          .eq("custodianId", teamMember);
+        const custodyKitIds = (custodyRows ?? [])
+          .map((r) => r.kitId)
+          .filter(Boolean);
+        if (custodyKitIds.length > 0) {
+          kitQuery = kitQuery.in("id", custodyKitIds);
+        } else {
+          // No kits match the custodian filter
+          kitQuery = kitQuery.in("id", []);
+        }
+      }
+
+      const { data: allKitRows } = await kitQuery;
+      const allKitIds = (allKitRows ?? []).map((k) => k.id);
 
       const locationKits = location.kits.map((kit) => kit.id);
       /**
@@ -1909,7 +1920,7 @@ export async function updateLocationKits({
        */
       kitIds = [
         ...new Set([
-          ...allKits.map((kit) => kit.id),
+          ...allKitIds,
           ...locationKits.filter((kit) => !removedKitIds.includes(kit)),
         ]),
       ];

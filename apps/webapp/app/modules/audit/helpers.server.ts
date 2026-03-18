@@ -1,3 +1,5 @@
+// KEPT AS PRISMA: All helpers use `tx ?? db` pattern for transaction support.
+// The `tx` parameter is a Prisma transaction client passed from RPC callers.
 import { db } from "~/database/db.server";
 import {
   wrapAssetsWithDataForNote,

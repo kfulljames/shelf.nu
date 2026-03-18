@@ -5,7 +5,7 @@ import type { AssetIndexSettingsRow } from "~/modules/asset-index-settings/servi
 import { ShelfError } from "~/utils/error";
 import { getParamsValues, ALL_SELECTED_KEY } from "~/utils/list";
 import { generateWhereClause, parseFiltersWithHierarchy } from "./query.server";
-import { getAssetsWhereInput } from "./utils.server";
+import { getFilteredAssetIds } from "./utils.server";
 import type { Column } from "../asset-index-settings/helpers";
 
 const label = "Assets";
@@ -57,7 +57,8 @@ async function getAdvancedFilteredAssetIds({
       availableToBookOnly
     );
 
-    // Minimal query: only SELECT id, but include necessary joins
+    // KEPT AS PRISMA: $queryRaw with dynamic Prisma.sql template and
+    // generateWhereClause() that builds SQL fragments referencing joined tables.
     // Joins are needed because WHERE clause may reference: c.name, l.name, t.id, tm.name, etc.
     const query = Prisma.sql`
       SELECT DISTINCT a.id
@@ -151,18 +152,10 @@ export async function resolveAssetIdsForBulkOperation({
       availableToBookOnly: false, // Set based on user role if needed
     });
   } else {
-    // SIMPLE MODE: Use simple where clause
-    // Note: getAssetsWhereInput will safely ignore any advanced filter syntax
-    const where = getAssetsWhereInput({
+    // SIMPLE MODE: Use Supabase RPC for simple filter resolution
+    return getFilteredAssetIds({
       organizationId,
       currentSearchParams,
     });
-
-    const assets = await db.asset.findMany({
-      where,
-      select: { id: true },
-    });
-
-    return assets.map((a) => a.id);
   }
 }

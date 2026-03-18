@@ -1,6 +1,7 @@
-import { db } from "~/database/db.server";
-import { getAssetsWhereInput } from "~/modules/asset/utils.server";
-import { getKitsWhereInput } from "~/modules/kit/utils.server";
+import type { KitStatus } from "@prisma/client";
+import { sbDb } from "~/database/supabase.server";
+import { getFilteredAssetIds } from "~/modules/asset/utils.server";
+import { ShelfError } from "~/utils/error";
 import { getCurrentSearchParams } from "~/utils/http.server";
 import { ALL_SELECTED_KEY } from "~/utils/list";
 
@@ -24,20 +25,30 @@ export async function resolveLocationAssetIds({
   }
 
   const searchParams = getCurrentSearchParams(request);
-  const assetsWhere = getAssetsWhereInput({
+  const filteredIds = await getFilteredAssetIds({
     organizationId,
     currentSearchParams: searchParams.toString(),
   });
 
-  const allAssets = await db.asset.findMany({
-    where: {
-      ...assetsWhere,
-      locationId,
-    },
-    select: { id: true },
-  });
+  if (filteredIds.length === 0) {
+    return [];
+  }
 
-  return allAssets.map((a) => a.id);
+  const { data: assets, error } = await sbDb
+    .from("Asset")
+    .select("id")
+    .in("id", filteredIds)
+    .eq("locationId", locationId);
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to resolve location asset IDs",
+      label: "Assets",
+    });
+  }
+
+  return (assets ?? []).map((a) => a.id);
 }
 
 /**
@@ -60,18 +71,48 @@ export async function resolveLocationKitIds({
   }
 
   const searchParams = getCurrentSearchParams(request);
-  const kitsWhere = getKitsWhereInput({
-    organizationId,
-    currentSearchParams: searchParams.toString(),
-  });
+  const currentSearchParams = searchParams.toString();
+  const sp = new URLSearchParams(currentSearchParams);
 
-  const allKits = await db.kit.findMany({
-    where: {
-      ...kitsWhere,
-      locationId,
-    },
-    select: { id: true },
-  });
+  let query = sbDb
+    .from("Kit")
+    .select("id")
+    .eq("organizationId", organizationId)
+    .eq("locationId", locationId);
 
-  return allKits.map((k) => k.id);
+  const search = sp.get("s");
+  const status = sp.get("status") === "ALL" ? null : sp.get("status");
+  const teamMember = sp.get("teamMember");
+
+  if (search) {
+    query = query.ilike("name", `%${search.toLowerCase().trim()}%`);
+  }
+  if (status) {
+    query = query.eq("status", status as KitStatus);
+  }
+  if (teamMember) {
+    const { data: custodyRows } = await sbDb
+      .from("KitCustody")
+      .select("kitId")
+      .eq("custodianId", teamMember);
+    const custodyKitIds = (custodyRows ?? [])
+      .map((r) => r.kitId)
+      .filter(Boolean);
+    if (custodyKitIds.length === 0) {
+      return [];
+    }
+    query = query.in("id", custodyKitIds);
+  }
+
+  const { data: kits, error } = await query;
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to resolve location kit IDs",
+      label: "Kit",
+    });
+  }
+
+  return (kits ?? []).map((k) => k.id);
 }

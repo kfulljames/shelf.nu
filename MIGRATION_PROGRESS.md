@@ -2,7 +2,7 @@
 
 **Branch:** `claude/continue-project-work-s5x7o`
 **Last Updated:** 2026-03-18
-**Status:** ~98% complete — remaining work tracked below
+**Status:** ~98% complete — all migratable calls converted, remaining are KEPT AS PRISMA
 
 ---
 
@@ -10,10 +10,10 @@
 
 | Area                         | Total `db.` calls | Converted | Remaining | % Done |
 | ---------------------------- | ----------------- | --------- | --------- | ------ |
-| **Modules** (`app/modules/`) | ~245              | ~215      | 30        | 88%    |
+| **Modules** (`app/modules/`) | ~245              | ~220      | 25        | 90%    |
 | **Routes** (`app/routes/`)   | ~260              | ~260      | 0         | 100%   |
 | **Utils** (`app/utils/`)     | ~33               | ~31       | 2         | 94%    |
-| **Grand Total**              | ~538              | ~509      | ~29       | 95%    |
+| **Grand Total**              | ~538              | ~514      | ~24       | 96%    |
 
 Test files (`.test.ts`) contain 32 additional `db.` references
 (mock setups) to clean up when Prisma is fully removed.
@@ -42,6 +42,7 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 | (new)     | Dashboard aggregation RPCs + workspace counts              | 4 files   |
 | (new)     | Relation filters, \_count, array ops, role checks          | 6 files   |
 | (new)     | Deep includes, relation writes, transactions, SSO          | 12 files  |
+| (new)     | Module bulk ops + location service select-all migrations   | 6 files   |
 
 ### Module Services — Completed Conversions
 
@@ -149,15 +150,32 @@ These 2 calls access the Supabase `auth` schema which is not accessible
 via the Supabase JS client. They must remain as `db.$queryRaw` until
 security-definer RPCs or the Supabase Admin API can be used.
 
-#### Module-level remaining Prisma calls (~24 calls)
+#### Module-level remaining Prisma calls (~20 calls — all KEPT AS PRISMA)
 
-Service files in `app/modules/` still have ~24 Prisma calls for:
+All remaining calls are documented with `// KEPT AS PRISMA:` comments
+explaining why they cannot be migrated to Supabase:
 
-- `audit/helpers.server.ts` — Transaction-bound note creation helpers
-- `asset/service.server.ts` — `getAssetsWhereInput` dynamic builder
-- `booking/service.server.ts` — Complex booking queries
-- `location/service.server.ts` — Remaining location queries
-- `kit/service.server.ts` — Remaining kit queries
+- `audit/helpers.server.ts` — `tx ?? db` pattern for transaction support
+- `asset/service.server.ts` — Dynamic generic includes, nested relation
+  writes (customFields create/update/deleteMany), `$queryRaw` with
+  dynamic Prisma.sql templates, P2002 retry logic
+- `asset/bulk-operations-helper.server.ts` — Advanced mode `$queryRaw`
+  with dynamic WHERE clause from `generateWhereClause()`
+- `booking/service.server.ts` — Complex nested booking conflict
+  conditions, dynamic where from `getBookingWhereInput`
+- `location/service.server.ts` — Dynamic Prisma includes, nested
+  `assets.some.bookings.some` multi-level existence filters
+- `kit/service.server.ts` — Dynamic generic includes, `assets: { none: {} }`
+
+#### Route-level remaining Prisma calls (4 files — all KEPT AS PRISMA)
+
+- `api+/user.change-current-organization.ts` — `$executeRaw` to avoid
+  bumping User.updatedAt timestamp
+- `api+/get-scanned-item.$qrId.ts` — Dynamic Prisma include objects
+- `api+/command-palette.search.ts` — Nested `some` filters on
+  assignments, custodies, kitCustodies relations
+- `api+/reminders.team-members.ts` — Nested WHERE with
+  `user: { isNot: null }`, `userOrganizations.some`, `roles.hasSome`
 
 ---
 
