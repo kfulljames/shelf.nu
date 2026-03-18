@@ -29,6 +29,7 @@ import type {
   SortingOptions,
 } from "~/components/list/filters/sort-by";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import type { AssetIndexSettingsRow } from "~/modules/asset-index-settings/service.server";
 import {
@@ -3276,41 +3277,25 @@ export async function bulkCheckOutAssets({
      * 1. Create custodies for all assets
      * 2. Update status of all assets to IN_CUSTODY
      */
-    await db.$transaction(async (tx) => {
-      /** Creating custodies over assets */
-      await tx.custody.createMany({
-        data: assets.map((asset) => ({
-          assetId: asset.id,
-          teamMemberId: custodianId,
-        })),
-      });
-
-      /** Updating status of assets to IN_CUSTODY */
-      await tx.asset.updateMany({
-        where: { id: { in: assets.map((asset) => asset.id) } },
-        data: { status: AssetStatus.IN_CUSTODY },
-      });
-
-      /** Creating notes for the assets */
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user.firstName,
-        lastName: user.lastName,
-      });
-
-      const custodianDisplay = custodianTeamMember
-        ? wrapCustodianForNote({ teamMember: custodianTeamMember })
-        : `**${custodianName.trim()}**`;
-
-      await tx.note.createMany({
-        data: assets.map((asset) => ({
-          content: `${actor} granted ${custodianDisplay} custody.`,
-          type: "UPDATE",
-          userId,
-          assetId: asset.id,
-        })),
-      });
+    /** Pre-compute note content */
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user.firstName,
+      lastName: user.lastName,
     });
+    const custodianDisplay = custodianTeamMember
+      ? wrapCustodianForNote({ teamMember: custodianTeamMember })
+      : `**${custodianName.trim()}**`;
+    const noteContent = `${actor} granted ${custodianDisplay} custody.`;
+
+    /** Atomically create custody, update status, create notes via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_asset_bulk_checkout", {
+      p_asset_ids: assets.map((asset) => asset.id),
+      p_custodian_id: custodianId,
+      p_user_id: userId,
+      p_note_content: noteContent,
+    });
+    if (rpcError) throw rpcError;
 
     return true;
   } catch (cause) {
@@ -3394,47 +3379,35 @@ export async function bulkCheckInAssets({
      * 1. Delete all custodies for all assets
      * 2. Update status of all assets to AVAILABLE
      */
-    await db.$transaction(async (tx) => {
-      /** Deleting custodies over assets */
-      await tx.custody.deleteMany({
-        where: {
-          id: {
-            in: assets.map((asset) => {
-              /** This case should not happen but in case */
-              if (!asset.custody) {
-                throw new ShelfError({
-                  cause: null,
-                  label: "Assets",
-                  message: "Could not find custody over asset.",
-                });
-              }
-
-              return asset.custody.id;
-            }),
-          },
-        },
-      });
-
-      /** Updating status of assets to AVAILABLE */
-      await tx.asset.updateMany({
-        where: { id: { in: assets.map((asset) => asset.id) } },
-        data: { status: AssetStatus.AVAILABLE },
-      });
-
-      /** Creating notes for the assets */
-      await tx.note.createMany({
-        data: assets.map((asset) => ({
-          content: `**${user.firstName?.trim()} ${
-            user.lastName
-          }** has released **${resolveTeamMemberName(
-            asset.custody!.custodian
-          )}'s** custody over **${asset.title?.trim()}**`,
-          type: "UPDATE",
-          userId,
-          assetId: asset.id,
-        })),
-      });
+    /** Pre-compute custody IDs and per-asset note contents */
+    const custodyIds = assets.map((asset) => {
+      if (!asset.custody) {
+        throw new ShelfError({
+          cause: null,
+          label: "Assets",
+          message: "Could not find custody over asset.",
+        });
+      }
+      return asset.custody.id;
     });
+
+    const noteContents = assets.map(
+      (asset) =>
+        `**${user.firstName?.trim()} ${
+          user.lastName
+        }** has released **${resolveTeamMemberName(
+          asset.custody!.custodian
+        )}'s** custody over **${asset.title?.trim()}**`
+    );
+
+    /** Atomically delete custody, update status, create notes via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_asset_bulk_checkin", {
+      p_custody_ids: custodyIds,
+      p_asset_ids: assets.map((asset) => asset.id),
+      p_user_id: userId,
+      p_note_contents: noteContents,
+    });
+    if (rpcError) throw rpcError;
 
     return true;
   } catch (cause) {
@@ -3531,38 +3504,33 @@ export async function bulkUpdateAssetLocation({
       (a) => a.location?.id !== newLocation?.id
     );
 
-    await db.$transaction(async (tx) => {
-      if (assetsToUpdate.length > 0) {
-        /** Updating location of assets to newLocation */
-        await tx.asset.updateMany({
-          where: { id: { in: assetsToUpdate.map((asset) => asset.id) } },
-          data: { locationId: newLocation?.id ? newLocation.id : null },
+    if (assetsToUpdate.length > 0) {
+      /** Pre-compute note contents for each asset */
+      const assetIdsToUpdate = assetsToUpdate.map((asset) => asset.id);
+      const noteContents = assetsToUpdate.map((asset) => {
+        const isRemoving = !newLocationId;
+        return getLocationUpdateNoteContent({
+          currentLocation: asset.location,
+          newLocation,
+          userId,
+          firstName: user?.firstName ?? "",
+          lastName: user?.lastName ?? "",
+          isRemoving,
         });
+      });
 
-        /** Creating notes for the assets */
-        await tx.note.createMany({
-          data: assetsToUpdate.map((asset) => {
-            const isRemoving = !newLocationId;
-
-            const content = getLocationUpdateNoteContent({
-              currentLocation: asset.location,
-              newLocation,
-              userId,
-              firstName: user?.firstName ?? "",
-              lastName: user?.lastName ?? "",
-              isRemoving,
-            });
-
-            return {
-              content,
-              type: "UPDATE",
-              userId,
-              assetId: asset.id,
-            };
-          }),
-        });
-      }
-    });
+      /** Atomically update locations and create notes via RPC */
+      const { error: rpcError } = await sbDb.rpc(
+        "shelf_asset_bulk_update_location",
+        {
+          p_asset_ids: assetIdsToUpdate,
+          p_new_location_id: newLocation?.id ?? null,
+          p_note_contents: noteContents,
+          p_note_user_id: userId,
+        }
+      );
+      if (rpcError) throw rpcError;
+    }
 
     // Create location activity notes
     const userLink = wrapUserLinkForNote({

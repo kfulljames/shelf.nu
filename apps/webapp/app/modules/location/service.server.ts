@@ -8,7 +8,6 @@ import type {
   Kit,
 } from "@prisma/client";
 import { BookingStatus } from "@prisma/client";
-import invariant from "tiny-invariant";
 import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
@@ -888,34 +887,28 @@ export async function bulkDeleteLocations({
 }) {
   try {
     /** We have to delete the images of locations if any */
-    const locations = await db.location.findMany({
-      where: locationIds.includes(ALL_SELECTED_KEY)
-        ? { organizationId }
-        : { id: { in: locationIds }, organizationId },
-      select: { id: true, imageId: true },
-    });
+    let query = sbDb
+      .from("Location")
+      .select("id, imageId")
+      .eq("organizationId", organizationId);
 
-    return await db.$transaction(async (tx) => {
-      /** Deleting all locations */
-      await tx.location.deleteMany({
-        where: { id: { in: locations.map((location) => location.id) } },
-      });
+    if (!locationIds.includes(ALL_SELECTED_KEY)) {
+      query = query.in("id", locationIds);
+    }
 
-      /** Deleting images of locations */
-      const locationWithImages = locations.filter(
-        (location) => !!location.imageId
-      );
-      await tx.image.deleteMany({
-        where: {
-          id: {
-            in: locationWithImages.map((location) => {
-              invariant(location.imageId, "Image not found to delete");
-              return location.imageId;
-            }),
-          },
-        },
-      });
+    const { data: locations, error: fetchError } = await query;
+    if (fetchError) throw fetchError;
+
+    const locationIdList = (locations ?? []).map((l) => l.id);
+    const imageIdList = (locations ?? [])
+      .filter((l): l is typeof l & { imageId: string } => !!l.imageId)
+      .map((l) => l.imageId);
+
+    const { error: rpcError } = await sbDb.rpc("shelf_location_bulk_delete", {
+      p_location_ids: locationIdList,
+      p_image_ids: imageIdList,
     });
+    if (rpcError) throw rpcError;
   } catch (cause) {
     throw new ShelfError({
       cause,

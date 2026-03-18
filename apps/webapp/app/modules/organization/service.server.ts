@@ -817,27 +817,13 @@ export async function transferOwnership({
     let subscriptionTransferred = false;
     const currentOwnerTierId: TierId = currentOwnerUserOrg.user.tierId;
 
-    await db.$transaction(async (tx) => {
-      /** Update the owner of the organization */
-      await tx.organization.update({
-        where: { id: currentOrganization.id },
-        data: {
-          owner: { connect: { id: newOwnerUserOrg.user.id } },
-        },
-      });
-
-      /** Update the role of current owner to ADMIN */
-      await tx.userOrganization.update({
-        where: { id: currentOwnerUserOrg.id },
-        data: { roles: { set: [OrganizationRoles.ADMIN] } },
-      });
-
-      /** Update the role of new owner to OWNER */
-      await tx.userOrganization.update({
-        where: { id: newOwnerUserOrg.id },
-        data: { roles: { set: [OrganizationRoles.OWNER] } },
-      });
+    const { error: rpcError } = await sbDb.rpc("shelf_org_transfer_ownership", {
+      p_org_id: currentOrganization.id,
+      p_new_owner_user_id: newOwnerUserOrg.user.id,
+      p_current_owner_user_org_id: currentOwnerUserOrg.id,
+      p_new_owner_user_org_id: newOwnerUserOrg.id,
     });
+    if (rpcError) throw rpcError;
 
     // Handle subscription transfer AFTER the ownership transfer succeeds
     // Wrapped in try/catch to ensure ownership transfer completes even if subscription transfer fails

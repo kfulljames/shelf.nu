@@ -21,6 +21,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import type { SortingDirection } from "~/components/list/filters/sort-by";
 import { partialCheckinAssetsSchema } from "~/components/scanner/drawer/uses/partial-checkin-drawer";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
 import { validateBookingOwnership } from "~/utils/booking-authorization.server";
@@ -1170,7 +1171,6 @@ export async function checkoutBooking({
      * Get the kitIds because we need them to update their status later on
      */
     const kitIds = getKitIdsByAssets(bookingFound.assets);
-    const hasKits = kitIds.length > 0;
 
     const isEarlyCheckout = isBookingEarlyCheckout(bookingFound.from!);
 
@@ -1195,30 +1195,24 @@ export async function checkoutBooking({
       }).toJSDate();
     }
 
-    const updatedBooking = await db.$transaction(async (tx) => {
-      /* Updating the status of all assets inside booking */
-      await tx.asset.updateMany({
-        where: { id: { in: bookingFound.assets.map((a) => a.id) } },
-        data: { status: AssetStatus.CHECKED_OUT },
-      });
+    /** Atomically checkout via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_checkout", {
+      p_asset_ids: bookingFound.assets.map((a) => a.id),
+      p_kit_ids: kitIds,
+      p_booking_id: bookingFound.id,
+      p_new_status: isExpired ? BookingStatus.OVERDUE : BookingStatus.ONGOING,
+      p_new_from: (dataToUpdate.from as Date | undefined)?.toISOString(),
+      p_new_to: undefined,
+    });
+    if (rpcError) throw rpcError;
 
-      /** If there are any kits associated with the booking, then update their status */
-      if (hasKits) {
-        await tx.kit.updateMany({
-          where: { id: { in: kitIds } },
-          data: { status: KitStatus.CHECKED_OUT },
-        });
-      }
-
-      /** Finally update the booking */
-      return tx.booking.update({
-        where: { id: bookingFound.id },
-        data: dataToUpdate,
-        include: {
-          ...BOOKING_INCLUDE_FOR_EMAIL,
-          assets: true,
-        },
-      });
+    /** Re-fetch updated booking with includes */
+    const updatedBooking = await db.booking.findUniqueOrThrow({
+      where: { id: bookingFound.id },
+      include: {
+        ...BOOKING_INCLUDE_FOR_EMAIL,
+        assets: true,
+      },
     });
 
     // Create status transition note
@@ -1482,36 +1476,24 @@ export async function checkinBooking({
         })
       : [];
 
-    const updatedBooking = await db.$transaction(
-      async (tx) => {
-        if (assetsToCheckin.length > 0) {
-          await tx.asset.updateMany({
-            where: { id: { in: assetsToCheckin } },
-            data: { status: AssetStatus.AVAILABLE },
-          });
-        }
-        /* If there are any kits associated with the booking, then update their status */
-        if (hasKits) {
-          if (kitsToCheckin.length > 0) {
-            await tx.kit.updateMany({
-              where: { id: { in: kitsToCheckin } },
-              data: { status: KitStatus.AVAILABLE },
-            });
-          }
-        }
+    /** Atomically checkin via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_checkin", {
+      p_asset_ids: assetsToCheckin,
+      p_kit_ids: kitsToCheckin,
+      p_booking_id: bookingFound.id,
+      p_new_status: BookingStatus.COMPLETE,
+      p_new_to: (dataToUpdate.to as Date | undefined)?.toISOString(),
+    });
+    if (rpcError) throw rpcError;
 
-        /** Finally update the booking */
-        return tx.booking.update({
-          where: { id: bookingFound.id },
-          data: dataToUpdate,
-          include: {
-            ...BOOKING_INCLUDE_FOR_EMAIL,
-            assets: true,
-          },
-        });
+    /** Re-fetch updated booking with includes */
+    const updatedBooking = await db.booking.findUniqueOrThrow({
+      where: { id: bookingFound.id },
+      include: {
+        ...BOOKING_INCLUDE_FOR_EMAIL,
+        assets: true,
       },
-      { timeout: 15000 }
-    );
+    });
 
     // Create status transition note
     if (userId) {
@@ -1821,99 +1803,110 @@ export async function partialCheckinBooking({
       }
     }
 
-    const updatedBooking = await db.$transaction(async (tx) => {
-      // Update the status of checked-in assets to AVAILABLE
-      await tx.asset.updateMany({
-        where: { id: { in: assetIds } },
-        data: { status: AssetStatus.AVAILABLE },
-      });
-
-      // Only update kit status for kits that are completely checked in
-      if (completeKitIds.length > 0) {
-        await tx.kit.updateMany({
-          where: { id: { in: completeKitIds } },
-          data: { status: KitStatus.AVAILABLE },
-        });
+    // RPC handles atomic writes: asset status, kit status, partial checkin record
+    const { error: rpcError } = await sbDb.rpc(
+      "shelf_booking_partial_checkin",
+      {
+        p_asset_ids: assetIds,
+        p_kit_ids: completeKitIds,
+        p_booking_id: id,
+        p_user_id: userId,
+        p_checkin_count: assetIds.length,
       }
+    );
 
-      // Create partial check-in record for tracking
-      await tx.partialBookingCheckin.create({
-        data: {
-          bookingId: id,
-          checkedInById: userId,
-          assetIds,
-          checkinCount: assetIds.length,
-        },
+    if (rpcError) {
+      throw new ShelfError({
+        cause: rpcError,
+        message: rpcError.message,
+        label,
       });
+    }
 
-      // Create audit notes for each checked-in asset using createNotes
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user?.firstName,
-        lastName: user?.lastName,
-      });
-      const noteContent = `${actor} checked in via partial check-in.`;
-      await createNotes({
-        content: noteContent,
-        type: "UPDATE",
-        userId,
-        assetIds,
-      });
+    // Create audit notes for each checked-in asset
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user?.firstName,
+      lastName: user?.lastName,
+    });
+    const noteContent = `${actor} checked in via partial check-in.`;
+    await createNotes({
+      content: noteContent,
+      type: "UPDATE",
+      userId,
+      assetIds,
+    });
 
-      // BOOKING ACTIVITY LOG: Log partial check-in activity
-      // Get the kit and standalone asset data for consistent formatting
-      const assetsWithKitInfo = await tx.asset.findMany({
-        where: { id: { in: assetIds } },
-        select: {
-          id: true,
-          title: true,
-          kit: { select: { id: true, name: true } },
-        },
-      });
+    // BOOKING ACTIVITY LOG: Log partial check-in activity
+    const assetsWithKitInfo = await db.asset.findMany({
+      where: { id: { in: assetIds } },
+      select: {
+        id: true,
+        title: true,
+        kit: { select: { id: true, name: true } },
+      },
+    });
 
-      // Separate complete kits from individual assets
-      const completeKits: Array<{ id: string; name: string }> = [];
-      const standaloneAssets: Array<{ id: string; title: string }> = [];
-      const processedKitIds = new Set<string>();
+    // Separate complete kits from individual assets
+    const completeKits: Array<{ id: string; name: string }> = [];
+    const standaloneAssets: Array<{ id: string; title: string }> = [];
+    const processedKitIds = new Set<string>();
 
-      for (const asset of assetsWithKitInfo) {
-        if (
-          asset.kit &&
-          completeKitIds.includes(asset.kit.id) &&
-          !processedKitIds.has(asset.kit.id)
-        ) {
-          completeKits.push({ id: asset.kit.id, name: asset.kit.name });
-          processedKitIds.add(asset.kit.id);
-        } else if (!asset.kit) {
-          standaloneAssets.push({ id: asset.id, title: asset.title });
-        }
+    for (const asset of assetsWithKitInfo) {
+      if (
+        asset.kit &&
+        completeKitIds.includes(asset.kit.id) &&
+        !processedKitIds.has(asset.kit.id)
+      ) {
+        completeKits.push({ id: asset.kit.id, name: asset.kit.name });
+        processedKitIds.add(asset.kit.id);
+      } else if (!asset.kit) {
+        standaloneAssets.push({ id: asset.id, title: asset.title });
       }
+    }
 
-      const hasKits = completeKits.length > 0;
-      const hasAssets = standaloneAssets.length > 0;
+    const hasKits = completeKits.length > 0;
+    const hasAssets = standaloneAssets.length > 0;
 
-      let itemsDescription = "";
-      if (hasKits && hasAssets) {
-        const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
-        const assetContent = wrapAssetsWithDataForNote(
-          standaloneAssets,
-          "checked in"
-        );
-        itemsDescription = `${assetContent} and ${kitContent}`;
-      } else if (hasKits) {
-        const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
-        itemsDescription = kitContent;
-      } else if (hasAssets) {
-        const assetContent = wrapAssetsWithDataForNote(
-          standaloneAssets,
-          "checked in"
-        );
-        itemsDescription = assetContent;
-      }
+    let itemsDescription = "";
+    if (hasKits && hasAssets) {
+      const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
+      const assetContent = wrapAssetsWithDataForNote(
+        standaloneAssets,
+        "checked in"
+      );
+      itemsDescription = `${assetContent} and ${kitContent}`;
+    } else if (hasKits) {
+      const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
+      itemsDescription = kitContent;
+    } else if (hasAssets) {
+      const assetContent = wrapAssetsWithDataForNote(
+        standaloneAssets,
+        "checked in"
+      );
+      itemsDescription = assetContent;
+    }
 
-      // Get the updated booking with all original assets first to calculate remaining count
-      const updatedBookingForNote = await tx.booking.findUniqueOrThrow({
+    // Get the updated booking to calculate remaining count
+    const updatedBookingForNote = await db.booking.findUniqueOrThrow({
+      where: { id },
+      include: {
+        assets: true,
+        custodianUser: true,
+        custodianTeamMember: true,
+        _count: { select: { assets: true } },
+      },
+    });
+
+    const remainingCount =
+      updatedBookingForNote.assets.length - assetIds.length;
+    const isCompletingBooking = remainingCount === 0;
+
+    if (isCompletingBooking) {
+      // Update booking status to COMPLETE
+      const completedBooking = await db.booking.update({
         where: { id },
+        data: { status: BookingStatus.COMPLETE },
         include: {
           assets: true,
           custodianUser: true,
@@ -1922,67 +1915,47 @@ export async function partialCheckinBooking({
         },
       });
 
-      const remainingCount =
-        updatedBookingForNote.assets.length - assetIds.length;
-      const isCompletingBooking = remainingCount === 0;
+      // Create combined completion message
+      const fromStatusBadge = wrapBookingStatusForNote(
+        updatedBookingForNote.status,
+        completedBooking.custodianUserId || undefined
+      );
+      const toStatusBadge = wrapBookingStatusForNote(
+        BookingStatus.COMPLETE,
+        completedBooking.custodianUserId || undefined
+      );
 
-      if (isCompletingBooking) {
-        // Update booking status to COMPLETE
-        const completedBooking = await tx.booking.update({
-          where: { id },
-          data: { status: BookingStatus.COMPLETE },
-          include: {
-            assets: true,
-            custodianUser: true,
-            custodianTeamMember: true,
-            _count: { select: { assets: true } },
-          },
-        });
+      await createSystemBookingNote({
+        bookingId: id,
+        content: `${wrapUserLinkForNote(
+          user!
+        )} performed a partial check-in: ${itemsDescription} and completed the booking. Status changed from ${fromStatusBadge} to ${toStatusBadge}`,
+      });
 
-        // Create combined completion message
-        const fromStatusBadge = wrapBookingStatusForNote(
-          updatedBookingForNote.status,
-          completedBooking.custodianUserId || undefined
-        );
-        const toStatusBadge = wrapBookingStatusForNote(
-          BookingStatus.COMPLETE,
-          completedBooking.custodianUserId || undefined
-        );
+      return {
+        booking: completedBooking,
+        checkedInAssetCount: assetIds.length,
+        remainingAssetCount: 0,
+        isComplete: true,
+      };
+    } else {
+      // Regular partial check-in
+      const remainingText = ` (Remaining: ${remainingCount})`;
 
-        await createSystemBookingNote({
-          bookingId: id,
-          content: `${wrapUserLinkForNote(
-            user!
-          )} performed a partial check-in: ${itemsDescription} and completed the booking. Status changed from ${fromStatusBadge} to ${toStatusBadge}`,
-        });
+      await createSystemBookingNote({
+        bookingId: id,
+        content: `${wrapUserLinkForNote(
+          user!
+        )} performed a partial check-in: ${itemsDescription}${remainingText}.`,
+      });
 
-        return {
-          booking: completedBooking,
-          checkedInAssetCount: assetIds.length,
-          remainingAssetCount: 0,
-          isComplete: true,
-        };
-      } else {
-        // Regular partial check-in
-        const remainingText = ` (Remaining: ${remainingCount})`;
-
-        await createSystemBookingNote({
-          bookingId: id,
-          content: `${wrapUserLinkForNote(
-            user!
-          )} performed a partial check-in: ${itemsDescription}${remainingText}.`,
-        });
-
-        return {
-          booking: updatedBookingForNote,
-          checkedInAssetCount: assetIds.length,
-          remainingAssetCount: remainingCount,
-          isComplete: false,
-        };
-      }
-    });
-
-    return updatedBooking;
+      return {
+        booking: updatedBookingForNote,
+        checkedInAssetCount: assetIds.length,
+        remainingAssetCount: remainingCount,
+        isComplete: false,
+      };
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -2006,92 +1979,45 @@ export async function updateBookingAssets({
   userId?: User["id"];
 }) {
   try {
-    const booking = await db.$transaction(async (tx) => {
-      // Verify booking exists before inserting into the join table,
-      // so a stale/deleted booking returns a proper 404 (P2025)
-      // instead of a FK violation (P2003)
-      const b = await tx.booking.findUniqueOrThrow({
-        where: { id, organizationId },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-        },
+    const { data: rpcResult, error: rpcError } = await sbDb.rpc(
+      "shelf_booking_update_assets",
+      {
+        p_asset_ids: assetIds,
+        p_booking_id: id,
+        p_org_id: organizationId,
+        p_kit_ids: kitIds ?? [],
+      }
+    );
+
+    if (rpcError) {
+      throw new ShelfError({
+        cause: rpcError,
+        message: rpcError.message,
+        label,
       });
+    }
 
-      // Dedupe assetIds so duplicate entries don't cause false validation failures
-      // (findMany returns unique rows, so duplicates would inflate the expected count)
-      const uniqueAssetIds = [...new Set(assetIds)];
+    const result = rpcResult as unknown as {
+      success?: boolean;
+      error?: string;
+      status?: number;
+      bookingId?: string;
+      bookingStatus?: string;
+    };
 
-      // Validate that all asset IDs exist before inserting into the join table
-      // to prevent FK violations when assets are deleted between UI load and submission
-      const validAssets = await tx.asset.findMany({
-        where: { id: { in: uniqueAssetIds }, organizationId },
-        select: { id: true },
+    if (result?.error) {
+      throw new ShelfError({
+        cause: null,
+        message: result.error,
+        label,
+        shouldBeCaptured: false,
+        status: (result.status as 400 | 500) ?? 400,
       });
-      const validAssetIds = validAssets.map((a) => a.id);
+    }
 
-      if (validAssetIds.length === 0) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "None of the selected assets exist. They may have been deleted.",
-          label,
-          shouldBeCaptured: false,
-          status: 400,
-        });
-      }
-
-      if (validAssetIds.length !== uniqueAssetIds.length) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "Some of the selected assets no longer exist. Please reload and try again.",
-          label,
-          shouldBeCaptured: false,
-          status: 400,
-        });
-      }
-
-      await Promise.all([
-        // Bulk insert into the join table in a single SQL statement instead of
-        // N individual connect operations which cause transaction timeouts
-        // for large bookings
-        tx.$executeRaw`
-          INSERT INTO "_AssetToBooking" ("A", "B")
-          SELECT unnest(${validAssetIds}::text[]), ${id}
-          ON CONFLICT ("A", "B") DO NOTHING
-        `,
-        // Touch updatedAt since the raw INSERT doesn't update the booking row
-        tx.booking.update({
-          where: { id },
-          data: { updatedAt: new Date() },
-        }),
-      ]);
-
-      /**
-       *  When adding an asset to a booking, we need to update the status of the asset to CHECKED_OUT if the booking is ONGOING or OVERDUE
-       */
-      if (
-        b.status === BookingStatus.ONGOING ||
-        b.status === BookingStatus.OVERDUE
-      ) {
-        await tx.asset.updateMany({
-          where: { id: { in: validAssetIds }, organizationId },
-          data: { status: AssetStatus.CHECKED_OUT },
-        });
-
-        /**
-         * Also update kit status to CHECKED_OUT for any kits that contain these assets
-         */
-        if (kitIds && kitIds.length > 0) {
-          await tx.kit.updateMany({
-            where: { id: { in: kitIds }, organizationId },
-            data: { status: KitStatus.CHECKED_OUT },
-          });
-        }
-      }
-      return b;
+    const booking = await db.booking.findUniqueOrThrow({
+      where: { id, organizationId },
+      select: { id: true, name: true, status: true },
     });
 
     // BOOKING ACTIVITY LOG: Log asset addition activity
@@ -2287,33 +2213,25 @@ export async function cancelBooking({
     }
 
     const kitIds = getKitIdsByAssets(bookingFound.assets);
-    const hasKits = kitIds.length > 0;
 
-    const booking = await db.$transaction(async (tx) => {
-      /** If booking is ONGOING or OVERDUE, we have to make the assets available */
-      if (bookingFound.status !== BookingStatus.RESERVED) {
-        await tx.asset.updateMany({
-          where: { id: { in: bookingFound.assets.map((a) => a.id) } },
-          data: { status: AssetStatus.AVAILABLE },
-        });
+    /** Atomically cancel via RPC */
+    const wasActive = bookingFound.status !== BookingStatus.RESERVED;
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_cancel", {
+      p_asset_ids: bookingFound.assets.map((a) => a.id),
+      p_kit_ids: kitIds,
+      p_booking_id: bookingFound.id,
+      p_was_active: wasActive,
+      p_cancellation_reason: cancellationReason ?? undefined,
+    });
+    if (rpcError) throw rpcError;
 
-        /** If there are any kits, then update their status as well */
-        if (hasKits) {
-          await tx.kit.updateMany({
-            where: { id: { in: kitIds } },
-            data: { status: KitStatus.AVAILABLE },
-          });
-        }
-      }
-
-      return tx.booking.update({
-        where: { id: bookingFound.id },
-        data: { status: BookingStatus.CANCELLED, cancellationReason },
-        include: {
-          assets: true,
-          ...BOOKING_INCLUDE_FOR_EMAIL,
-        },
-      });
+    /** Re-fetch updated booking with includes */
+    const booking = await db.booking.findUniqueOrThrow({
+      where: { id: bookingFound.id },
+      include: {
+        assets: true,
+        ...BOOKING_INCLUDE_FOR_EMAIL,
+      },
     });
 
     /** Cancel any active schedulers */
@@ -2527,52 +2445,41 @@ export async function extendBooking({
     }
 
     /** Wrap conflict detection and update in a transaction to prevent race conditions */
-    const updatedBooking = await db.$transaction(async (tx) => {
-      /** Checking if the booking period is clashing with any other booking containing the same active asset(s).*/
-      const clashingBookings: ClashingBooking[] = await tx.booking.findMany({
-        where: {
-          id: { not: booking.id },
-          organizationId,
-          status: {
-            in: [BookingStatus.RESERVED],
-          },
-          assets: { some: { id: { in: activeAssets.map((a) => a.id) } } },
-          // Check for bookings that start within the extension period
-          from: {
-            gt: booking.to,
-            lte: newEndDate,
-          },
-        },
-        select: { id: true, name: true },
-      });
-
-      if (clashingBookings?.length > 0) {
-        throw new ShelfError({
-          cause: null,
-          label,
-          message:
-            "Cannot extend booking because the extended period is overlapping with the following bookings:",
-          additionalData: {
-            clashingBookings: [...clashingBookings],
-          },
-          shouldBeCaptured: false,
-        });
+    /** Atomically check conflicts and extend booking via RPC */
+    const { data: rpcResult, error: rpcError } = await sbDb.rpc(
+      "shelf_booking_extend",
+      {
+        p_booking_id: booking.id,
+        p_org_id: organizationId,
+        p_new_end_date: newEndDate.toISOString(),
+        p_current_to: booking.to!.toISOString(),
+        p_active_asset_ids: activeAssets.map((a) => a.id),
+        p_current_status: booking.status,
       }
+    );
+    if (rpcError) throw rpcError;
 
-      return tx.booking.update({
-        where: { id: booking.id },
-        data: {
-          /**
-           * If booking is currently OVERDUE we have to make it ONGOING
-           */
-          status:
-            booking.status === BookingStatus.OVERDUE
-              ? BookingStatus.ONGOING
-              : undefined,
-          to: newEndDate,
+    const result = rpcResult as {
+      success: boolean;
+      clashingBookings?: ClashingBooking[];
+    };
+    if (!result.success) {
+      throw new ShelfError({
+        cause: null,
+        label,
+        message:
+          "Cannot extend booking because the extended period is overlapping with the following bookings:",
+        additionalData: {
+          clashingBookings: result.clashingBookings ?? [],
         },
-        include: BOOKING_INCLUDE_FOR_EMAIL,
+        shouldBeCaptured: false,
       });
+    }
+
+    /** Re-fetch the updated booking with includes for email */
+    const updatedBooking = await db.booking.findUniqueOrThrow({
+      where: { id: booking.id },
+      include: BOOKING_INCLUDE_FOR_EMAIL,
     });
 
     // Add activity log for booking extension
@@ -3758,51 +3665,36 @@ export async function bulkDeleteBookings({
       (booking) => !!booking.activeSchedulerReference
     );
 
-    await db.$transaction(async (tx) => {
-      /** Deleting all selected bookings */
-      await tx.booking.deleteMany({
-        where: { id: { in: bookings.map((booking) => booking.id) } },
-      });
+    /** Pre-compute data for RPC */
+    const allActiveAssets = overdueOrOngoingBookings.flatMap(
+      (booking) => booking.assets
+    );
+    const activeAssetIds = allActiveAssets.map((a) => a.id);
+    const activeKitIds = [
+      ...new Set(
+        allActiveAssets.filter((a) => !!a.kitId).map((a) => a.kitId as string)
+      ),
+    ];
 
-      /** Making assets and kits available */
-      if (overdueOrOngoingBookings.length > 0) {
-        const allAssets = overdueOrOngoingBookings.flatMap(
-          (booking) => booking.assets
-        );
+    const noteData = bookings.flatMap((booking) =>
+      booking.assets.map((asset) => ({
+        assetId: asset.id,
+        content: `**${user?.firstName?.trim()} ${user?.lastName?.trim()}** deleted booking **${
+          booking.name
+        }**.`,
+      }))
+    );
 
-        const allKitIds = allAssets
-          .filter((asset) => !!asset.kitId)
-          .map((asset) => asset.kitId as string);
-
-        const uniqueKitIds = new Set(allKitIds);
-
-        await tx.asset.updateMany({
-          where: { id: { in: allAssets.map((asset) => asset.id) } },
-          data: { status: AssetStatus.AVAILABLE },
-        });
-
-        await tx.kit.updateMany({
-          where: { id: { in: [...uniqueKitIds] } },
-          data: { status: KitStatus.AVAILABLE },
-        });
-      }
-
-      /** Making notes for all the assets */
-      const notesData = bookings
-        .map((booking) =>
-          booking.assets.map((asset) => ({
-            userId,
-            assetId: asset.id,
-            content: `**${user?.firstName?.trim()} ${user?.lastName?.trim()}** deleted booking **${
-              booking.name
-            }**.`,
-            type: "UPDATE" as const,
-          }))
-        )
-        .flat() satisfies Prisma.NoteCreateManyInput[];
-
-      await tx.note.createMany({ data: notesData });
+    /** Atomically delete bookings, revert statuses, create notes via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_bulk_delete", {
+      p_booking_ids: bookings.map((b) => b.id),
+      p_active_asset_ids: activeAssetIds,
+      p_active_kit_ids: activeKitIds,
+      p_note_asset_ids: noteData.map((n) => n.assetId),
+      p_note_contents: noteData.map((n) => n.content),
+      p_note_user_id: userId,
     });
+    if (rpcError) throw rpcError;
 
     /** Cancelling scheduler */
     await Promise.all(
@@ -3896,23 +3788,23 @@ export async function bulkArchiveBookings({
       });
     }
 
-    await db.$transaction(async (tx) => {
-      /** Updating status of bookings to ARCHIVED  */
-      await tx.booking.updateMany({
-        where: { id: { in: bookings.map((b) => b.id) } },
-        data: { status: BookingStatus.ARCHIVED },
-      });
+    /** Updating status of bookings to ARCHIVED */
+    const bookingIdList = bookings.map((b) => b.id);
+    const { error: updateError } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.ARCHIVED })
+      .in("id", bookingIdList);
+    if (updateError) throw updateError;
 
-      /** Create booking status transition notes for each booking */
-      for (const booking of bookings) {
-        await createStatusTransitionNote({
-          bookingId: booking.id,
-          fromStatus: booking.status,
-          toStatus: BookingStatus.ARCHIVED,
-          custodianUserId: booking.custodianUserId || undefined,
-        });
-      }
-    });
+    /** Create booking status transition notes for each booking */
+    for (const booking of bookings) {
+      await createStatusTransitionNote({
+        bookingId: booking.id,
+        fromStatus: booking.status as BookingStatus,
+        toStatus: BookingStatus.ARCHIVED,
+        custodianUserId: booking.custodianUserId || undefined,
+      });
+    }
 
     /** Cancel any active schedulers */
     await Promise.all(bookings.map((b) => cancelScheduler(b)));
@@ -4017,65 +3909,48 @@ export async function bulkCancelBookings({
       (booking) => !!booking.activeSchedulerReference
     );
 
-    await db.$transaction(async (tx) => {
-      /** Updating status of bookings to CANCELLED */
-      await tx.booking.updateMany({
-        where: { id: { in: bookings.map((b) => b.id) } },
-        data: { status: BookingStatus.CANCELLED },
-      });
+    /** Pre-compute data for RPC */
+    const allActiveAssets = ongoingOrOverdueBookings.flatMap((b) => b.assets);
+    const activeAssetIds = allActiveAssets.map((a) => a.id);
+    const activeKitIds = [
+      ...new Set(
+        allActiveAssets.filter((a) => !!a.kitId).map((a) => a.kitId as string)
+      ),
+    ];
 
-      /** Updating status of assets and kits  */
-      if (ongoingOrOverdueBookings.length > 0) {
-        const allAssets = ongoingOrOverdueBookings.flatMap((b) => b.assets);
-        const allKitIds = allAssets
-          .filter((a) => !!a.kitId)
-          .map((a) => a.kitId as string);
-
-        const uniqueKitIds = new Set(allKitIds);
-
-        /** Making assets available */
-        await tx.asset.updateMany({
-          where: { id: { in: allAssets.map((a) => a.id) } },
-          data: { status: AssetStatus.AVAILABLE },
-        });
-
-        /** Making kits available */
-        await tx.kit.updateMany({
-          where: { id: { in: [...uniqueKitIds] } },
-          data: { status: KitStatus.AVAILABLE },
-        });
-      }
-
-      /** Making notes for all the assets */
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user?.firstName,
-        lastName: user?.lastName,
-      });
-      const notesData = bookings
-        .map((b) =>
-          b.assets.map((asset) => ({
-            assetId: asset.id,
-            content: `${actor} cancelled booking.`,
-            userId,
-            type: "UPDATE" as const,
-          }))
-        )
-        .flat() satisfies Prisma.NoteCreateManyInput[];
-
-      await tx.note.createMany({ data: notesData });
-
-      /** Create booking status transition notes for each booking */
-      for (const booking of bookings) {
-        await createStatusTransitionNote({
-          bookingId: booking.id,
-          fromStatus: booking.status,
-          toStatus: BookingStatus.CANCELLED,
-          userId,
-          custodianUserId: booking.custodianUserId || undefined,
-        });
-      }
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user?.firstName,
+      lastName: user?.lastName,
     });
+    const noteData = bookings.flatMap((b) =>
+      b.assets.map((asset) => ({
+        assetId: asset.id,
+        content: `${actor} cancelled booking.`,
+      }))
+    );
+
+    /** Atomically cancel bookings, revert statuses, create notes via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_bulk_cancel", {
+      p_booking_ids: bookings.map((b) => b.id),
+      p_active_asset_ids: activeAssetIds,
+      p_active_kit_ids: activeKitIds,
+      p_note_asset_ids: noteData.map((n) => n.assetId),
+      p_note_contents: noteData.map((n) => n.content),
+      p_note_user_id: userId,
+    });
+    if (rpcError) throw rpcError;
+
+    /** Create booking status transition notes (already uses sbDb) */
+    for (const booking of bookings) {
+      await createStatusTransitionNote({
+        bookingId: booking.id,
+        fromStatus: booking.status as BookingStatus,
+        toStatus: BookingStatus.CANCELLED,
+        userId,
+        custodianUserId: booking.custodianUserId || undefined,
+      });
+    }
 
     /** Cancelling scheduler */
     await Promise.all(
@@ -4310,43 +4185,22 @@ export async function addScannedAssetsToBooking({
      * Step 1: Add assets to booking inside a transaction so we can mirror the
      * status-sync behaviour used in manage-assets.
      */
-    const updatedBooking = await db.$transaction(async (tx) => {
-      const booking = await tx.booking.update({
-        where: { id: bookingId, organizationId },
-        data: {
-          assets: {
-            connect: assetIds.map((id) => ({ id })),
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-        },
-      });
-
-      /** When booking is active, newly added items must be flagged checked out */
-      const isActiveBooking =
-        booking.status === BookingStatus.ONGOING ||
-        booking.status === BookingStatus.OVERDUE;
-
-      if (isActiveBooking) {
-        if (assetIds.length > 0) {
-          await tx.asset.updateMany({
-            where: { id: { in: assetIds }, organizationId },
-            data: { status: AssetStatus.CHECKED_OUT },
-          });
-        }
-
-        if (kitIds.length > 0) {
-          await tx.kit.updateMany({
-            where: { id: { in: kitIds }, organizationId },
-            data: { status: KitStatus.CHECKED_OUT },
-          });
-        }
+    /** Atomically connect assets and sync statuses via RPC */
+    const { error: rpcError } = await sbDb.rpc(
+      "shelf_booking_add_scanned_assets",
+      {
+        p_asset_ids: assetIds,
+        p_kit_ids: kitIds,
+        p_booking_id: bookingId,
+        p_org_id: organizationId,
       }
+    );
+    if (rpcError) throw rpcError;
 
-      return booking;
+    /** Fetch booking details for notes and return */
+    const updatedBooking = await db.booking.findUniqueOrThrow({
+      where: { id: bookingId },
+      select: { id: true, name: true, status: true },
     });
 
     /** Step 2: Create activity notes */

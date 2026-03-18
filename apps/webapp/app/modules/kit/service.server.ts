@@ -20,6 +20,7 @@ import {
 import type { LoaderFunctionArgs } from "react-router";
 import invariant from "tiny-invariant";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import type { AssetIndexSettingsRow } from "~/modules/asset-index-settings/service.server";
 import {
@@ -784,29 +785,14 @@ export async function releaseCustody({
       : "**Unknown Custodian**";
     const kitLink = wrapLinkForNote(`/kits/${kit.id}`, kit.name.trim());
 
-    // Use transaction for atomicity - prevents orphaned custody records on partial failure
-    await db.$transaction(async (tx) => {
-      // Delete kit custody and update kit status
-      await tx.kit.update({
-        where: { id: kitId, organizationId },
-        data: {
-          status: KitStatus.AVAILABLE,
-          custody: { delete: true },
-        },
-      });
-
-      // Delete asset custody records first, then update asset status
-      const assetIds = kit.assets.map((a) => a.id);
-
-      await tx.custody.deleteMany({
-        where: { assetId: { in: assetIds } },
-      });
-
-      await tx.asset.updateMany({
-        where: { id: { in: assetIds }, organizationId },
-        data: { status: AssetStatus.AVAILABLE },
-      });
+    // Use RPC for atomicity - prevents orphaned custody records on partial failure
+    const assetIds = kit.assets.map((a) => a.id);
+    const { error: rpcError } = await sbDb.rpc("shelf_kit_release_custody", {
+      p_kit_id: kitId,
+      p_org_id: organizationId,
+      p_asset_ids: assetIds,
     });
+    if (rpcError) throw rpcError;
 
     // Notes can be created outside transaction (not critical for consistency)
     await createNotes({
@@ -1007,19 +993,20 @@ export async function bulkDeleteKits({
       select: { id: true, image: true },
     });
 
-    return await db.$transaction(async (tx) => {
-      /** Deleting all kits */
-      await tx.kit.deleteMany({
-        where: { id: { in: kits.map((kit) => kit.id) } },
-      });
+    const kitIdList = kits.map((kit) => kit.id);
 
-      /** Deleting images of the kits (if any) */
-      const kitWithImages = kits.filter((kit) => !!kit.image);
+    /** Deleting all kits */
+    const { error: deleteError } = await sbDb
+      .from("Kit")
+      .delete()
+      .in("id", kitIdList);
+    if (deleteError) throw deleteError;
 
-      await Promise.all(
-        kitWithImages.map((kit) => deleteKitImage({ url: kit.image! }))
-      );
-    });
+    /** Deleting images of the kits (if any) */
+    const kitWithImages = kits.filter((kit) => !!kit.image);
+    await Promise.all(
+      kitWithImages.map((kit) => deleteKitImage({ url: kit.image! }))
+    );
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -1120,60 +1107,47 @@ export async function bulkAssignKitCustody({
      * 1. Create custodies for kit
      * 2. Update status of all kits to IN_CUSTODY
      */
-    return await db.$transaction(async (tx) => {
-      /** Creating custodies over kits */
-      await tx.kitCustody.createMany({
-        data: kits.map((kit) => ({
-          custodianId,
-          kitId: kit.id,
-        })),
-      });
-
-      /** Updating status of all kits */
-      await tx.kit.updateMany({
-        where: { id: { in: kits.map((kit) => kit.id) } },
-        data: { status: KitStatus.IN_CUSTODY },
-      });
-
-      /** If a kit is going to be in custody, then all it's assets should also inherit the same status */
-
-      /** Creating custodies over assets of kits */
-      await tx.custody.createMany({
-        data: allAssetsOfAllKits.map((asset) => ({
-          teamMemberId: custodianId,
-          assetId: asset.id,
-        })),
-      });
-
-      /** Updating status of all assets of kits */
-      await tx.asset.updateMany({
-        where: { id: { in: allAssetsOfAllKits.map((asset) => asset.id) } },
-        data: { status: AssetStatus.IN_CUSTODY },
-      });
-
-      /** Creating notes for all the assets of the kit */
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user?.firstName,
-        lastName: user?.lastName,
-      });
-      const custodianDisplay = custodianTeamMember
-        ? wrapCustodianForNote({ teamMember: custodianTeamMember })
-        : `**${custodianName.trim()}**`;
-      await tx.note.createMany({
-        data: allAssetsOfAllKits.map((asset) => {
-          const kitLink = asset.kit
-            ? wrapLinkForNote(`/kits/${asset.kit.id}`, asset.kit.name.trim())
-            : "**Unknown Kit**";
-          return {
-            content: `${actor} granted ${custodianDisplay} custody via kit assignment ${kitLink}.`,
-            type: "UPDATE",
-            userId,
-            assetId: asset.id,
-          };
-        }),
-      });
+    /** Pre-compute note contents for each asset */
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user?.firstName,
+      lastName: user?.lastName,
     });
+    const custodianDisplay = custodianTeamMember
+      ? wrapCustodianForNote({ teamMember: custodianTeamMember })
+      : `**${custodianName.trim()}**`;
+
+    const noteAssetIds: string[] = [];
+    const noteContents: string[] = [];
+    for (const asset of allAssetsOfAllKits) {
+      const kitLink = asset.kit
+        ? wrapLinkForNote(`/kits/${asset.kit.id}`, asset.kit.name.trim())
+        : "**Unknown Kit**";
+      noteAssetIds.push(asset.id);
+      noteContents.push(
+        `${actor} granted ${custodianDisplay} custody via kit assignment ${kitLink}.`
+      );
+    }
+
+    const { error: rpcError } = await sbDb.rpc(
+      "shelf_kit_bulk_assign_custody",
+      {
+        p_kit_ids: kits.map((kit) => kit.id),
+        p_custodian_id: custodianId,
+        p_asset_ids: allAssetsOfAllKits.map((asset) => asset.id),
+        p_user_id: userId,
+        p_note_asset_ids: noteAssetIds,
+        p_note_contents: noteContents,
+      }
+    );
+
+    if (rpcError) {
+      throw new ShelfError({
+        cause: rpcError,
+        message: rpcError.message,
+        label,
+      });
+    }
   } catch (cause) {
     const message =
       cause instanceof ShelfError
@@ -1259,56 +1233,46 @@ export async function bulkReleaseKitCustody({
 
     const allAssetsOfAllKits = kits.flatMap((kit) => kit.assets);
 
-    return await db.$transaction(async (tx) => {
-      /** Deleting all custodies of kits */
-      await tx.kitCustody.deleteMany({
-        where: {
-          kitId: { in: kits.map((kit) => kit.id) },
-        },
-      });
-
-      /** Updating status of all kits to AVAILABLE */
-      await tx.kit.updateMany({
-        where: { id: { in: kits.map((kit) => kit.id) } },
-        data: { status: KitStatus.AVAILABLE },
-      });
-
-      /** Deleting all custodies of all assets of kits */
-      await tx.custody.deleteMany({
-        where: {
-          assetId: { in: allAssetsOfAllKits.map((asset) => asset.id) },
-        },
-      });
-
-      /** Making all the assets of the kit AVAILABLE */
-      await tx.asset.updateMany({
-        where: { id: { in: allAssetsOfAllKits.map((asset) => asset.id) } },
-        data: { status: AssetStatus.AVAILABLE },
-      });
-
-      /** Creating notes for all the assets */
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user?.firstName,
-        lastName: user?.lastName,
-      });
-      const custodianDisplay = custodian
-        ? wrapCustodianForNote({ teamMember: custodian })
-        : "**Unknown Custodian**";
-      await tx.note.createMany({
-        data: allAssetsOfAllKits.map((asset) => {
-          const kitLink = asset.kit
-            ? wrapLinkForNote(`/kits/${asset.kit.id}`, asset.kit.name.trim())
-            : "**Unknown Kit**";
-          return {
-            content: `${actor} released ${custodianDisplay}'s custody via kit assignment ${kitLink}.`,
-            type: "UPDATE",
-            userId,
-            assetId: asset.id,
-          };
-        }),
-      });
+    /** Pre-compute note contents for each asset */
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user?.firstName,
+      lastName: user?.lastName,
     });
+    const custodianDisplay = custodian
+      ? wrapCustodianForNote({ teamMember: custodian })
+      : "**Unknown Custodian**";
+
+    const noteAssetIds: string[] = [];
+    const noteContents: string[] = [];
+    for (const asset of allAssetsOfAllKits) {
+      const kitLink = asset.kit
+        ? wrapLinkForNote(`/kits/${asset.kit.id}`, asset.kit.name.trim())
+        : "**Unknown Kit**";
+      noteAssetIds.push(asset.id);
+      noteContents.push(
+        `${actor} released ${custodianDisplay}'s custody via kit assignment ${kitLink}.`
+      );
+    }
+
+    const { error: rpcError } = await sbDb.rpc(
+      "shelf_kit_bulk_release_custody",
+      {
+        p_kit_ids: kits.map((kit) => kit.id),
+        p_asset_ids: allAssetsOfAllKits.map((asset) => asset.id),
+        p_user_id: userId,
+        p_note_asset_ids: noteAssetIds,
+        p_note_contents: noteContents,
+      }
+    );
+
+    if (rpcError) {
+      throw new ShelfError({
+        cause: rpcError,
+        message: rpcError.message,
+        label,
+      });
+    }
   } catch (cause) {
     const message =
       cause instanceof ShelfError
@@ -2270,17 +2234,15 @@ export async function updateKitAssets({
       const custodianDisplay = kitCustodianDisplay ?? "**Unknown Custodian**";
       const assetIds = removedAssets.map((a) => a.id);
 
-      // Use transaction for atomicity - prevents orphaned custody records
-      await db.$transaction(async (tx) => {
-        await tx.custody.deleteMany({
-          where: { assetId: { in: assetIds } },
-        });
-
-        await tx.asset.updateMany({
-          where: { id: { in: assetIds }, organizationId },
-          data: { status: AssetStatus.AVAILABLE },
-        });
-      });
+      // Use RPC for atomicity - prevents orphaned custody records
+      const { error: rpcError } = await sbDb.rpc(
+        "shelf_kit_release_removed_assets",
+        {
+          p_asset_ids: assetIds,
+          p_org_id: organizationId,
+        }
+      );
+      if (rpcError) throw rpcError;
 
       // Notes can be created outside transaction (not critical for consistency)
       await createNotes({
@@ -2405,70 +2367,47 @@ export async function bulkRemoveAssetsFromKits({
       },
     });
 
-    await db.$transaction(async (tx) => {
-      /**
-       * If there are assets whose kits were in custody, then we have to remove the custody FIRST
-       * to avoid orphaned custody records when status is set to AVAILABLE
-       */
-      const assetsWhoseKitsInCustody = assets.filter(
-        (asset) => !!asset.kit?.custody && asset.custody
-      );
+    /** Pre-compute all data needed for the atomic RPC call */
+    const assetsWhoseKitsInCustody = assets.filter(
+      (asset) => !!asset.kit?.custody && asset.custody
+    );
 
-      const custodyIdsToDelete = assetsWhoseKitsInCustody.map((a) => {
-        invariant(a.custody, "Custody not found over asset");
-        return a.custody.id;
-      });
-
-      if (custodyIdsToDelete.length > 0) {
-        await tx.custody.deleteMany({
-          where: { id: { in: custodyIdsToDelete } },
-        });
-      }
-
-      /** Removing assets from kits - AFTER custody is deleted */
-      await tx.asset.updateMany({
-        where: { id: { in: assets.map((a) => a.id) } },
-        data: { kitId: null, status: AssetStatus.AVAILABLE },
-      });
-
-      /** Create notes for assets released from custody */
-      if (assetsWhoseKitsInCustody.length > 0) {
-        await tx.note.createMany({
-          data: assetsWhoseKitsInCustody.map((asset) => {
-            const custodianDisplay = asset.custody?.custodian
-              ? wrapCustodianForNote({
-                  teamMember: asset.custody.custodian,
-                })
-              : "**Unknown Custodian**";
-            return {
-              content: `${actor} released ${custodianDisplay}'s custody.`,
-              type: "UPDATE",
-              userId,
-              assetId: asset.id,
-            };
-          }),
-        });
-      }
-
-      /** Create notes for assets removed from kit */
-      const assetsRemovedFromKit = assets.filter((asset) => asset.kit);
-      if (assetsRemovedFromKit.length > 0) {
-        await tx.note.createMany({
-          data: assetsRemovedFromKit.map((asset) => {
-            const kitLink = wrapLinkForNote(
-              `/kits/${asset.kit!.id}`,
-              asset.kit!.name.trim()
-            );
-            return {
-              content: `${actor} removed asset from ${kitLink}.`,
-              type: "UPDATE",
-              userId,
-              assetId: asset.id,
-            };
-          }),
-        });
-      }
+    const custodyIdsToDelete = assetsWhoseKitsInCustody.map((a) => {
+      invariant(a.custody, "Custody not found over asset");
+      return a.custody.id;
     });
+
+    // Pre-compute custody release note contents
+    const custodyNoteAssetIds = assetsWhoseKitsInCustody.map((a) => a.id);
+    const custodyNoteContents = assetsWhoseKitsInCustody.map((asset) => {
+      const custodianDisplay = asset.custody?.custodian
+        ? wrapCustodianForNote({ teamMember: asset.custody.custodian })
+        : "**Unknown Custodian**";
+      return `${actor} released ${custodianDisplay}'s custody.`;
+    });
+
+    // Pre-compute kit removal note contents
+    const assetsRemovedFromKit = assets.filter((asset) => asset.kit);
+    const kitNoteAssetIds = assetsRemovedFromKit.map((a) => a.id);
+    const kitNoteContents = assetsRemovedFromKit.map((asset) => {
+      const kitLink = wrapLinkForNote(
+        `/kits/${asset.kit!.id}`,
+        asset.kit!.name.trim()
+      );
+      return `${actor} removed asset from ${kitLink}.`;
+    });
+
+    /** Atomically remove assets from kits via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_kit_bulk_remove_assets", {
+      p_all_asset_ids: assets.map((a) => a.id),
+      p_custody_ids_to_delete: custodyIdsToDelete,
+      p_user_id: userId,
+      p_custody_note_asset_ids: custodyNoteAssetIds,
+      p_custody_note_contents: custodyNoteContents,
+      p_kit_note_asset_ids: kitNoteAssetIds,
+      p_kit_note_contents: kitNoteContents,
+    });
+    if (rpcError) throw rpcError;
 
     return true;
   } catch (cause) {

@@ -1626,6 +1626,201 @@ export type Database = {
         Args: { p_user_id: string; p_user_role: OrganizationRoles };
         Returns: string[];
       };
+      // Phase 2: Transaction RPC functions
+      shelf_org_transfer_ownership: {
+        Args: {
+          p_org_id: string;
+          p_new_owner_user_id: string;
+          p_current_owner_user_org_id: string;
+          p_new_owner_user_org_id: string;
+        };
+        Returns: undefined;
+      };
+      shelf_location_bulk_delete: {
+        Args: {
+          p_location_ids: string[];
+          p_image_ids: string[];
+        };
+        Returns: undefined;
+      };
+      shelf_booking_extend: {
+        Args: {
+          p_booking_id: string;
+          p_org_id: string;
+          p_new_end_date: string;
+          p_current_to: string;
+          p_active_asset_ids: string[];
+          p_current_status: string;
+        };
+        Returns: {
+          success: boolean;
+          clashingBookings?: { id: string; name: string }[];
+        };
+      };
+      shelf_kit_release_removed_assets: {
+        Args: {
+          p_asset_ids: string[];
+          p_org_id: string;
+        };
+        Returns: undefined;
+      };
+      shelf_asset_bulk_update_location: {
+        Args: {
+          p_asset_ids: string[];
+          p_new_location_id: string | null;
+          p_note_contents: string[];
+          p_note_user_id: string;
+        };
+        Returns: undefined;
+      };
+      // Tier 2: Medium complexity transaction functions
+      shelf_booking_checkout: {
+        Args: {
+          p_asset_ids: string[];
+          p_kit_ids: string[];
+          p_booking_id: string;
+          p_new_status: string;
+          p_new_from?: string;
+          p_new_to?: string;
+        };
+        Returns: undefined;
+      };
+      shelf_booking_checkin: {
+        Args: {
+          p_asset_ids: string[];
+          p_kit_ids: string[];
+          p_booking_id: string;
+          p_new_status: string;
+          p_new_to?: string;
+        };
+        Returns: undefined;
+      };
+      shelf_booking_cancel: {
+        Args: {
+          p_asset_ids: string[];
+          p_kit_ids: string[];
+          p_booking_id: string;
+          p_was_active: boolean;
+          p_cancellation_reason?: string;
+        };
+        Returns: undefined;
+      };
+      shelf_booking_add_scanned_assets: {
+        Args: {
+          p_asset_ids: string[];
+          p_kit_ids: string[];
+          p_booking_id: string;
+          p_org_id: string;
+        };
+        Returns: string;
+      };
+      shelf_asset_bulk_checkout: {
+        Args: {
+          p_asset_ids: string[];
+          p_custodian_id: string;
+          p_user_id: string;
+          p_note_content: string;
+        };
+        Returns: undefined;
+      };
+      shelf_asset_bulk_checkin: {
+        Args: {
+          p_custody_ids: string[];
+          p_asset_ids: string[];
+          p_user_id: string;
+          p_note_contents: string[];
+        };
+        Returns: undefined;
+      };
+      shelf_kit_release_custody: {
+        Args: {
+          p_kit_id: string;
+          p_org_id: string;
+          p_asset_ids: string[];
+        };
+        Returns: undefined;
+      };
+      shelf_kit_bulk_remove_assets: {
+        Args: {
+          p_all_asset_ids: string[];
+          p_custody_ids_to_delete: string[];
+          p_user_id: string;
+          p_custody_note_asset_ids: string[];
+          p_custody_note_contents: string[];
+          p_kit_note_asset_ids: string[];
+          p_kit_note_contents: string[];
+        };
+        Returns: undefined;
+      };
+      // Tier 3: High complexity transaction functions
+      shelf_booking_bulk_delete: {
+        Args: {
+          p_booking_ids: string[];
+          p_active_asset_ids: string[];
+          p_active_kit_ids: string[];
+          p_note_asset_ids: string[];
+          p_note_contents: string[];
+          p_note_user_id: string;
+        };
+        Returns: undefined;
+      };
+      shelf_booking_bulk_cancel: {
+        Args: {
+          p_booking_ids: string[];
+          p_active_asset_ids: string[];
+          p_active_kit_ids: string[];
+          p_note_asset_ids: string[];
+          p_note_contents: string[];
+          p_note_user_id: string;
+        };
+        Returns: undefined;
+      };
+      shelf_kit_bulk_assign_custody: {
+        Args: {
+          p_kit_ids: string[];
+          p_custodian_id: string;
+          p_asset_ids: string[];
+          p_user_id: string;
+          p_note_asset_ids: string[];
+          p_note_contents: string[];
+        };
+        Returns: undefined;
+      };
+      shelf_kit_bulk_release_custody: {
+        Args: {
+          p_kit_ids: string[];
+          p_asset_ids: string[];
+          p_user_id: string;
+          p_note_asset_ids: string[];
+          p_note_contents: string[];
+        };
+        Returns: undefined;
+      };
+      shelf_booking_partial_checkin: {
+        Args: {
+          p_asset_ids: string[];
+          p_kit_ids: string[];
+          p_booking_id: string;
+          p_user_id: string;
+          p_checkin_count: number;
+        };
+        Returns: undefined;
+      };
+      shelf_booking_update_assets: {
+        Args: {
+          p_asset_ids: string[];
+          p_booking_id: string;
+          p_org_id: string;
+          p_kit_ids: string[];
+        };
+        Returns: {
+          success?: boolean;
+          error?: string;
+          status?: number;
+          bookingStatus?: string;
+          bookingId?: string;
+        };
+      };
     };
     Enums: {
       AssetStatus: AssetStatus;
