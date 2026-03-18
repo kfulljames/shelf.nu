@@ -1,7 +1,6 @@
 import type { Sb } from "@shelf/database";
 import { sbDb } from "~/database/supabase.server";
 import { ShelfError } from "~/utils/error";
-import { USER_CONTACT_SELECT } from "./constants";
 
 const label = "User Contact";
 

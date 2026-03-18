@@ -2,21 +2,22 @@
 
 **Branch:** `claude/continue-project-work-s5x7o`
 **Last Updated:** 2026-03-18
-**Status:** ~98% complete — all migratable calls converted, remaining are KEPT AS PRISMA
+**Status:** Migration ceiling reached — 9 production files retain Prisma
+for features Supabase PostgREST cannot express
 
 ---
 
 ## Overall Progress
 
-| Area                         | Total `db.` calls | Converted | Remaining | % Done |
-| ---------------------------- | ----------------- | --------- | --------- | ------ |
-| **Modules** (`app/modules/`) | ~245              | ~220      | 25        | 90%    |
-| **Routes** (`app/routes/`)   | ~260              | ~264      | 0         | 100%   |
-| **Utils** (`app/utils/`)     | ~33               | ~31       | 2         | 94%    |
-| **Grand Total**              | ~538              | ~514      | ~24       | 96%    |
+| Area                         | Files with `db` | Production | Test | Notes                           |
+| ---------------------------- | --------------- | ---------- | ---- | ------------------------------- |
+| **Modules** (`app/modules/`) | 16              | 6          | 10   | Dynamic includes, nested writes |
+| **Routes** (`app/routes/`)   | 4               | 2          | 2    | Dynamic includes, `hasSome`     |
+| **Utils** (`app/utils/`)     | 1               | 1          | 0    | `$queryRaw` for auth schema     |
+| **Grand Total**              | **21**          | **9**      | 12   |                                 |
 
-Test files (`.test.ts`) contain 32 additional `db.` references
-(mock setups) to clean up when Prisma is fully removed.
+12 test files contain `db` references (mock setups) that will be
+cleaned up when Prisma is fully removed.
 
 ---
 
@@ -44,6 +45,7 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 | (new)     | Deep includes, relation writes, transactions, SSO          | 12 files  |
 | (new)     | Module bulk ops + location service select-all migrations   | 6 files   |
 | (new)     | Route cleanup: custody, palette, audit details, raw SQL    | 5 files   |
+| (new)     | manage-kits booking/kit queries to Supabase                | 1 file    |
 
 ### Module Services — Completed Conversions
 
@@ -168,13 +170,12 @@ explaining why they cannot be migrated to Supabase:
   `assets.some.bookings.some` multi-level existence filters
 - `kit/service.server.ts` — Dynamic generic includes, `assets: { none: {} }`
 
-#### Route-level remaining Prisma calls (3 files — all KEPT AS PRISMA)
+#### Route-level remaining Prisma calls (2 files — all KEPT AS PRISMA)
 
 - `api+/get-scanned-item.$qrId.ts` — Dynamic Prisma include objects
+  built from runtime params
 - `api+/reminders.team-members.ts` — Nested WHERE with
   `user: { isNot: null }`, `userOrganizations.some`, `roles.hasSome`
-- `bookings.$bookingId.overview.manage-kits.tsx` — Deeply nested
-  booking findUniqueOrThrow with asset includes
 
 ---
 

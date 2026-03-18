@@ -123,12 +123,6 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
 
     const searchParams = getCurrentSearchParams(request);
 
-    const where = {
-      deletedAt: null,
-      organizationId,
-      userId: role === OrganizationRoles.SELF_SERVICE ? userId : undefined,
-    } satisfies Prisma.TeamMemberWhereInput;
-
     const teamMembers = await (async () => {
       let query = sbDb
         .from("TeamMember")

@@ -150,30 +150,6 @@ import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Assets";
 
-const ASSET_BEFORE_UPDATE_SELECT = Prisma.validator<Prisma.AssetSelect>()({
-  title: true,
-  description: true,
-  category: {
-    select: {
-      id: true,
-      name: true,
-      color: true,
-    },
-  },
-  valuation: true,
-  organization: {
-    select: {
-      currency: true,
-    },
-  },
-  tags: {
-    select: {
-      id: true,
-      name: true,
-    },
-  },
-});
-
 /**
  * Fetches the snapshot of fields required to build change notes before an update.
  */
@@ -295,7 +271,7 @@ async function setKitCustodyAfterAssetImport({
 
     if (kit && teamMember) {
       // Update kit status and create custody in parallel
-      const [, custodyResult] = await Promise.all([
+      await Promise.all([
         sbDb
           .from("Kit")
           .update({ status: KitStatus.IN_CUSTODY })
