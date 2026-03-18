@@ -1376,64 +1376,135 @@ describe("checkoutBooking", () => {
     to: futureToDate,
   };
 
+  /**
+   * Enqueue sbMock responses for fetchBookingWithEmailIncludes.
+   * This helper is reused by checkoutBooking, checkinBooking, cancelBooking, deleteBooking, extendBooking.
+   */
+  function setupFetchBookingWithEmailIncludes(opts?: {
+    bookingRow?: Record<string, unknown>;
+    includeAssets?: boolean;
+  }) {
+    const row = opts?.bookingRow ?? {
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.ONGOING,
+      organizationId: "org-1",
+      custodianUserId: "user-1",
+      custodianTeamMemberId: null,
+      creatorId: "user-1",
+      from: futureFromDate.toISOString(),
+      to: futureToDate.toISOString(),
+      createdAt: futureCreatedAt.toISOString(),
+      updatedAt: futureCreatedAt.toISOString(),
+      originalFrom: futureFromDate.toISOString(),
+      originalTo: futureToDate.toISOString(),
+      autoArchivedAt: null,
+      activeSchedulerReference: null,
+      cancellationReason: null,
+      description: "Test Description",
+    };
+    // 1. Booking fetch
+    sbMock.enqueueData(row);
+    // 2-6. Promise.all: TM (skipped if no custodianTeamMemberId), User, Org, AssetCount, Assets
+    // TM - skipped since custodianTeamMemberId is null by default
+    // User
+    sbMock.enqueueData({
+      id: "user-1",
+      email: "test@example.com",
+      firstName: "Test",
+      lastName: "User",
+    });
+    // Org
+    sbMock.enqueueData({
+      id: "org-1",
+      name: "Test Org",
+      userId: "owner-1",
+      createdAt: futureCreatedAt.toISOString(),
+      updatedAt: futureCreatedAt.toISOString(),
+      customEmailFooter: null,
+    });
+    // Asset count (resolves with count property)
+    sbMock.enqueue({ data: null, error: null, count: 2 });
+    // Assets join rows (if includeAssets)
+    if (opts?.includeAssets !== false) {
+      sbMock.enqueueData([{ A: "asset-1" }, { A: "asset-2" }]);
+    } else {
+      sbMock.enqueueData(null);
+    }
+    // 7. Owner email fetch
+    sbMock.enqueueData({ email: "owner@example.com" });
+    // 8. Asset rows (if includeAssets and asset IDs exist)
+    if (opts?.includeAssets !== false) {
+      sbMock.enqueueData([
+        {
+          id: "asset-1",
+          createdAt: futureCreatedAt.toISOString(),
+          updatedAt: futureCreatedAt.toISOString(),
+        },
+        {
+          id: "asset-2",
+          createdAt: futureCreatedAt.toISOString(),
+          updatedAt: futureCreatedAt.toISOString(),
+        },
+      ]);
+    }
+  }
+
   it("should checkout booking successfully with no conflicts", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
     const mockBooking = {
       ...mockBookingData,
       status: BookingStatus.RESERVED,
+      _count: { assets: 2 },
+      custodianUser: {
+        email: "test@example.com",
+        firstName: "Test",
+        lastName: "User",
+      },
+      custodianTeamMember: { name: "TM" },
+      organization: {
+        customEmailFooter: null,
+        owner: { email: "owner@example.com" },
+      },
       assets: [
         {
           id: "asset-1",
           kitId: null,
           title: "Asset 1",
           status: "AVAILABLE",
-          bookings: [], // No conflicting bookings
+          bookings: [],
         },
         {
           id: "asset-2",
           kitId: "kit-1",
           title: "Asset 2",
           status: "AVAILABLE",
-          bookings: [], // No conflicting bookings
+          bookings: [],
         },
       ],
     };
-    const checkedOutBooking = { ...mockBooking, status: BookingStatus.ONGOING };
 
     //@ts-expect-error missing vitest type
     db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(checkedOutBooking);
+
+    // 1. sbDb.rpc("shelf_booking_checkout")
+    sbMock.enqueueData(null);
+    // 2-N. fetchBookingWithEmailIncludes
+    setupFetchBookingWithEmailIncludes();
+    // scheduleNextBookingJob: sbDb.from("Booking").update().eq()
+    sbMock.enqueueData({});
 
     const result = await checkoutBooking(mockCheckoutParams);
 
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1", "asset-2"] } },
-      data: { status: AssetStatus.CHECKED_OUT },
-    });
-
-    expect(db.booking.update).toHaveBeenCalledWith(
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_checkout",
       expect.objectContaining({
-        where: { id: "booking-1" },
-        data: { status: BookingStatus.ONGOING },
-        include: expect.objectContaining({
-          _count: { select: { assets: true } },
-          assets: true,
-          custodianTeamMember: true,
-          custodianUser: true,
-          organization: expect.objectContaining({
-            include: expect.objectContaining({
-              owner: expect.objectContaining({
-                select: { email: true },
-              }),
-            }),
-          }),
-        }),
+        p_asset_ids: ["asset-1", "asset-2"],
+        p_booking_id: "booking-1",
       })
     );
-
-    expect(result).toEqual(checkedOutBooking);
+    expect(result).toBeDefined();
   });
 
   it("should throw error when assets have booking conflicts", async () => {
@@ -1473,15 +1544,17 @@ describe("checkoutBooking", () => {
     const mockBooking = {
       ...mockBookingData,
       status: BookingStatus.DRAFT,
-      assets: [], // No assets to conflict
+      assets: [],
     };
     //@ts-expect-error missing vitest type
     db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.ONGOING,
-    });
+
+    // 1. sbDb.rpc("shelf_booking_checkout")
+    sbMock.enqueueData(null);
+    // 2-N. fetchBookingWithEmailIncludes
+    setupFetchBookingWithEmailIncludes();
+    // scheduleNextBookingJob
+    sbMock.enqueueData({});
 
     const result = await checkoutBooking(mockCheckoutParams);
     expect(result).toBeDefined();
