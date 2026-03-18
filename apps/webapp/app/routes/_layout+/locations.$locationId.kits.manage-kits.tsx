@@ -50,7 +50,7 @@ import {
 } from "~/components/shared/tabs";
 import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { getPaginatedAndFilterableKits } from "~/modules/kit/service.server";
 import { updateLocationKits } from "~/modules/location/service.server";
@@ -79,27 +79,28 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const location = await db.location
-      .findUniqueOrThrow({
-        where: {
-          id: locationId,
-          organizationId,
-        },
-        include: {
-          assets: { select: { id: true } },
-          kits: { select: { id: true } },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Location not found",
-          message:
-            "The location you are trying to access does not exist or you do not have permission to access it.",
-          additionalData: { locationId, userId, organizationId },
-          label: "Location",
-        });
+    const { data: locationRaw, error: locationError } = await sbDb
+      .from("Location")
+      .select("*, assets:Asset(id), kits:Kit(id)")
+      .eq("id", locationId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (locationError || !locationRaw) {
+      throw new ShelfError({
+        cause: locationError,
+        title: "Location not found",
+        message:
+          "The location you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { locationId, userId, organizationId },
+        label: "Location",
       });
+    }
+
+    const location = locationRaw as unknown as typeof locationRaw & {
+      assets: { id: string }[];
+      kits: { id: string }[];
+    };
 
     const { search, totalKits, perPage, page, kits, totalPages } =
       await getPaginatedAndFilterableKits({

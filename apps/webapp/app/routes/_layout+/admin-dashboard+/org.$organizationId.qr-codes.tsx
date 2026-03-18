@@ -5,6 +5,8 @@ import { Form } from "~/components/custom-form";
 import { Button } from "~/components/shared/button";
 import { DateS } from "~/components/shared/date";
 import { Table, Td, Tr } from "~/components/table";
+// KEPT AS PRISMA: organization findFirstOrThrow with deep nested includes
+// (qrCodes.asset, qrCodes.kit, owner)
 import { db } from "~/database/db.server";
 import { generateOrphanedCodes } from "~/modules/qr/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";

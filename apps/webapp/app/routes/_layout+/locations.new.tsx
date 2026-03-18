@@ -12,7 +12,7 @@ import {
   NewLocationFormSchema,
 } from "~/components/location/form";
 
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import {
   createLocation,
@@ -118,16 +118,14 @@ export async function action({ context, request }: ActionFunctionArgs) {
       organizationId,
     });
 
-    const locationWithImage =
-      (await db.location.findUnique({
-        where: { id: location.id, organizationId },
-        select: {
-          id: true,
-          name: true,
-          thumbnailUrl: true,
-          imageUrl: true,
-        },
-      })) ?? location;
+    const { data: locationWithImageData } = await sbDb
+      .from("Location")
+      .select("id, name, thumbnailUrl, imageUrl")
+      .eq("id", location.id)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+
+    const locationWithImage = locationWithImageData ?? location;
 
     sendNotification({
       title: "Location created",

@@ -16,6 +16,8 @@ import { Image } from "~/components/shared/image";
 import { UserBadge } from "~/components/shared/user-badge";
 import { Table, Td, Th } from "~/components/table";
 import { WorkspaceActionsDropdown } from "~/components/workspace/workspace-actions-dropdown";
+// KEPT AS PRISMA: user findUniqueOrThrow with deep nested includes
+// (userOrganizations.organization._count, organization.owner)
 import { db } from "~/database/db.server";
 import { useUserData } from "~/hooks/use-user-data";
 import { getSelectedOrganization } from "~/modules/organization/context.server";

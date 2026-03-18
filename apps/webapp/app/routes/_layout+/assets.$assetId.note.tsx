@@ -2,7 +2,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { data, redirect } from "react-router";
 import { z } from "zod";
 import { MarkdownNoteSchema } from "~/components/notes/markdown-note-form";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { createNote, deleteNote } from "~/modules/note/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
@@ -44,14 +44,16 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     });
 
     // Validate that the asset belongs to the user's organization
-    const asset = await db.asset.findUnique({
-      where: { id: assetId, organizationId },
-      select: { id: true },
-    });
+    const { data: asset, error: assetError } = await sbDb
+      .from("Asset")
+      .select("id")
+      .eq("id", assetId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
 
-    if (!asset) {
+    if (assetError || !asset) {
       throw new ShelfError({
-        cause: null,
+        cause: assetError,
         message: "Asset not found or access denied",
         additionalData: { userId, assetId },
         label: "Assets",

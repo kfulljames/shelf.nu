@@ -25,7 +25,9 @@ import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import { CodeScanner } from "~/components/scanner/code-scanner";
 import type { OnCodeDetectionSuccessProps } from "~/components/scanner/code-scanner";
+// KEPT AS PRISMA: db.$transaction with complex multi-step audit scan removal logic
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useAuditScanPersistence } from "~/hooks/use-audit-scan-persistence";
 import { useAuditSessionInitialization } from "~/hooks/use-audit-session-initialization";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
@@ -92,14 +94,16 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const auditSession = await db.auditSession.findFirst({
-      where: { id: auditId, organizationId },
-      select: { status: true },
-    });
+    const { data: auditSession, error: asError } = await sbDb
+      .from("AuditSession")
+      .select("status")
+      .eq("id", auditId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
 
-    if (!auditSession) {
+    if (asError || !auditSession) {
       throw new ShelfError({
-        cause: null,
+        cause: asError,
         message: "Audit session not found",
         additionalData: { auditId, organizationId },
         label: "Audit",

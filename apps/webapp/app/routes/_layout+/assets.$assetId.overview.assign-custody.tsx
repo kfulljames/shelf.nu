@@ -16,7 +16,8 @@ import DynamicSelect from "~/components/dynamic-select/dynamic-select";
 import { UserIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
 import { WarningBox } from "~/components/shared/warning-box";
-import { db } from "~/database/db.server";
+import { db } from "~/database/db.server"; // KEPT AS PRISMA: asset.update with nested custody.create
+import { sbDb } from "~/database/supabase.server";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getAsset } from "~/modules/asset/service.server";
 import { AssignCustodySchema } from "~/modules/custody/schema";
@@ -97,38 +98,52 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     const searchParams = getCurrentSearchParams(request);
 
     /** We get all the team members that are part of the user's personal organization */
-    const where = {
-      deletedAt: null,
-      organizationId,
-      userId: role === OrganizationRoles.SELF_SERVICE ? userId : undefined,
-    } satisfies Prisma.TeamMemberWhereInput;
+    const take = searchParams.get("getAll") === "teamMember" ? undefined : 12;
 
-    const teamMembers = await db.teamMember
-      .findMany({
-        where,
-        include: { user: true },
-        orderBy: {
-          userId: "asc",
-        },
-        take: searchParams.get("getAll") === "teamMember" ? undefined : 12,
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message:
-            "Something went wrong while fetching team members. Please try again or contact support.",
-          additionalData: { userId, assetId, organizationId },
-          label: "Assets",
-        });
+    let teamMemberQuery = sbDb
+      .from("TeamMember")
+      .select("*, user:User!userId(*)")
+      .is("deletedAt", null)
+      .eq("organizationId", organizationId)
+      .order("userId", { ascending: true });
+
+    if (role === OrganizationRoles.SELF_SERVICE) {
+      teamMemberQuery = teamMemberQuery.eq("userId", userId);
+    }
+
+    if (take !== undefined) {
+      teamMemberQuery = teamMemberQuery.limit(take);
+    }
+
+    const { data: teamMembers, error: tmError } = await teamMemberQuery;
+
+    if (tmError) {
+      throw new ShelfError({
+        cause: tmError,
+        message:
+          "Something went wrong while fetching team members. Please try again or contact support.",
+        additionalData: { userId, assetId, organizationId },
+        label: "Assets",
       });
+    }
 
-    const totalTeamMembers = await db.teamMember.count({ where });
+    let countQuery = sbDb
+      .from("TeamMember")
+      .select("*", { count: "exact", head: true })
+      .is("deletedAt", null)
+      .eq("organizationId", organizationId);
+
+    if (role === OrganizationRoles.SELF_SERVICE) {
+      countQuery = countQuery.eq("userId", userId);
+    }
+
+    const { count: totalTeamMembers } = await countQuery;
 
     return payload({
       showModal: true,
-      teamMembers,
+      teamMembers: teamMembers as any,
       asset,
-      totalTeamMembers,
+      totalTeamMembers: totalTeamMembers ?? 0,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, assetId });

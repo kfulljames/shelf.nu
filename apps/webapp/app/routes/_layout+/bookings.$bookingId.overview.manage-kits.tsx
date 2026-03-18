@@ -52,6 +52,8 @@ import {
 import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
 import When from "~/components/when/when";
+// KEPT AS PRISMA: booking findUniqueOrThrow with nested assets include,
+// kit findMany with nested assets include — not convertible to Supabase
 import { db } from "~/database/db.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { sendBookingUpdatedEmail } from "~/modules/booking/email-helpers";

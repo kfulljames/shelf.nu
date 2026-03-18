@@ -7,7 +7,7 @@ import type {
 import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
 import { ChoosePurpose } from "~/components/welcome/choose-purpose";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { sendAuditTrialWelcomeEmail } from "~/emails/stripe/audit-trial-welcome";
 import {
   createAuditAddonTrialSubscription,
@@ -43,10 +43,11 @@ export async function loader({ context }: LoaderFunctionArgs) {
         userId,
         orgType: "PERSONAL",
       });
-      const orgData = await db.organization.findUnique({
-        where: { id: personalOrg.id },
-        select: { usedAuditTrial: true },
-      });
+      const { data: orgData } = await sbDb
+        .from("Organization")
+        .select("usedAuditTrial")
+        .eq("id", personalOrg.id)
+        .maybeSingle();
       usedAuditTrial = orgData?.usedAuditTrial ?? false;
     } catch {
       // Personal org not found yet - that's ok during onboarding
@@ -108,15 +109,18 @@ export async function action({ context, request }: ActionFunctionArgs) {
     });
 
     // Enable audits on the personal org
-    await db.organization.update({
-      where: { id: personalOrg.id },
-      data: {
+    const { error: updateError } = await sbDb
+      .from("Organization")
+      .update({
         auditsEnabled: true,
         usedAuditTrial: true,
-        auditsEnabledAt: new Date(),
-      },
-      select: { id: true },
-    });
+        auditsEnabledAt: new Date().toISOString(),
+      })
+      .eq("id", personalOrg.id);
+
+    if (updateError) {
+      throw updateError;
+    }
 
     // Send welcome email
     void sendAuditTrialWelcomeEmail({

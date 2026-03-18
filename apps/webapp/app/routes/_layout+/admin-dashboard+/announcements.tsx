@@ -5,7 +5,7 @@ import { Switch } from "~/components/forms/switch";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
 import { Button } from "~/components/shared/button";
 import { Table, Td, Th, Tr } from "~/components/table";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
@@ -21,20 +21,19 @@ export const loader = async ({ context }: LoaderFunctionArgs) => {
   try {
     await requireAdmin(userId);
 
-    const announcements = await db.announcement
-      .findMany({
-        orderBy: {
-          createdAt: "desc",
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Failed to load announcements",
-          additionalData: { userId },
-          label: "Admin dashboard",
-        });
+    const { data: announcements, error: announcementsError } = await sbDb
+      .from("Announcement")
+      .select("*")
+      .order("createdAt", { ascending: false });
+
+    if (announcementsError || !announcements) {
+      throw new ShelfError({
+        cause: announcementsError,
+        message: "Failed to load announcements",
+        additionalData: { userId },
+        label: "Admin dashboard",
       });
+    }
 
     return payload({
       announcements: announcements.map((a) => ({
@@ -63,23 +62,19 @@ export const action = async ({ context, request }: ActionFunctionArgs) => {
       })
     );
 
-    await db.announcement
-      .update({
-        where: {
-          id: announcementId,
-        },
-        data: {
-          published,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Failed to update announcement",
-          additionalData: { userId, published, announcementId },
-          label: "Admin dashboard",
-        });
+    const { error: updateError } = await sbDb
+      .from("Announcement")
+      .update({ published })
+      .eq("id", announcementId);
+
+    if (updateError) {
+      throw new ShelfError({
+        cause: updateError,
+        message: "Failed to update announcement",
+        additionalData: { userId, published, announcementId },
+        label: "Admin dashboard",
       });
+    }
 
     return payload(null);
   } catch (cause) {

@@ -6,7 +6,10 @@ import { useZorm } from "react-zorm";
 import { z } from "zod";
 import Input from "~/components/forms/input";
 import { Button } from "~/components/shared/button";
+// KEPT AS PRISMA: location count/findMany with isNot filter,
+// location update with relation disconnect
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -481,13 +484,13 @@ export async function action({ context, request }: ActionFunctionArgs) {
           .from(PUBLIC_BUCKET)
           .getPublicUrl(thumbnailData.path);
 
-        await db.location.update({
-          where: { id: location.id },
-          data: {
+        await sbDb
+          .from("Location")
+          .update({
             imageUrl: publicUrl,
             thumbnailUrl: thumbnailPublicUrl,
-          },
-        });
+          })
+          .eq("id", location.id);
 
         movedLocationIds.push(location.id);
         console.log(

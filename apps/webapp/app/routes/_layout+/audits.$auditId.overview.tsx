@@ -28,7 +28,7 @@ import { InfoTooltip } from "~/components/shared/info-tooltip";
 import { UserBadge } from "~/components/shared/user-badge";
 import { Td, Th } from "~/components/table";
 import { TeamMemberBadge } from "~/components/user/team-member-badge";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useSearchParams } from "~/hooks/search-params";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import {
@@ -239,15 +239,23 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       const { assetIds } = parseData(formData, BulkRemoveAssetsFromAuditSchema);
 
       // Convert assetIds to auditAssetIds
-      const auditAssets = await db.auditAsset.findMany({
-        where: {
-          auditSessionId: auditId,
-          assetId: { in: assetIds },
-        },
-        select: { id: true },
-      });
+      const { data: auditAssets, error: aaError } = await sbDb
+        .from("AuditAsset")
+        .select("id")
+        .eq("auditSessionId", auditId)
+        .in("assetId", assetIds);
 
-      const auditAssetIds = auditAssets.map((aa) => aa.id);
+      if (aaError) {
+        throw new ShelfError({
+          cause: aaError,
+          message: "Failed to fetch audit assets",
+          additionalData: { auditId, assetIds },
+          label,
+          status: 500,
+        });
+      }
+
+      const auditAssetIds = (auditAssets ?? []).map((aa) => aa.id);
 
       if (auditAssetIds.length === 0) {
         throw new ShelfError({

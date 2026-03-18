@@ -1,6 +1,6 @@
 import { data, redirect } from "react-router";
 import type { ActionFunctionArgs } from "react-router";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error } from "~/utils/http.server";
 import {
@@ -25,25 +25,21 @@ export async function action({ context, request }: ActionFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const user = await db.user
-      .findUniqueOrThrow({
-        where: { id: authSession.userId },
-        select: {
-          email: true,
-          firstName: true,
-          lastName: true,
-          customerId: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message:
-            "Something went wrong fetching the user. Please try again or contact support.",
-          additionalData: { userId },
-          label: "Subscription",
-        });
+    const { data: user, error: userError } = await sbDb
+      .from("User")
+      .select("email, firstName, lastName, customerId")
+      .eq("id", authSession.userId)
+      .single();
+
+    if (userError || !user) {
+      throw new ShelfError({
+        cause: userError,
+        message:
+          "Something went wrong fetching the user. Please try again or contact support.",
+        additionalData: { userId },
+        label: "Subscription",
       });
+    }
 
     const customerId = await getOrCreateCustomerId({
       id: userId,

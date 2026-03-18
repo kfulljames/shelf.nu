@@ -20,6 +20,8 @@ import UpcomingBookings from "~/components/home/upcoming-bookings";
 import UpcomingReminders from "~/components/home/upcoming-reminders";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
+// KEPT AS PRISMA: aggregate, groupBy, $queryRaw, _count includes,
+// nested `some` filter, orderBy with _count — not convertible to Supabase
 import { db } from "~/database/db.server";
 import { getUpcomingRemindersForHomePage } from "~/modules/asset-reminder/service.server";
 import { getBookings } from "~/modules/booking/service.server";

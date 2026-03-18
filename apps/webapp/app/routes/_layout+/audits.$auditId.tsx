@@ -15,7 +15,7 @@ import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
 import HorizontalTabs from "~/components/layout/horizontal-tabs";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { completeAuditWithImages } from "~/modules/audit/complete-audit-with-images.server";
 import {
   getAuditSessionDetails,
@@ -178,10 +178,11 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     });
 
     // Calculate stats for dynamic button text
-    const scanCount = await db.auditScan.count({
-      where: { auditSessionId: auditId },
-    });
-    const hasScans = scanCount > 0;
+    const { count: scanCount } = await sbDb
+      .from("AuditScan")
+      .select("*", { count: "exact", head: true })
+      .eq("auditSessionId", auditId);
+    const hasScans = (scanCount ?? 0) > 0;
 
     const stats = {
       expectedCount: session.expectedAssetCount,
@@ -218,19 +219,13 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     const header = { title: `${session.name} · Overview` };
 
     // Fetch team members for audit assignment (used in edit dialog)
-    const teamMembers = await db.teamMember.findMany({
-      where: {
-        organizationId,
-        deletedAt: null,
-        userId: { not: null }, // Only team members with user accounts
-      },
-      select: {
-        id: true,
-        name: true,
-        userId: true,
-      },
-      orderBy: { name: "asc" },
-    });
+    const { data: teamMembers } = await sbDb
+      .from("TeamMember")
+      .select("id, name, userId")
+      .eq("organizationId", organizationId)
+      .is("deletedAt", null)
+      .not("userId", "is", null)
+      .order("name", { ascending: true });
 
     return data(
       payload({
@@ -240,7 +235,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         hasScans,
         stats,
         userId,
-        teamMembers,
+        teamMembers: teamMembers ?? [],
       })
     );
   } catch (cause) {

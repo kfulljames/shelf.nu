@@ -19,7 +19,7 @@ import { InfoTooltip } from "~/components/shared/info-tooltip";
 import { Td, Th } from "~/components/table";
 import { SSOUserBadge } from "~/components/user/sso-user-badge";
 import { TeamUsersActionsDropdown } from "~/components/workspace/users-actions-dropdown";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 
 import type { TeamMembersWithUserOrInvite } from "~/modules/settings/service.server";
 import { getPaginatedAndFilterableSettingUsers } from "~/modules/settings/service.server";
@@ -49,14 +49,15 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     });
 
     /** Get the organization */
-    const organization = await db.organization.findFirst({
-      where: { id: organizationId },
-      include: { owner: true },
-    });
+    const { data: organization, error: orgError } = await sbDb
+      .from("Organization")
+      .select("*, owner:User!Organization_userId_fkey(*)")
+      .eq("id", organizationId)
+      .maybeSingle();
 
-    if (!organization) {
+    if (orgError || !organization) {
       throw new ShelfError({
-        cause: null,
+        cause: orgError,
         message: "Organization not found",
         additionalData: { organizationId, userId },
         label: "Team",

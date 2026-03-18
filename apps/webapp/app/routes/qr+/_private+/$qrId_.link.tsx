@@ -16,7 +16,7 @@ import HorizontalTabs from "~/components/layout/horizontal-tabs";
 
 import { Button } from "~/components/shared/button";
 
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useSearchParams } from "~/hooks/search-params";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { claimQrCode } from "~/modules/qr/service.server";
@@ -49,11 +49,11 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         action: PermissionAction.update,
       });
 
-    const qr = await db.qr.findUnique({
-      where: {
-        id: qrId,
-      },
-    });
+    const { data: qr } = await sbDb
+      .from("Qr")
+      .select("*")
+      .eq("id", qrId)
+      .maybeSingle();
 
     /**
      * If for some reason this code doesnt have an org(shouldnt happen in this view)

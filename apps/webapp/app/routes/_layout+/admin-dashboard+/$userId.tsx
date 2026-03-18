@@ -24,7 +24,10 @@ import { SubscriptionsOverview } from "~/components/subscription/subscriptions-o
 import { Table, Td, Th, Tr } from "~/components/table";
 import { DeleteUser } from "~/components/user/delete-user";
 import { config } from "~/config/shelf.config";
+// KEPT AS PRISMA: userOrganization findMany with 3+ level nested includes,
+// customTierLimit upsert
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
 import { resetPersonalWorkspaceBranding } from "~/modules/organization/service.server";
 import { updateUserTierId } from "~/modules/tier/service.server";
@@ -269,10 +272,20 @@ export const action = async ({
         );
 
         // Get current tier before updating
-        const currentUser = await db.user.findUniqueOrThrow({
-          where: { id: shelfUserId },
-          select: { tierId: true },
-        });
+        const { data: currentUser, error: currentUserError } = await sbDb
+          .from("User")
+          .select("tierId")
+          .eq("id", shelfUserId)
+          .single();
+
+        if (currentUserError || !currentUser) {
+          throw new ShelfError({
+            cause: currentUserError,
+            message: "User not found",
+            additionalData: { userId, shelfUserId },
+            label: "Admin dashboard",
+          });
+        }
 
         const user = await updateUserTierId(shelfUserId, tierId);
 
@@ -354,11 +367,19 @@ export const action = async ({
           })
         );
 
-        await db.user.update({
-          where: { id: shelfUserId },
-          data: { skipSubscriptionCheck },
-          select: { id: true },
-        });
+        const { error: updateError } = await sbDb
+          .from("User")
+          .update({ skipSubscriptionCheck })
+          .eq("id", shelfUserId);
+
+        if (updateError) {
+          throw new ShelfError({
+            cause: updateError,
+            message: "Failed to update subscription check setting",
+            additionalData: { userId, shelfUserId },
+            label: "Admin dashboard",
+          });
+        }
 
         sendNotification({
           title: "Subscription check updated",
@@ -379,11 +400,19 @@ export const action = async ({
           })
         );
 
-        await db.user.update({
-          where: { id: shelfUserId },
-          data: { [fieldName]: fieldValue },
-          select: { id: true },
-        });
+        const { error: toggleError } = await sbDb
+          .from("User")
+          .update({ [fieldName]: fieldValue })
+          .eq("id", shelfUserId);
+
+        if (toggleError) {
+          throw new ShelfError({
+            cause: toggleError,
+            message: "Failed to update field",
+            additionalData: { userId, shelfUserId, fieldName },
+            label: "Admin dashboard",
+          });
+        }
 
         sendNotification({
           title: "Field updated",

@@ -24,6 +24,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import HorizontalTabs from "~/components/layout/horizontal-tabs";
 import { ScanDetails } from "~/components/location/scan-details";
 import When from "~/components/when/when";
+// KEPT AS PRISMA: Nested relation writes (disconnect, delete on custody relation)
 import { db } from "~/database/db.server";
 import { usePosition } from "~/hooks/use-position";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";

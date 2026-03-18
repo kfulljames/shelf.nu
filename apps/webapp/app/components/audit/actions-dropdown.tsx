@@ -209,7 +209,7 @@ const ConditionalActionsDropdown = () => {
       <When truthy={isEditDialogOpen}>
         <EditAuditDialog
           audit={session}
-          teamMembers={teamMembers}
+          teamMembers={teamMembers ?? []}
           open={isEditDialogOpen}
           onClose={() => setIsEditDialogOpen(false)}
           actionData={actionData}

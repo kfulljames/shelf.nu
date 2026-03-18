@@ -10,7 +10,7 @@ import z from "zod";
 import TransferOwnershipCard, {
   TransferOwnershipSchema,
 } from "~/components/settings/transfer-ownership-card";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   getOrganizationAdmins,
   getOrganizationById,
@@ -53,13 +53,12 @@ export async function loader({ context, params }: LoaderFunctionArgs) {
     );
 
     // Count owner's other team workspaces (for warning about tier downgrade)
-    const ownerOtherTeamWorkspacesCount = await db.organization.count({
-      where: {
-        userId: organization.userId,
-        type: OrganizationType.TEAM,
-        id: { not: organizationId },
-      },
-    });
+    const { count: ownerOtherTeamWorkspacesCount } = await sbDb
+      .from("Organization")
+      .select("*", { count: "exact", head: true })
+      .eq("userId", organization.userId)
+      .eq("type", OrganizationType.TEAM)
+      .neq("id", organizationId);
 
     return payload({
       admins,
@@ -143,7 +142,7 @@ export default function TransferOwnership() {
         organizationName={organizationName}
         admins={admins}
         ownerSubscriptionInfo={ownerSubscriptionInfo}
-        ownerOtherTeamWorkspacesCount={ownerOtherTeamWorkspacesCount}
+        ownerOtherTeamWorkspacesCount={ownerOtherTeamWorkspacesCount ?? 0}
         premiumIsEnabled={premiumEnabled}
       />
     </div>

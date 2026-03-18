@@ -15,7 +15,7 @@ import type { OnCodeDetectionSuccessProps } from "~/components/scanner/code-scan
 import { CodeScanner } from "~/components/scanner/code-scanner";
 import { scannerActionAtom } from "~/components/scanner/drawer/action-atom";
 import { ActionSwitcher } from "~/components/scanner/drawer/action-switcher";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { useScannerCameraId } from "~/hooks/use-scanner-camera-id";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
@@ -86,17 +86,32 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       const getAllEntries = searchParams.getAll(
         "getAll"
       ) as AllowedModelNames[];
-      const [locationExcludedSelected, selectedLocation, totalLocations] =
-        await Promise.all([
-          db.location.findMany({
-            where: { organizationId, id: { not: locationSelected } },
-            take: getAllEntries.includes("location") ? undefined : 12,
-          }),
-          db.location.findMany({
-            where: { organizationId, id: locationSelected },
-          }),
-          db.location.count({ where: { organizationId } }),
-        ]);
+      const [
+        locationExcludedSelectedResult,
+        selectedLocationResult,
+        totalLocationsResult,
+      ] = await Promise.all([
+        sbDb
+          .from("Location")
+          .select("*")
+          .eq("organizationId", organizationId)
+          .neq("id", locationSelected)
+          .limit(getAllEntries.includes("location") ? 1000 : 12),
+        sbDb
+          .from("Location")
+          .select("*")
+          .eq("organizationId", organizationId)
+          .eq("id", locationSelected),
+        sbDb
+          .from("Location")
+          .select("*", { count: "exact", head: true })
+          .eq("organizationId", organizationId),
+      ]);
+
+      const locationExcludedSelected =
+        locationExcludedSelectedResult.data ?? [];
+      const selectedLocation = selectedLocationResult.data ?? [];
+      const totalLocations = totalLocationsResult.count ?? 0;
 
       locationsData = {
         locations: [...selectedLocation, ...locationExcludedSelected],

@@ -20,7 +20,7 @@ import { InvoiceHistory } from "~/components/subscription/invoice-history";
 import { PricingTable } from "~/components/subscription/pricing-table";
 import { SubscriptionsOverview } from "~/components/subscription/subscriptions-overview";
 import SuccessfulSubscriptionModal from "~/components/subscription/successful-subscription-modal";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useUserData } from "~/hooks/use-user-data";
 import { getUserTierLimit } from "~/modules/tier/service.server";
 
@@ -221,11 +221,19 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
 
       // Update user tier and mark trial as used
-      await db.user.update({
-        where: { id: userId },
-        data: { tierId: shelfTier, usedFreeTrial: true },
-        select: { id: true },
-      });
+      const { error: updateError } = await sbDb
+        .from("User")
+        .update({ tierId: shelfTier, usedFreeTrial: true })
+        .eq("id", userId);
+
+      if (updateError) {
+        throw new ShelfError({
+          cause: updateError,
+          message: "Failed to update user tier",
+          additionalData: { userId, shelfTier },
+          label: "Subscription",
+        });
+      }
 
       const returnUrl = await generateReturnUrl({
         userId,

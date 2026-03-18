@@ -31,7 +31,7 @@ import { GrayBadge } from "~/components/shared/gray-badge";
 import { InfoTooltip } from "~/components/shared/info-tooltip";
 import { Td, Th } from "~/components/table";
 import { TeamMemberBadge } from "~/components/user/team-member-badge";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
 import { useIsAvailabilityView } from "~/hooks/use-is-availability-view";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
@@ -136,27 +136,42 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           location: LOCATION_WITH_HIERARCHY,
         },
       }),
-      db.teamMember
-        .findMany({
-          where: {
-            deletedAt: null,
-            organizationId,
-            userId: !canSeeAllCustody ? userId : undefined,
-          },
-          include: { user: true },
-          orderBy: { userId: "asc" },
-          take: searchParams.get("getAll") === "teamMember" ? undefined : 12,
-        })
-        .catch((cause) => {
+      (async () => {
+        let query = sbDb
+          .from("TeamMember")
+          .select("*, user:User!TeamMember_userId_fkey(*)")
+          .is("deletedAt", null)
+          .eq("organizationId", organizationId)
+          .order("userId", { ascending: true });
+
+        if (!canSeeAllCustody) {
+          query = query.eq("userId", userId);
+        }
+
+        if (searchParams.get("getAll") !== "teamMember") {
+          query = query.limit(12);
+        }
+
+        const { data: tmData, error: tmError } = await query;
+
+        if (tmError) {
           throw new ShelfError({
-            cause,
+            cause: tmError,
             message:
               "Something went wrong while fetching team members. Please try again or contact support.",
             additionalData: { userId, organizationId },
             label: "Assets",
           });
-        }),
-      db.teamMember.count({ where: { deletedAt: null, organizationId } }),
+        }
+
+        return (tmData ?? []) as any[];
+      })(),
+      sbDb
+        .from("TeamMember")
+        .select("*", { count: "exact", head: true })
+        .is("deletedAt", null)
+        .eq("organizationId", organizationId)
+        .then(({ count }) => count ?? 0),
       getLocationsForCreateAndEdit({
         organizationId,
         request,

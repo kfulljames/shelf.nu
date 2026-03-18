@@ -20,6 +20,8 @@ import { Switch } from "~/components/forms/switch";
 import HorizontalTabs from "~/components/layout/horizontal-tabs";
 import { Button } from "~/components/shared/button";
 import { DateS } from "~/components/shared/date";
+// KEPT AS PRISMA: organization findFirstOrThrow with deep nested includes,
+// organization update with nested ssoDetails upsert
 import { db } from "~/database/db.server";
 import { createAssetsFromContentImport } from "~/modules/asset/service.server";
 import { ASSET_CSV_HEADERS } from "~/modules/asset/utils.server";

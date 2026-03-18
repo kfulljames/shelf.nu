@@ -1,5 +1,5 @@
 import { data, type LoaderFunctionArgs } from "react-router";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import {
@@ -36,22 +36,18 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       return data(payload({ assets: [] }));
     }
 
-    const assets = await db.asset.findMany({
-      where: {
-        id: { in: assetIds },
-        organizationId, // Ensure user can only see assets from their organization
-      },
-      select: {
-        id: true,
-        title: true,
-        mainImage: true,
-      },
-      orderBy: {
-        title: "asc",
-      },
-    });
+    const { data: assets, error: assetError } = await sbDb
+      .from("Asset")
+      .select("id, title, mainImage")
+      .in("id", assetIds)
+      .eq("organizationId", organizationId)
+      .order("title", { ascending: true });
 
-    return data(payload({ assets }));
+    if (assetError) {
+      throw assetError;
+    }
+
+    return data(payload({ assets: assets ?? [] }));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });

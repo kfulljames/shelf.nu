@@ -12,7 +12,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import { CodeScanner } from "~/components/scanner/code-scanner";
 import type { OnCodeDetectionSuccessProps } from "~/components/scanner/code-scanner";
 import AddAssetsToKitDrawer from "~/components/scanner/drawer/uses/add-assets-to-kit-drawer";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useScannerCameraId } from "~/hooks/use-scanner-camera-id";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -46,36 +46,38 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const kit = await db.kit
-      .findFirstOrThrow({
-        where: { id: kitId, organizationId },
-        select: {
-          id: true,
-          name: true,
-          qrCodes: {
-            select: { id: true },
-          },
-          assets: { select: { id: true } },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Kit not found!",
-          message:
-            "The kit you are trying to access does not exists or you do not have permission to asset it.",
-          status: 404,
-          label: "Kit",
-        });
+    const { data: kit, error: kitError } = await sbDb
+      .from("Kit")
+      .select("id, name, qrCodes:Qr(id), assets:Asset(id)")
+      .eq("id", kitId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (kitError || !kit) {
+      throw new ShelfError({
+        cause: kitError,
+        title: "Kit not found!",
+        message:
+          "The kit you are trying to access does not exists or you do not have permission to asset it.",
+        status: 404,
+        label: "Kit",
       });
+    }
+
+    const typedKit = kit as unknown as {
+      id: string;
+      name: string;
+      qrCodes: { id: string }[];
+      assets: { id: string }[];
+    };
 
     /** We get the userPrefs cookie so we can see if there is already a default camera */
-    const title = `Scan assets for kit | ${kit.name}`;
+    const title = `Scan assets for kit | ${typedKit.name}`;
     const header: HeaderData = {
       title,
     };
 
-    return payload({ title, header, kit });
+    return payload({ title, header, kit: typedKit });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, kitId });
     throw data(error(reason), { status: reason.status });

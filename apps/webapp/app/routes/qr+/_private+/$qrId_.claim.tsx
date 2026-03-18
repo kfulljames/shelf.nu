@@ -10,7 +10,7 @@ import { UnlinkIcon } from "~/components/icons/library";
 import { OrganizationSelect } from "~/components/layout/sidebar/organization-select";
 import { Button } from "~/components/shared/button";
 
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { claimQrCode } from "~/modules/qr/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -42,24 +42,24 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const qr = await db.qr
-      .findUniqueOrThrow({
-        where: {
-          id: qrId,
-          assetId: null,
-          kitId: null,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Code not found",
-          message:
-            "The code you are trying to claim is not available for claiming.",
-          additionalData: { qrId, currentOrganization },
-          label: "QR",
-        });
+    const { data: qr, error: qrError } = await sbDb
+      .from("Qr")
+      .select("*")
+      .eq("id", qrId)
+      .is("assetId", null)
+      .is("kitId", null)
+      .single();
+
+    if (qrError || !qr) {
+      throw new ShelfError({
+        cause: qrError,
+        title: "Code not found",
+        message:
+          "The code you are trying to claim is not available for claiming.",
+        additionalData: { qrId, currentOrganization },
+        label: "QR",
       });
+    }
 
     /** If for some reason its already claimed, redirect to link */
     if (qr?.organizationId) {

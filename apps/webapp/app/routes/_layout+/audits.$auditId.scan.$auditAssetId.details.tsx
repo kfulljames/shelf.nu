@@ -25,6 +25,8 @@ import {
 } from "~/components/audit/audit-image-upload-box";
 import { AuditImageUploadDialog } from "~/components/audit/audit-image-upload-dialog";
 import { Button } from "~/components/shared/button";
+// KEPT AS PRISMA: db.auditAsset.findFirst with nested include (auditSession -> assignments),
+// db.auditNote.create with include (user select)
 import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
@@ -110,31 +112,31 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     });
 
     // Fetch notes for this audit asset
-    const notes = await db.auditNote.findMany({
-      where: {
-        auditSessionId: auditId,
-        auditAssetId: auditAssetId,
-      },
-      select: {
-        id: true,
-        content: true,
-        createdAt: true,
-        userId: true,
-        type: true,
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            profilePicture: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+    const { data: notesRaw, error: notesError } = await sbDb
+      .from("AuditNote")
+      .select(
+        "id, content, createdAt, userId, type, user:User(id, firstName, lastName, email, profilePicture)"
+      )
+      .eq("auditSessionId", auditId)
+      .eq("auditAssetId", auditAssetId)
+      .order("createdAt", { ascending: false });
+
+    if (notesError) throw notesError;
+
+    const notes = (notesRaw ?? []) as unknown as Array<{
+      id: string;
+      content: string;
+      createdAt: string;
+      userId: string | null;
+      type: "COMMENT" | "UPDATE";
+      user: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+        profilePicture: string | null;
+      } | null;
+    }>;
 
     // Fetch images
     const { data: images, error: imagesError } = await sbDb
@@ -533,7 +535,7 @@ export default function AuditAssetDetails() {
         content: note.content,
         createdAt: note.createdAt,
         userId: note.userId ?? "",
-        type: note.type,
+        type: note.type as "COMMENT" | "UPDATE" | undefined,
         user: {
           id: note.user?.id ?? "",
           name:

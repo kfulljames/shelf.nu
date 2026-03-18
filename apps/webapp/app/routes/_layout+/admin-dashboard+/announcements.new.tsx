@@ -6,7 +6,7 @@ import Input from "~/components/forms/input";
 import { Switch } from "~/components/forms/switch";
 import { MarkdownEditor } from "~/components/markdown/markdown-editor";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
@@ -46,18 +46,18 @@ export const action = async ({ context, request }: ActionFunctionArgs) => {
       })
     );
 
-    await db.announcement
-      .create({
-        data: payload,
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Failed to create announcement",
-          additionalData: { userId, payload },
-          label: "Admin dashboard",
-        });
+    const { error: createError } = await sbDb
+      .from("Announcement")
+      .insert(payload);
+
+    if (createError) {
+      throw new ShelfError({
+        cause: createError,
+        message: "Failed to create announcement",
+        additionalData: { userId, payload },
+        label: "Admin dashboard",
       });
+    }
 
     return redirect("/admin-dashboard/announcements");
   } catch (cause) {
