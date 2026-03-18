@@ -22,8 +22,6 @@ import DynamicSelect from "~/components/dynamic-select/dynamic-select";
 import { UserIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
 import { WarningBox } from "~/components/shared/warning-box";
-// KEPT AS PRISMA: Nested relation writes (create custody with connect for kit and assets)
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { AssignCustodySchema } from "~/modules/custody/schema";
@@ -263,29 +261,48 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       });
     }
 
-    const kit = await db.kit.update({
-      where: { id: kitId, organizationId },
-      data: {
-        status: KitStatus.IN_CUSTODY,
-        custody: { create: { custodian: { connect: { id: custodianId } } } },
-      },
-      include: {
-        assets: true,
-      },
-    });
+    // Update kit status and create kit custody
+    const [, , { data: kitAssets }] = await Promise.all([
+      sbDb
+        .from("Kit")
+        .update({ status: KitStatus.IN_CUSTODY })
+        .eq("id", kitId)
+        .eq("organizationId", organizationId),
+      sbDb.from("KitCustody").insert({ kitId, custodianId }),
+      sbDb
+        .from("Asset")
+        .select("id")
+        .eq("kitId", kitId)
+        .eq("organizationId", organizationId),
+    ]);
 
-    // Update custody for all assets
+    const kit = {
+      id: kitId,
+      name: kitId, // Will be overridden below
+      assets: (kitAssets ?? []) as { id: string }[],
+    };
+
+    // Get kit name for notes
+    const { data: kitRow } = await sbDb
+      .from("Kit")
+      .select("name")
+      .eq("id", kitId)
+      .single();
+    if (kitRow) kit.name = kitRow.name;
+
+    // Update status and create custody for all assets
     await Promise.all(
       kit.assets.map((asset) =>
-        db.asset.update({
-          where: { id: asset.id, organizationId },
-          data: {
-            status: AssetStatus.IN_CUSTODY,
-            custody: {
-              create: { custodian: { connect: { id: custodianId } } },
-            },
-          },
-        })
+        Promise.all([
+          sbDb
+            .from("Asset")
+            .update({ status: AssetStatus.IN_CUSTODY })
+            .eq("id", asset.id)
+            .eq("organizationId", organizationId),
+          sbDb
+            .from("Custody")
+            .insert({ assetId: asset.id, teamMemberId: custodianId }),
+        ])
       )
     );
 

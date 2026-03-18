@@ -5,9 +5,7 @@ import { Form } from "~/components/custom-form";
 import { Button } from "~/components/shared/button";
 import { DateS } from "~/components/shared/date";
 import { Table, Td, Tr } from "~/components/table";
-// KEPT AS PRISMA: organization findFirstOrThrow with deep nested includes
-// (qrCodes.asset, qrCodes.kit, owner)
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { generateOrphanedCodes } from "~/modules/qr/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
@@ -30,29 +28,43 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
   try {
     await requireAdmin(userId);
 
-    const organization = await db.organization
-      .findFirstOrThrow({
-        where: { id: organizationId },
-        include: {
-          qrCodes: {
-            include: {
-              asset: true,
-              kit: true,
-            },
-          },
-          owner: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Organization not found",
-          message:
-            "The organization you are trying to access does not exist or you do not have permission to access it.",
-          additionalData: { userId, params },
-          label: "Admin dashboard",
-        });
+    const { data: orgData, error: orgErr } = await sbDb.rpc(
+      "shelf_admin_org_with_details",
+      { p_organization_id: organizationId }
+    );
+
+    if (orgErr || !orgData) {
+      throw new ShelfError({
+        cause: orgErr,
+        title: "Organization not found",
+        message:
+          "The organization you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { userId, params },
+        label: "Admin dashboard",
       });
+    }
+
+    const organization = orgData as unknown as {
+      id: string;
+      name: string;
+      owner: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+      };
+      qrCodes: {
+        id: string;
+        createdAt: string;
+        updatedAt: string;
+        assetId: string | null;
+        kitId: string | null;
+        organizationId: string;
+        userId: string;
+        asset: { id: string; title: string } | null;
+        kit: { id: string; name: string } | null;
+      }[];
+    };
 
     return payload({ organization });
   } catch (cause) {

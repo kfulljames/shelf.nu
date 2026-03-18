@@ -24,9 +24,6 @@ import { SubscriptionsOverview } from "~/components/subscription/subscriptions-o
 import { Table, Td, Th, Tr } from "~/components/table";
 import { DeleteUser } from "~/components/user/delete-user";
 import { config } from "~/config/shelf.config";
-// KEPT AS PRISMA: userOrganization findMany with 3+ level nested includes,
-// customTierLimit upsert
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
 import { resetPersonalWorkspaceBranding } from "~/modules/organization/service.server";
@@ -128,39 +125,42 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
       } satisfies Prisma.UserSelect,
     });
 
-    const userOrganizations = await db.userOrganization
-      .findMany({
-        where: {
-          userId: shelfUserId,
-        },
-        select: {
-          organization: {
-            include: {
-              ssoDetails: true,
-              userOrganizations: {
-                // Include ALL users in each org with SSO enabled so we cna count them
-                where: {
-                  user: {
-                    sso: true,
-                  },
-                },
-                select: {
-                  userId: true,
-                },
-              },
-            },
-          },
-          roles: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Failed to load user organizations",
-          additionalData: { userId, shelfUserId },
-          label: "Admin dashboard",
-        });
+    const { data: uoData, error: uoErr } = await sbDb.rpc(
+      "shelf_admin_user_organizations",
+      { p_user_id: shelfUserId }
+    );
+
+    if (uoErr) {
+      throw new ShelfError({
+        cause: uoErr,
+        message: "Failed to load user organizations",
+        additionalData: { userId, shelfUserId },
+        label: "Admin dashboard",
       });
+    }
+
+    const userOrganizations =
+      (uoData as unknown as {
+        roles: string[];
+        organization: {
+          id: string;
+          name: string;
+          type: string;
+          userId: string;
+          enabledSso: boolean;
+          workspaceDisabled: boolean;
+          createdAt: string;
+          ssoDetails: {
+            id: string;
+            domain: string;
+            organizationId: string;
+            adminGroupId: string | null;
+            selfServiceGroupId: string | null;
+            baseUserGroupId: string | null;
+          } | null;
+          userOrganizations: { userId: string }[];
+        };
+      }[]) ?? [];
 
     /** Which organizations of the user have SSO enabled */
     const organizationsOwnedByUserWithSso = userOrganizations.filter(
@@ -315,17 +315,10 @@ export const action = async ({
           })
         );
 
-        await db.customTierLimit.upsert({
-          where: { userId: shelfUserId },
-          create: {
-            userId: shelfUserId,
-            maxOrganizations,
-            isEnterprise,
-          },
-          update: {
-            maxOrganizations,
-            isEnterprise,
-          },
+        await sbDb.rpc("shelf_upsert_custom_tier_limit", {
+          p_user_id: shelfUserId,
+          p_max_organizations: maxOrganizations,
+          p_is_enterprise: isEnterprise,
         });
 
         break;

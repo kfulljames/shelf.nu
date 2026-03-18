@@ -10,7 +10,6 @@ import {
   emailMatchesDomains,
   parseDomains,
 } from "~/modules/organization/service.server";
-import { USER_WITH_SSO_DETAILS_SELECT } from "~/modules/user/fields";
 import {
   createUserFromSSO,
   updateUserFromSSO,
@@ -64,13 +63,90 @@ export async function resolveUserAndOrgForSsoCallback({
   };
 }) {
   try {
-    // KEPT AS PRISMA: complex nested select with userOrganizations.organization.ssoDetails
-    const user = await db.user.findUnique({
-      where: {
-        email: authSession.email,
-      },
-      select: USER_WITH_SSO_DETAILS_SELECT,
-    });
+    // Fetch user with SSO details via multiple Supabase queries
+    const { data: userData, error: userErr } = await sbDb
+      .from("User")
+      .select("id, email, firstName, lastName, sso")
+      .eq("email", authSession.email)
+      .maybeSingle();
+
+    if (userErr) {
+      throw new ShelfError({
+        cause: userErr,
+        message: "Failed to look up user",
+        label: "SSO",
+      });
+    }
+
+    let user: {
+      id: string;
+      email: string;
+      firstName: string | null;
+      lastName: string | null;
+      sso: boolean;
+      userOrganizations: {
+        roles: string[];
+        organization: {
+          id: string;
+          name: string;
+          enabledSso: boolean;
+          ssoDetails: {
+            id: string;
+            domain: string;
+            baseUserGroupId: string | null;
+            selfServiceGroupId: string | null;
+            adminGroupId: string | null;
+          } | null;
+        };
+      }[];
+    } | null = null;
+
+    if (userData) {
+      // Fetch user organizations with org + ssoDetails
+      const { data: uoRows, error: uoErr } = await sbDb
+        .from("UserOrganization")
+        .select(
+          "roles, organization:Organization!inner(id, name, enabledSso, ssoDetails:SsoDetails(id, domain, baseUserGroupId, selfServiceGroupId, adminGroupId))"
+        )
+        .eq("userId", userData.id);
+
+      if (uoErr) {
+        throw new ShelfError({
+          cause: uoErr,
+          message: "Failed to load user organizations",
+          label: "SSO",
+        });
+      }
+
+      user = {
+        ...userData,
+        userOrganizations: (uoRows ?? []).map((row) => {
+          const org = row.organization as unknown as {
+            id: string;
+            name: string;
+            enabledSso: boolean;
+            ssoDetails: {
+              id: string;
+              domain: string;
+              baseUserGroupId: string | null;
+              selfServiceGroupId: string | null;
+              adminGroupId: string | null;
+            }[];
+          };
+          return {
+            roles: row.roles as unknown as string[],
+            organization: {
+              ...org,
+              // ssoDetails comes as array from Supabase, take first or null
+              ssoDetails:
+                Array.isArray(org.ssoDetails) && org.ssoDetails.length > 0
+                  ? org.ssoDetails[0]
+                  : null,
+            },
+          };
+        }),
+      };
+    }
 
     // If user exists, check if they're trying to convert from email to SSO
     if (user) {

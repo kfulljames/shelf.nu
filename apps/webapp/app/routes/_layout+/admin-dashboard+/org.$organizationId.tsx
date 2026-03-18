@@ -20,9 +20,7 @@ import { Switch } from "~/components/forms/switch";
 import HorizontalTabs from "~/components/layout/horizontal-tabs";
 import { Button } from "~/components/shared/button";
 import { DateS } from "~/components/shared/date";
-// KEPT AS PRISMA: organization findFirstOrThrow with deep nested includes,
-// organization update with nested ssoDetails upsert
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { createAssetsFromContentImport } from "~/modules/asset/service.server";
 import { ASSET_CSV_HEADERS } from "~/modules/asset/utils.server";
 import {
@@ -57,30 +55,71 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
   try {
     await requireAdmin(userId);
 
-    const organization = await db.organization
-      .findFirstOrThrow({
-        where: { id: organizationId },
-        include: {
-          qrCodes: {
-            include: {
-              asset: true,
-            },
-          },
-          owner: true,
-          ssoDetails: true,
-          workingHours: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Organization not found",
-          message:
-            "The organization you are trying to access does not exist or you do not have permission to access it.",
-          additionalData: { userId, params },
-          label: "Admin dashboard",
-        });
+    const { data: orgData, error: orgErr } = await sbDb.rpc(
+      "shelf_admin_org_with_details",
+      { p_organization_id: organizationId }
+    );
+
+    if (orgErr || !orgData) {
+      throw new ShelfError({
+        cause: orgErr,
+        title: "Organization not found",
+        message:
+          "The organization you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { userId, params },
+        label: "Admin dashboard",
       });
+    }
+
+    const organization = orgData as unknown as {
+      id: string;
+      name: string;
+      type: string;
+      userId: string;
+      imageId: string | null;
+      currency: string;
+      enabledSso: boolean;
+      updatedAt: string;
+      createdAt: string;
+      workspaceDisabled: boolean;
+      barcodesEnabled: boolean;
+      auditsEnabled: boolean;
+      owner: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+        profilePicture: string | null;
+      };
+      ssoDetails: {
+        id: string;
+        domain: string;
+        organizationId: string;
+        adminGroupId: string | null;
+        selfServiceGroupId: string | null;
+        baseUserGroupId: string | null;
+      } | null;
+      workingHours:
+        | {
+            id: string;
+            dayOfWeek: number;
+            startTime: string;
+            endTime: string;
+            organizationId: string;
+          }[]
+        | null;
+      qrCodes: {
+        id: string;
+        createdAt: string;
+        updatedAt: string;
+        assetId: string | null;
+        kitId: string | null;
+        organizationId: string;
+        userId: string;
+        asset: { id: string; title: string } | null;
+        kit: { id: string; name: string } | null;
+      }[];
+    };
 
     if (!organization.workingHours) {
       await createDefaultWorkingHours(organization.id);
@@ -212,24 +251,11 @@ export const action = async ({
           })
         );
 
-        await db.organization.update({
-          where: { id: organizationId },
-          data: {
-            ssoDetails: {
-              upsert: {
-                create: {
-                  domain,
-                  adminGroupId,
-                  selfServiceGroupId,
-                },
-                update: {
-                  domain,
-                  adminGroupId,
-                  selfServiceGroupId,
-                },
-              },
-            },
-          },
+        await sbDb.rpc("shelf_upsert_sso_details", {
+          p_organization_id: organizationId,
+          p_domain: domain,
+          p_admin_group_id: adminGroupId,
+          p_self_service_group_id: selfServiceGroupId,
         });
 
         return payload({ message: "SSO details updated" });

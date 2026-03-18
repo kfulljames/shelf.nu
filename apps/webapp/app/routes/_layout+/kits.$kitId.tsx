@@ -24,8 +24,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import HorizontalTabs from "~/components/layout/horizontal-tabs";
 import { ScanDetails } from "~/components/location/scan-details";
 import When from "~/components/when/when";
-// KEPT AS PRISMA: Nested relation writes (disconnect, delete on custody relation)
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { usePosition } from "~/hooks/use-position";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { createBarcode } from "~/modules/barcode/service.server";
@@ -283,25 +282,40 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           { additionalData: { userId, organizationId, kitId } }
         );
 
-        const kit = await db.kit.update({
-          where: { id: kitId, organizationId },
-          data: {
-            assets: { disconnect: { id: assetId } },
-          },
-          select: { name: true, custody: { select: { custodianId: true } } },
-        });
+        // Disconnect asset from kit
+        await sbDb
+          .from("Asset")
+          .update({ kitId: null })
+          .eq("id", assetId)
+          .eq("organizationId", organizationId);
+
+        // Get kit name and custody info
+        const { data: kitRow } = await sbDb
+          .from("Kit")
+          .select("name, custody:KitCustody(custodianId)")
+          .eq("id", kitId)
+          .single();
+
+        const kit = {
+          name: (kitRow?.name ?? "") as string,
+          custody: Array.isArray((kitRow as any)?.custody)
+            ? (kitRow as any).custody[0] ?? null
+            : (kitRow as any)?.custody ?? null,
+        };
 
         /**
          * If kit was in custody then we have to make the asset available
          */
         if (kit.custody?.custodianId) {
-          await db.asset.update({
-            where: { id: assetId, organizationId },
-            data: {
-              status: AssetStatus.AVAILABLE,
-              custody: { delete: true },
-            },
-          });
+          // Delete asset custody and set status to available
+          await Promise.all([
+            sbDb
+              .from("Asset")
+              .update({ status: AssetStatus.AVAILABLE })
+              .eq("id", assetId)
+              .eq("organizationId", organizationId),
+            sbDb.from("Custody").delete().eq("assetId", assetId),
+          ]);
         }
 
         const actor = wrapUserLinkForNote({

@@ -1875,6 +1875,7 @@ export type Database = {
         Args: { p_user_id: string };
         Returns: {
           firstName: string | null;
+          tierId: string | null;
           tier: { id: string; name: string };
           userOrganizations: {
             id: string;
@@ -1887,12 +1888,21 @@ export type Database = {
               userId: string;
               updatedAt: string;
               enabledSso: boolean;
+              currency: string;
               owner: {
                 id: string;
                 firstName: string | null;
                 lastName: string | null;
                 profilePicture: string | null;
               };
+              ssoDetails: {
+                id: string;
+                domain: string;
+                organizationId: string;
+                adminGroupId: string | null;
+                selfServiceGroupId: string | null;
+                baseUserGroupId: string | null;
+              } | null;
               _count: {
                 assets: number;
                 members: number;
@@ -1901,6 +1911,113 @@ export type Database = {
             };
           }[];
         };
+      };
+      shelf_remove_audit_scan: {
+        Args: {
+          p_session_id: string;
+          p_asset_id: string;
+          p_removed_by_id: string;
+        };
+        Returns: {
+          success: boolean;
+          noScanFound?: boolean;
+          foundAssetCount: number;
+          missingAssetCount: number;
+          unexpectedAssetCount: number;
+        };
+      };
+      shelf_admin_org_with_details: {
+        Args: { p_organization_id: string };
+        Returns: {
+          id: string;
+          name: string;
+          type: string;
+          userId: string;
+          imageId: string | null;
+          currency: string;
+          enabledSso: boolean;
+          updatedAt: string;
+          createdAt: string;
+          workspaceDisabled: boolean;
+          barcodesEnabled: boolean;
+          auditsEnabled: boolean;
+          owner: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+            email: string;
+            profilePicture: string | null;
+          };
+          ssoDetails: {
+            id: string;
+            domain: string;
+            organizationId: string;
+            adminGroupId: string | null;
+            selfServiceGroupId: string | null;
+            baseUserGroupId: string | null;
+          } | null;
+          workingHours:
+            | {
+                id: string;
+                dayOfWeek: number;
+                startTime: string;
+                endTime: string;
+                organizationId: string;
+              }[]
+            | null;
+          qrCodes: {
+            id: string;
+            createdAt: string;
+            updatedAt: string;
+            assetId: string | null;
+            kitId: string | null;
+            organizationId: string;
+            userId: string;
+            asset: { id: string; title: string } | null;
+            kit: { id: string; name: string } | null;
+          }[];
+        };
+      };
+      shelf_admin_user_organizations: {
+        Args: { p_user_id: string };
+        Returns: {
+          roles: string[];
+          organization: {
+            id: string;
+            name: string;
+            type: string;
+            userId: string;
+            enabledSso: boolean;
+            workspaceDisabled: boolean;
+            createdAt: string;
+            ssoDetails: {
+              id: string;
+              domain: string;
+              organizationId: string;
+              adminGroupId: string | null;
+              selfServiceGroupId: string | null;
+              baseUserGroupId: string | null;
+            } | null;
+            userOrganizations: { userId: string }[];
+          };
+        }[];
+      };
+      shelf_upsert_sso_details: {
+        Args: {
+          p_organization_id: string;
+          p_domain: string;
+          p_admin_group_id: string;
+          p_self_service_group_id: string;
+        };
+        Returns: undefined;
+      };
+      shelf_upsert_custom_tier_limit: {
+        Args: {
+          p_user_id: string;
+          p_max_organizations: number;
+          p_is_enterprise: boolean;
+        };
+        Returns: undefined;
       };
     };
     Enums: {
