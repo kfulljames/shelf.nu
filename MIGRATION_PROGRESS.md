@@ -2,7 +2,7 @@
 
 **Branch:** `claude/review-migration-plan-wYjw6`
 **Last Updated:** 2026-03-18
-**Status:** Phase 3 Complete — Typecheck ✅ | Lint ✅
+**Status:** Phase 4 Complete — Typecheck ✅ | Lint ✅
 
 ---
 
@@ -11,9 +11,12 @@
 | Area                         | Total `db.` calls | Converted | Remaining | % Done |
 | ---------------------------- | ----------------- | --------- | --------- | ------ |
 | **Modules** (`app/modules/`) | ~245              | ~205      | 40        | 84%    |
-| **Routes** (`app/routes/`)   | ~78               | 0         | 78        | 0%     |
-| **Utils** (`app/utils/`)     | ~33               | 0         | 33        | 0%     |
-| **Grand Total**              | ~356              | ~205      | ~152      | 58%    |
+| **Routes** (`app/routes/`)   | ~260              | ~72       | 188       | 28%    |
+| **Utils** (`app/utils/`)     | ~33               | ~26       | 7         | 79%    |
+| **Grand Total**              | ~538              | ~303      | ~235      | 56%    |
+
+Note: Route file count revised upward — initial scan missed
+`_layout+/` route files which contain significant `db.` usage.
 
 ---
 
@@ -59,6 +62,36 @@ Four commits completing the hardest module conversions:
 - `audit/helpers.server.ts`: 1 call
 - `audit/worker.server.ts`: 1 call
 
+### Phase 4 — Route + Utility Files (current branch)
+
+Single commit converting 32 files:
+
+| Area               | Files | Calls converted |
+| ------------------ | ----- | --------------- |
+| Utility files      | 8     | ~26             |
+| API route files    | 20    | ~55             |
+| Layout route files | 4     | ~17             |
+
+**Key conversions:**
+
+- csv.server.ts: All note export functions rewritten with
+  direct Supabase queries (removed generic NoteFetcher)
+- dashboard.server.ts: All 5 checklist count queries
+- sso.server.ts: User lookups and org SSO check
+- stripe.server.ts: User customerId lookups
+- command-palette.search.ts: Full rewrite for assets,
+  kits, bookings, locations search
+- user.entity-counts.ts: All 9 entity count queries
+- 4 activity CSV routes: Asset/booking/audit/location
+  name lookups
+
+**Kept as Prisma (with annotation comments):**
+
+- roles.server.ts: Nested many-to-many role checks
+- sso.server.ts: `$queryRaw` on auth schema
+- user.change-current-organization.ts: `$executeRaw`
+- reminders.team-members.ts: Deeply nested AND/hasSome
+
 ---
 
 ## Remaining Work
@@ -77,36 +110,31 @@ Calls kept as Prisma due to genuine complexity:
 - Complex `AND`/`OR` where clauses with case-insensitive `contains`
   across nested relations
 
-### Tier B: Route Files (~78 calls across 24 files)
+### Tier B: Route Files (~188 remaining across ~69 files)
 
-| File                                       | Calls             |
-| ------------------------------------------ | ----------------- |
-| `api+/user.entity-counts.ts`               | 10                |
-| `api+/get-scanned-item.$qrId.ts`           | 9                 |
-| `api+/command-palette.search.ts`           | 6                 |
-| `api+/asset.generate-thumbnail.ts`         | 6                 |
-| `api+/public-stats.ts`                     | 4                 |
-| `api+/get-scanned-barcode.$value.ts`       | 4                 |
-| `api+/asset.refresh-main-image.ts`         | 3                 |
-| `api+/settings.invite-user.ts`             | 3                 |
-| `api+/user.change-current-organization.ts` | 3                 |
-| `api+/image.$imageId.ts`                   | 3                 |
-| 4x activity CSV routes                     | 2 each (8 total)  |
-| 8x other API routes                        | 2 each (16 total) |
-| `api+/model-filters.ts`                    | 1                 |
+Phase 4 converted 24 API/activity routes. The remaining 188
+calls are primarily in `_layout+/` route files:
 
-### Tier C: Utility Files (~33 calls across 8 files)
+| File                                                       | Calls                 |
+| ---------------------------------------------------------- | --------------------- |
+| `_layout+/home.tsx`                                        | 13                    |
+| `_layout+/bookings.$bookingId.overview.tsx`                | 10                    |
+| `_layout+/admin-dashboard+/$userId.tsx`                    | 6                     |
+| `_layout+/account-details.workspace.$workspaceId.edit.tsx` | 6                     |
+| `_layout+/bookings.$bookingId.overview.manage-assets.tsx`  | 6                     |
+| `_layout+/kits.$kitId.assets.assign-custody.tsx`           | 5                     |
+| `_layout+/admin-dashboard+/move-location-images.tsx`       | 5                     |
+| `_layout+/settings.general.tsx`                            | 4                     |
+| `_layout+/scanner.tsx`                                     | 4                     |
+| `api+/get-scanned-item.$qrId.ts`                           | 4                     |
+| ~59 other route files                                      | 2-3 each (~130 total) |
 
-| File                                               | Calls |
-| -------------------------------------------------- | ----- |
-| `utils/csv.server.ts`                              | 7     |
-| `utils/dashboard.server.ts`                        | 6     |
-| `utils/sso.server.ts`                              | 6     |
-| `utils/stripe.server.ts`                           | 5     |
-| `utils/roles.server.ts`                            | 3     |
-| `utils/subscription.server.ts`                     | 2     |
-| `utils/permissions/permission.validator.server.ts` | 2     |
-| `utils/note/load-user-for-notes.server.ts`         | 2     |
+### Tier C: Utility Files (~7 remaining across 2 files)
+
+| File                    | Calls | Reason kept                |
+| ----------------------- | ----- | -------------------------- |
+| `utils/sso.server.ts`   | 4     | `$queryRaw` on auth schema |
+| `utils/roles.server.ts` | 3     | Nested M2M role checks     |
 
 ---
 
@@ -114,12 +142,14 @@ Calls kept as Prisma due to genuine complexity:
 
 ### Priority Order
 
-1. **Tier C (Utils)** — 33 calls, 8 files. Mostly simple
-   CRUD queries, quick wins.
-2. **Tier B (Routes)** — 78 calls, 24 files. Many are simple
-   `findUnique`/`findMany` queries that translate directly.
-3. **Tier A (Module stragglers)** — 40 calls. Requires rewriting
-   `WhereInput` helpers or accepting Prisma for these edge cases.
+1. **Tier B (Layout routes)** — 188 calls, ~69 files. Many
+   are simple `findUnique`/`findMany` that translate directly.
+   The largest files (home.tsx, bookings overview) are highest
+   priority.
+2. **Tier A (Module stragglers)** — 40 calls. Requires rewriting
+   `WhereInput` helpers or accepting Prisma for edge cases.
+3. **Tier C (Utils)** — 7 calls remaining, all genuinely
+   require Prisma ($queryRaw, nested M2M).
 
 ### Final Cleanup (after all calls migrated)
 
