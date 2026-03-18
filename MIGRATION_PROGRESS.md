@@ -2,7 +2,7 @@
 
 **Branch:** `claude/review-migration-plan-wYjw6`
 **Last Updated:** 2026-03-18
-**Status:** Phase 4 Complete — Typecheck ✅ | Lint ✅
+**Status:** Phase 5 Complete — Typecheck ✅ | Lint ✅
 
 ---
 
@@ -10,13 +10,13 @@
 
 | Area                         | Total `db.` calls | Converted | Remaining | % Done |
 | ---------------------------- | ----------------- | --------- | --------- | ------ |
-| **Modules** (`app/modules/`) | ~245              | ~205      | 40        | 84%    |
-| **Routes** (`app/routes/`)   | ~260              | ~72       | 188       | 28%    |
-| **Utils** (`app/utils/`)     | ~33               | ~26       | 7         | 79%    |
-| **Grand Total**              | ~538              | ~303      | ~235      | 56%    |
+| **Modules** (`app/modules/`) | ~245              | ~215      | 30        | 88%    |
+| **Routes** (`app/routes/`)   | ~260              | ~222      | 38        | 85%    |
+| **Utils** (`app/utils/`)     | ~33               | ~28       | 5         | 85%    |
+| **Grand Total**              | ~538              | ~465      | ~73       | 86%    |
 
-Note: Route file count revised upward — initial scan missed
-`_layout+/` route files which contain significant `db.` usage.
+Test files (`.test.ts`) contain 32 additional `db.` references
+(mock setups) that will be cleaned up when Prisma is fully removed.
 
 ---
 
@@ -53,18 +53,16 @@ Four commits completing the hardest module conversions:
 | location/service.server.ts     | 33             | 28        | 5         | `$queryRaw`, dynamic SQL              |
 | kit/service.server.ts          | 40             | 33        | 7         | Generic `Prisma.KitInclude` types     |
 | asset/service.server.ts        | 58             | 51        | 7         | Complex nested creates, `$queryRaw`   |
-| booking/service.server.ts      | 58             | 49        | 9         | Booking conflict conditions, bulk ops |
+| booking/service.server.ts      | 58             | 51        | 7         | Booking conflict conditions, bulk ops |
 
 **Also has remaining calls:**
 
-- `asset/bulk-operations-helper.server.ts`: 3 calls
-- `location/bulk-select.server.ts`: 3 calls
-- `audit/helpers.server.ts`: 1 call
-- `audit/worker.server.ts`: 1 call
+- `asset/bulk-operations-helper.server.ts`: 2 calls
+- `location/bulk-select.server.ts`: 2 calls
 
 ### Phase 4 — Route + Utility Files (current branch)
 
-Single commit converting 32 files:
+Single commit (`9ced224`) converting 32 files:
 
 | Area               | Files | Calls converted |
 | ------------------ | ----- | --------------- |
@@ -85,71 +83,120 @@ Single commit converting 32 files:
 - 4 activity CSV routes: Asset/booking/audit/location
   name lookups
 
-**Kept as Prisma (with annotation comments):**
+### Phase 5 — Remaining Layout + Auth + QR Routes (current branch)
 
-- roles.server.ts: Nested many-to-many role checks
-- sso.server.ts: `$queryRaw` on auth schema
-- user.change-current-organization.ts: `$executeRaw`
-- reminders.team-members.ts: Deeply nested AND/hasSome
+Single commit (`b6acabb`) converting 61 files:
+
+| Area                    | Files | Calls converted |
+| ----------------------- | ----- | --------------- |
+| Layout route files      | 42    | ~150            |
+| QR route files          | 5     | ~12             |
+| Auth route files        | 2     | ~4              |
+| Welcome route files     | 1     | ~2              |
+| API route files         | 9     | ~18             |
+| Component files         | 2     | ~4              |
+
+**Key conversions:**
+
+- home.tsx: 13→8 remaining (announcements, dashboard queries)
+- bookings overview + manage-assets/kits: booking queries
+- admin-dashboard files: user/org/QR admin queries
+- settings files: org, team, NRM queries
+- audits files: audit session, scan, note queries
+- kits/locations files: custody, scan, note queries
+- scanner.tsx: scanned item lookups
+- QR routes: claim, link, contact-owner queries
+- auth routes: invite acceptance, password reset
+- healthcheck: simple user count query
 
 ---
 
-## Remaining Work
+## Remaining Work (~73 production calls across 27 files)
 
-### Tier A: Module Stubborn Calls (~40 remaining)
+### Module Files (30 calls across 6 files)
 
-Calls kept as Prisma due to genuine complexity:
+| File                                   | Calls | Reason kept                                |
+| -------------------------------------- | ----- | ------------------------------------------ |
+| `booking/service.server.ts`            | 7     | Conflict conditions, nested `some`/`none`  |
+| `asset/service.server.ts`              | 7     | Complex nested creates, `$queryRaw`        |
+| `kit/service.server.ts`                | 7     | Generic `Prisma.KitInclude` types          |
+| `location/service.server.ts`           | 5     | `$queryRaw`, dynamic SQL                   |
+| `asset/bulk-operations-helper.server`  | 2     | Dynamic `Prisma.WhereInput`                |
+| `location/bulk-select.server.ts`       | 2     | Dynamic `Prisma.WhereInput`                |
 
-- Dynamic `Prisma.WhereInput` helpers (`getAssetsWhereInput`,
-  `getKitsWhereInput`, `getBookingWhereInput`) — used by bulk ops
-- Generic type parameters (`T extends Prisma.KitInclude`)
-- `$queryRaw` with dynamic SQL assembly
-- Complex nested creates (asset + QR + custody + tags atomically)
-- Booking conflict conditions with deeply nested date range
-  `some`/`none` operators
-- Complex `AND`/`OR` where clauses with case-insensitive `contains`
-  across nested relations
+### Route Files (38 calls across 19 files)
 
-### Tier B: Route Files (~188 remaining across ~69 files)
+| File                                             | Calls | Reason kept                            |
+| ------------------------------------------------ | ----- | -------------------------------------- |
+| `_layout+/home.tsx`                              | 8     | Complex includes, nested relations     |
+| `_layout+/bookings.$bookingId.overview.tsx`      | 6     | Booking with nested assets/kits        |
+| `_layout+/admin-dashboard+/move-location-images` | 3     | Batch image processing                 |
+| `_layout+/bookings.overview.manage-assets`       | 2     | Dynamic where conditions               |
+| `_layout+/bookings.overview.manage-kits`         | 2     | Dynamic where conditions               |
+| `_layout+/kits.$kitId.assets.assign-custody`     | 2     | Complex kit queries                    |
+| `_layout+/kits.$kitId.tsx`                       | 2     | Kit with dynamic includes              |
+| `_layout+/audits.$auditId.scan.tsx`              | 2     | Audit asset details                    |
+| `_layout+/audits.scan.$auditAssetId.details`     | 2     | Audit scan details                     |
+| `api+/command-palette.search.ts`                 | 2     | Dynamic search with `some`/`contains`  |
+| `api+/get-scanned-item.$qrId.ts`                | 2     | Complex scanned item resolution        |
+| 8 other route files                              | 1 ea  | Various kept-as-Prisma patterns        |
 
-Phase 4 converted 24 API/activity routes. The remaining 188
-calls are primarily in `_layout+/` route files:
+### Utility Files (5 calls across 2 files)
 
-| File                                                       | Calls                 |
-| ---------------------------------------------------------- | --------------------- |
-| `_layout+/home.tsx`                                        | 13                    |
-| `_layout+/bookings.$bookingId.overview.tsx`                | 10                    |
-| `_layout+/admin-dashboard+/$userId.tsx`                    | 6                     |
-| `_layout+/account-details.workspace.$workspaceId.edit.tsx` | 6                     |
-| `_layout+/bookings.$bookingId.overview.manage-assets.tsx`  | 6                     |
-| `_layout+/kits.$kitId.assets.assign-custody.tsx`           | 5                     |
-| `_layout+/admin-dashboard+/move-location-images.tsx`       | 5                     |
-| `_layout+/settings.general.tsx`                            | 4                     |
-| `_layout+/scanner.tsx`                                     | 4                     |
-| `api+/get-scanned-item.$qrId.ts`                           | 4                     |
-| ~59 other route files                                      | 2-3 each (~130 total) |
+| File                    | Calls | Reason kept                  |
+| ----------------------- | ----- | ---------------------------- |
+| `utils/sso.server.ts`   | 3     | `$queryRaw` on auth schema   |
+| `utils/roles.server.ts` | 2     | Nested M2M role checks       |
 
-### Tier C: Utility Files (~7 remaining across 2 files)
+---
 
-| File                    | Calls | Reason kept                |
-| ----------------------- | ----- | -------------------------- |
-| `utils/sso.server.ts`   | 4     | `$queryRaw` on auth schema |
-| `utils/roles.server.ts` | 3     | Nested M2M role checks     |
+## Categories of Remaining Calls
+
+All remaining 73 calls are kept as Prisma due to one of these:
+
+1. **`$queryRaw` / `$executeRaw`** (~10 calls) — Direct SQL on
+   auth schema or dynamic SQL assembly. Would need Supabase
+   `rpc()` or raw `postgres.js` client.
+
+2. **Dynamic `Prisma.WhereInput` builders** (~12 calls) —
+   `getAssetsWhereInput`, `getKitsWhereInput`,
+   `getBookingWhereInput` helpers that construct where clauses
+   from search params. Central to the bulk-ops pattern.
+
+3. **Nested `some`/`none`/`every` operators** (~15 calls) —
+   Prisma-specific relation filters (e.g., booking conflict
+   detection with nested date range checks). No Supabase
+   PostgREST equivalent.
+
+4. **Generic type parameters** (~8 calls) — Functions accepting
+   `T extends Prisma.KitInclude` to allow callers to customize
+   included relations.
+
+5. **Complex nested creates** (~8 calls) — Atomic creation of
+   entity + related records (asset + QR + custody + tags).
+
+6. **Complex includes with 3+ nesting levels** (~20 calls) —
+   Booking→assets→custody→teamMember chains that Supabase
+   typed client can't resolve.
 
 ---
 
 ## Migration Strategy for Remaining Work
 
-### Priority Order
+### Approach Options
 
-1. **Tier B (Layout routes)** — 188 calls, ~69 files. Many
-   are simple `findUnique`/`findMany` that translate directly.
-   The largest files (home.tsx, bookings overview) are highest
-   priority.
-2. **Tier A (Module stragglers)** — 40 calls. Requires rewriting
-   `WhereInput` helpers or accepting Prisma for edge cases.
-3. **Tier C (Utils)** — 7 calls remaining, all genuinely
-   require Prisma ($queryRaw, nested M2M).
+1. **RPC functions** — Write Postgres functions for the complex
+   queries and call via `sbDb.rpc()`. Best for `$queryRaw` and
+   complex nested creates.
+
+2. **View-based approach** — Create Postgres views that flatten
+   nested joins, then query views via Supabase. Best for deep
+   includes.
+
+3. **Accept Prisma for edge cases** — Keep ~20-30 genuinely
+   complex calls in Prisma while removing Prisma from simpler
+   paths. This delays full removal but avoids rewriting core
+   business logic.
 
 ### Final Cleanup (after all calls migrated)
 
@@ -157,6 +204,7 @@ calls are primarily in `_layout+/` route files:
 - Remove Prisma as a runtime dependency
 - Remove `@prisma/client` from `package.json`
 - Update vite config to remove Prisma browser alias
+- Update test files to mock `sbDb` instead of `db`
 
 ---
 
