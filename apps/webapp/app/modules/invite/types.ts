@@ -1,6 +1,6 @@
-import type { Invite, Organization, User } from "@prisma/client";
+import type { Sb } from "@shelf/database";
 
-export type InviteWithInviterAndOrg = Invite & {
-  inviter: Pick<User, "firstName" | "lastName">;
-  organization: Organization;
+export type InviteWithInviterAndOrg = Sb.InviteRow & {
+  inviter: { firstName: string | null; lastName: string | null };
+  organization: Sb.OrganizationRow;
 };
