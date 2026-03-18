@@ -1,42 +1,22 @@
 import { OrganizationRoles } from "@prisma/client";
 import type { ActionFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 
 import { action } from "~/routes/_layout+/kits.$kitId.assets.assign-custody";
 import { requirePermission } from "~/utils/roles.server";
 import { getUserByID } from "~/modules/user/service.server";
 
-const dbMocks = vi.hoisted(() => {
-  return {
-    teamMember: {},
-    kit: {
-      update: vi.fn(),
-    },
-    asset: {
-      update: vi.fn(),
-    },
-    note: {
-      createMany: vi.fn(),
-    },
-  };
-});
+const sbMock = createSupabaseMock();
 
 const teamMemberServiceMocks = vi.hoisted(() => ({
   getTeamMember: vi.fn(),
 }));
 
-vi.mock("~/database/db.server", () => ({
-  db: {
-    teamMember: {},
-    kit: {
-      update: dbMocks.kit.update,
-    },
-    asset: {
-      update: dbMocks.asset.update,
-    },
-    note: {
-      createMany: dbMocks.note.createMany,
-    },
+// why: testing route handler without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -92,9 +72,6 @@ vi.mock("react-router", async () => {
 const requirePermissionMock = vi.mocked(requirePermission);
 const getUserByIDMock = vi.mocked(getUserByID);
 const mockGetTeamMember = teamMemberServiceMocks.getTeamMember;
-const mockKitUpdate = dbMocks.kit.update;
-const mockAssetUpdate = dbMocks.asset.update;
-const mockNoteCreateMany = dbMocks.note.createMany;
 
 function createActionArgs(
   overrides: Partial<ActionFunctionArgs> = {}
@@ -116,10 +93,8 @@ function createActionArgs(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sbMock.reset();
   mockGetTeamMember.mockReset();
-  mockKitUpdate.mockReset();
-  mockAssetUpdate.mockReset();
-  mockNoteCreateMany.mockReset();
   requirePermissionMock.mockReset();
 
   getUserByIDMock.mockResolvedValue({
@@ -127,9 +102,6 @@ beforeEach(() => {
     firstName: "Test",
     lastName: "User",
   } as any);
-
-  mockAssetUpdate.mockResolvedValue({} as any);
-  mockNoteCreateMany.mockResolvedValue({} as any);
 });
 
 describe("kits/$kitId/assets/assign-custody", () => {
@@ -180,7 +152,8 @@ describe("kits/$kitId/assets/assign-custody", () => {
       },
     });
 
-    expect(mockKitUpdate).not.toHaveBeenCalled();
+    // sbDb should not have been called for kit update
+    expect(sbMock.calls.from).not.toHaveBeenCalled();
   });
 
   it("allows assigning custody to team members from the same organization", async () => {
@@ -201,11 +174,12 @@ describe("kits/$kitId/assets/assign-custody", () => {
       },
     });
 
-    mockKitUpdate.mockResolvedValue({
-      id: "kit-123",
-      name: "Test Kit",
-      assets: [],
-    } as any);
+    // sbDb calls: kit update, kit custody insert, asset select for kit,
+    // kit select for name, then per-asset update+custody insert
+    sbMock.enqueue({ data: null, error: null }); // Kit update
+    sbMock.enqueue({ data: null, error: null }); // KitCustody insert
+    sbMock.enqueueData([]); // Asset select (no assets in kit)
+    sbMock.enqueueData({ name: "Test Kit" }); // Kit name select
 
     const formData = new FormData();
     formData.set(
@@ -245,7 +219,9 @@ describe("kits/$kitId/assets/assign-custody", () => {
       },
     });
 
-    expect(mockKitUpdate).toHaveBeenCalled();
+    // Verify sbDb was called for Kit and KitCustody
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.from).toHaveBeenCalledWith("KitCustody");
   });
 
   it("prevents self-service users from assigning custody to other team members", async () => {
@@ -287,7 +263,8 @@ describe("kits/$kitId/assets/assign-custody", () => {
 
     expect((response as Response).status).toBe(500); // ShelfError defaults to 500
 
-    expect(mockKitUpdate).not.toHaveBeenCalled();
+    // sbDb should not have been called for kit update
+    expect(sbMock.calls.update).not.toHaveBeenCalled();
   });
 
   it("allows self-service users to assign custody to themselves", async () => {
@@ -308,11 +285,12 @@ describe("kits/$kitId/assets/assign-custody", () => {
       },
     });
 
-    mockKitUpdate.mockResolvedValue({
-      id: "kit-123",
-      name: "Test Kit",
-      assets: [],
-    } as any);
+    // sbDb calls: kit update, kit custody insert, asset select for kit,
+    // kit select for name
+    sbMock.enqueue({ data: null, error: null }); // Kit update
+    sbMock.enqueue({ data: null, error: null }); // KitCustody insert
+    sbMock.enqueueData([]); // Asset select (no assets in kit)
+    sbMock.enqueueData({ name: "Test Kit" }); // Kit name select
 
     const formData = new FormData();
     formData.set(
@@ -335,6 +313,6 @@ describe("kits/$kitId/assets/assign-custody", () => {
 
     expect((response as Response).status).toBe(302); // Redirect on success
 
-    expect(mockKitUpdate).toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
   });
 });

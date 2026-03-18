@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { TierId } from "@prisma/client";
-import type { Organization } from "@prisma/client";
+import type { Organization, OrganizationType } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import type { MetaFunction } from "react-router";
 import { useLoaderData } from "react-router";
@@ -16,9 +16,7 @@ import { Image } from "~/components/shared/image";
 import { UserBadge } from "~/components/shared/user-badge";
 import { Table, Td, Th } from "~/components/table";
 import { WorkspaceActionsDropdown } from "~/components/workspace/workspace-actions-dropdown";
-// KEPT AS PRISMA: user findUniqueOrThrow with deep nested includes
-// (userOrganizations.organization._count, organization.owner)
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useUserData } from "~/hooks/use-user-data";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
 import { getUserTierLimit } from "~/modules/tier/service.server";
@@ -40,49 +38,51 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       request,
     });
 
-    const user = await db.user
-      .findUniqueOrThrow({
-        where: {
-          id: userId,
-        },
-        select: {
-          firstName: true,
-          tier: true,
-          userOrganizations: {
-            include: {
-              organization: {
-                include: {
-                  _count: {
-                    select: {
-                      assets: true,
-                      members: true,
-                      locations: true,
-                    },
-                  },
-                  owner: {
-                    select: {
-                      id: true,
-                      firstName: true,
-                      lastName: true,
-                      profilePicture: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
+    const { data: rpcData, error: rpcErr } = await sbDb
+      .rpc("shelf_user_workspaces_with_counts", {
+        p_user_id: userId,
       })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "User not found",
-          message:
-            "The user you are trying to access does not exist or you do not have permission to access it.",
-          additionalData: { userId, organizationId },
-          label: "Settings",
-        });
+      .single();
+
+    if (rpcErr || !rpcData) {
+      throw new ShelfError({
+        cause: rpcErr,
+        title: "User not found",
+        message:
+          "The user you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { userId, organizationId },
+        label: "Settings",
       });
+    }
+
+    const user = rpcData as unknown as {
+      firstName: string | null;
+      tier: { id: TierId; name: string };
+      userOrganizations: {
+        id: string;
+        roles: string[];
+        organization: {
+          id: string;
+          name: string;
+          type: OrganizationType;
+          imageId: string | null;
+          userId: string;
+          updatedAt: string;
+          enabledSso: boolean;
+          owner: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+            profilePicture: string | null;
+          };
+          _count: {
+            assets: number;
+            members: number;
+            locations: number;
+          };
+        };
+      }[];
+    };
 
     const modelName = {
       singular: "Workspace",

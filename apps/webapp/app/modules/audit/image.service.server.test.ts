@@ -1,29 +1,42 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-// Mock the dependencies
+import { createSupabaseMock } from "@mocks/supabase";
+
+// why: We need to mock storage operations to avoid actually uploading files during tests
 vi.mock("~/utils/storage.server", () => ({
-  // why: We need to mock storage operations to avoid actually uploading files during tests
   parseFileFormData: vi.fn(),
   removePublicFile: vi.fn(),
   getFileUploadPath: vi.fn(
-    (params) =>
+    (params: { organizationId: string; type: string; typeId: string }) =>
       `${params.organizationId}/${params.type}/${params.typeId}/test.jpg`
   ),
 }));
 
-vi.mock("~/database/db.server", () => ({
-  // why: We need to mock database queries to avoid hitting the real database during tests
-  db: {
-    auditImage: {
-      count: vi.fn(),
-      create: vi.fn(),
-      findFirst: vi.fn(),
-      findMany: vi.fn(),
-      delete: vi.fn(),
+// why: We need to mock the Supabase admin client used for storage public URL generation
+vi.mock("~/integrations/supabase/client", () => ({
+  getSupabaseAdmin: vi.fn(() => ({
+    storage: {
+      from: () => ({
+        getPublicUrl: (path: string) => ({
+          data: { publicUrl: `https://storage.example.com/${path}` },
+        }),
+      }),
     },
+  })),
+}));
+
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
-import { db } from "~/database/db.server";
+beforeEach(() => {
+  sbMock.reset();
+  vi.clearAllMocks();
+});
+
 import { parseFileFormData, removePublicFile } from "~/utils/storage.server";
 
 import {
@@ -34,10 +47,6 @@ import {
 } from "./image.service.server";
 
 describe("audit image service", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   describe("uploadAuditImage", () => {
     it("successfully uploads an image with valid file", async () => {
       const mockFormData = new FormData();
@@ -49,24 +58,28 @@ describe("audit image service", () => {
       mockReturnFormData.append(
         "image",
         JSON.stringify({
-          path: "org-1/audits/audit-1/image-123.jpg",
+          originalPath: "org-1/audits/audit-1/image-123.jpg",
           thumbnailPath: "org-1/audits/audit-1/image-123-thumbnail.jpg",
         })
       );
       vi.mocked(parseFileFormData).mockResolvedValue(mockReturnFormData);
 
-      vi.mocked(db.auditImage.count).mockResolvedValue(0);
-      vi.mocked(db.auditImage.create).mockResolvedValue({
+      // First call: validateImageLimits count check (resolves via .then)
+      sbMock.enqueue({ data: null, error: null, count: 0 } as any);
+      // Second call: insert + select + single for creating the record
+      sbMock.enqueueData({
         id: "img-1",
         auditSessionId: "audit-1",
         auditAssetId: null,
         organizationId: "org-1",
-        imageUrl: "org-1/audits/audit-1/image-123.jpg",
-        thumbnailUrl: "org-1/audits/audit-1/image-123-thumbnail.jpg",
+        imageUrl:
+          "https://storage.example.com/org-1/audits/audit-1/image-123.jpg",
+        thumbnailUrl:
+          "https://storage.example.com/org-1/audits/audit-1/image-123-thumbnail.jpg",
         description: null,
         uploadedById: "user-1",
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
 
       const result = await uploadAuditImage({
@@ -88,11 +101,13 @@ describe("audit image service", () => {
         })
       );
 
-      expect(db.auditImage.create).toHaveBeenCalled();
+      expect(sbMock.calls.from).toHaveBeenCalledWith("AuditImage");
+      expect(sbMock.calls.insert).toHaveBeenCalled();
       expect(result).toEqual(
         expect.objectContaining({
           id: "img-1",
-          imageUrl: "org-1/audits/audit-1/image-123.jpg",
+          imageUrl:
+            "https://storage.example.com/org-1/audits/audit-1/image-123.jpg",
         })
       );
     });
@@ -104,7 +119,8 @@ describe("audit image service", () => {
       const mockReturnFormData = new FormData();
       vi.mocked(parseFileFormData).mockResolvedValue(mockReturnFormData);
 
-      vi.mocked(db.auditImage.count).mockResolvedValue(0);
+      // validateImageLimits count check (general audit, no auditAssetId)
+      sbMock.enqueue({ data: null, error: null, count: 0 } as any);
 
       await expect(
         uploadAuditImage({
@@ -120,9 +136,10 @@ describe("audit image service", () => {
     });
 
     it("validates limit for asset-specific images (3 max)", async () => {
-      // Mock audit image model exists
       vi.mocked(parseFileFormData).mockResolvedValue(new FormData());
-      vi.mocked(db.auditImage.count).mockResolvedValue(3);
+
+      // validateImageLimits count check returns 3 (at limit)
+      sbMock.enqueue({ data: null, error: null, count: 3 } as any);
 
       await expect(
         uploadAuditImage({
@@ -138,9 +155,10 @@ describe("audit image service", () => {
     });
 
     it("validates limit for general audit images (5 max)", async () => {
-      // Mock audit image model exists
       vi.mocked(parseFileFormData).mockResolvedValue(new FormData());
-      vi.mocked(db.auditImage.count).mockResolvedValue(5);
+
+      // validateImageLimits count check returns 5 (at limit)
+      sbMock.enqueue({ data: null, error: null, count: 5 } as any);
 
       await expect(
         uploadAuditImage({
@@ -158,7 +176,8 @@ describe("audit image service", () => {
 
   describe("deleteAuditImage", () => {
     it("successfully deletes image from storage and database", async () => {
-      vi.mocked(db.auditImage.findFirst).mockResolvedValue({
+      // First call: maybeSingle for finding the image
+      sbMock.enqueueData({
         id: "img-1",
         auditSessionId: "audit-1",
         auditAssetId: null,
@@ -167,11 +186,12 @@ describe("audit image service", () => {
         thumbnailUrl: "org-1/audits/audit-1/image-123-thumbnail.jpg",
         description: null,
         uploadedById: "user-1",
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
+      // Second call: delete (resolves via .then)
+      sbMock.enqueueData(null);
 
-      vi.mocked(db.auditImage.delete).mockResolvedValue({} as any);
       vi.mocked(removePublicFile).mockResolvedValue(undefined);
 
       await deleteAuditImage({
@@ -179,9 +199,9 @@ describe("audit image service", () => {
         organizationId: "org-1",
       });
 
-      expect(db.auditImage.findFirst).toHaveBeenCalledWith({
-        where: { id: "img-1", organizationId: "org-1" },
-      });
+      expect(sbMock.calls.from).toHaveBeenCalledWith("AuditImage");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "img-1");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
 
       expect(removePublicFile).toHaveBeenCalledWith({
         publicUrl: "org-1/audits/audit-1/image-123.jpg",
@@ -191,13 +211,12 @@ describe("audit image service", () => {
         publicUrl: "org-1/audits/audit-1/image-123-thumbnail.jpg",
       });
 
-      expect(db.auditImage.delete).toHaveBeenCalledWith({
-        where: { id: "img-1" },
-      });
+      expect(sbMock.calls.delete).toHaveBeenCalled();
     });
 
     it("throws error when image not found", async () => {
-      vi.mocked(db.auditImage.findFirst).mockResolvedValue(null);
+      // maybeSingle returns null
+      sbMock.setData(null);
 
       await expect(
         deleteAuditImage({
@@ -206,13 +225,13 @@ describe("audit image service", () => {
         })
       ).rejects.toThrow();
 
-      expect(db.auditImage.delete).not.toHaveBeenCalled();
+      expect(sbMock.calls.delete).not.toHaveBeenCalled();
     });
   });
 
   describe("getAuditImages", () => {
     it("fetches all images for an audit", async () => {
-      vi.mocked(db.auditImage.findMany).mockResolvedValue([
+      sbMock.setData([
         {
           id: "img-1",
           auditSessionId: "audit-1",
@@ -222,8 +241,8 @@ describe("audit image service", () => {
           thumbnailUrl: "org-1/audits/audit-1/image-1-thumbnail.jpg",
           description: null,
           uploadedById: "user-1",
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         },
         {
           id: "img-2",
@@ -234,49 +253,31 @@ describe("audit image service", () => {
           thumbnailUrl: "org-1/audits/audit-1/image-2-thumbnail.jpg",
           description: null,
           uploadedById: "user-1",
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         },
-      ] as any);
+      ]);
 
       const result = await getAuditImages({
         auditSessionId: "audit-1",
         organizationId: "org-1",
       });
 
-      expect(db.auditImage.findMany).toHaveBeenCalledWith({
-        where: {
-          auditSessionId: "audit-1",
-          organizationId: "org-1",
-        },
-        include: {
-          uploadedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profilePicture: true,
-            },
-          },
-          auditAsset: {
-            include: {
-              asset: {
-                select: {
-                  id: true,
-                  title: true,
-                },
-              },
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("AuditImage");
+      expect(sbMock.calls.select).toHaveBeenCalledWith(
+        "*, uploadedBy:User!uploadedById(id, firstName, lastName, profilePicture), auditAsset:AuditAsset!auditAssetId(id, asset:Asset!assetId(id, title))"
+      );
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("auditSessionId", "audit-1");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
+      expect(sbMock.calls.order).toHaveBeenCalledWith("createdAt", {
+        ascending: false,
       });
 
       expect(result).toHaveLength(2);
     });
 
     it("filters images by auditAssetId when provided", async () => {
-      vi.mocked(db.auditImage.findMany).mockResolvedValue([]);
+      sbMock.setData([]);
 
       await getAuditImages({
         auditSessionId: "audit-1",
@@ -284,37 +285,32 @@ describe("audit image service", () => {
         auditAssetId: "asset-1",
       });
 
-      expect(db.auditImage.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            auditAssetId: "asset-1",
-          }),
-        })
-      );
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("auditAssetId", "asset-1");
     });
   });
 
   describe("getAuditImageCount", () => {
     it("counts all images for an audit", async () => {
-      vi.mocked(db.auditImage.count).mockResolvedValue(3);
+      sbMock.setResponse({ data: null, error: null, count: 3 } as any);
 
       const result = await getAuditImageCount({
         auditSessionId: "audit-1",
         organizationId: "org-1",
       });
 
-      expect(db.auditImage.count).toHaveBeenCalledWith({
-        where: {
-          auditSessionId: "audit-1",
-          organizationId: "org-1",
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("AuditImage");
+      expect(sbMock.calls.select).toHaveBeenCalledWith("*", {
+        count: "exact",
+        head: true,
       });
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("auditSessionId", "audit-1");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
 
       expect(result).toBe(3);
     });
 
     it("counts images for specific asset", async () => {
-      vi.mocked(db.auditImage.count).mockResolvedValue(2);
+      sbMock.setResponse({ data: null, error: null, count: 2 } as any);
 
       const result = await getAuditImageCount({
         auditSessionId: "audit-1",
@@ -322,13 +318,7 @@ describe("audit image service", () => {
         auditAssetId: "asset-1",
       });
 
-      expect(db.auditImage.count).toHaveBeenCalledWith({
-        where: {
-          auditSessionId: "audit-1",
-          organizationId: "org-1",
-          auditAssetId: "asset-1",
-        },
-      });
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("auditAssetId", "asset-1");
 
       expect(result).toBe(2);
     });

@@ -1,34 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 
 const locationNoteMocks = vi.hoisted(() => ({
   createSystemLocationNote: vi.fn(),
   createLocationNote: vi.fn(),
 }));
 
-const dbMocks = vi.hoisted(() => ({
-  location: {
-    findUniqueOrThrow: vi.fn(),
-    update: vi.fn(),
-    findFirstOrThrow: vi.fn(),
-  },
-  asset: {
-    findMany: vi.fn(),
-  },
-  kit: {
-    findMany: vi.fn(),
-  },
-  user: {
-    findFirstOrThrow: vi.fn(),
-    findFirst: vi.fn(),
-  },
-}));
-
 const geolocateMock = vi.hoisted(() => vi.fn());
 const createNoteMock = vi.hoisted(() => vi.fn());
 const getUserByIDMock = vi.hoisted(() => vi.fn());
 
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
+  },
+}));
+
+// why: service.server.ts imports db for some Prisma-only queries; mock to prevent connection attempts
 vi.mock("~/database/db.server", () => ({
-  db: dbMocks,
+  db: {},
 }));
 
 vi.mock("~/utils/geolocate.server", () => ({
@@ -95,29 +87,9 @@ const {
 describe("location service activity logging", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
 
-    dbMocks.location.findUniqueOrThrow.mockResolvedValue({
-      id: "loc-1",
-      organizationId: "org-1",
-      address: "Old St",
-      latitude: null,
-      longitude: null,
-      assets: [],
-      kits: [],
-    });
-
-    dbMocks.location.update.mockResolvedValue({ id: "loc-1" });
     geolocateMock.mockResolvedValue(null);
-    dbMocks.asset.findMany.mockResolvedValue([]);
-    dbMocks.user.findFirstOrThrow.mockResolvedValue({
-      firstName: "Jane",
-      lastName: "Doe",
-    });
-    dbMocks.user.findFirst.mockResolvedValue({
-      firstName: "Jane",
-      lastName: "Doe",
-    });
-    dbMocks.kit.findMany.mockResolvedValue([]);
     locationNoteMocks.createSystemLocationNote.mockResolvedValue(undefined);
     locationNoteMocks.createLocationNote.mockResolvedValue(undefined);
     createNoteMock.mockResolvedValue(undefined);
@@ -126,14 +98,28 @@ describe("location service activity logging", () => {
 
   describe("updateLocation", () => {
     it("records a system note when key fields change", async () => {
-      dbMocks.location.findUniqueOrThrow.mockResolvedValueOnce({
-        id: "loc-1",
-        name: "Old Name",
-        description: "Old description",
-        address: "Old St",
-        latitude: null,
-        longitude: null,
-        organizationId: "org-1",
+      // First call: fetch current location (single)
+      sbMock.enqueue({
+        data: {
+          name: "Old Name",
+          description: "Old description",
+          address: "Old St",
+          latitude: null,
+          longitude: null,
+          parentId: null,
+        },
+        error: null,
+      });
+
+      // Second call: update location (single)
+      sbMock.enqueue({
+        data: {
+          id: "loc-1",
+          name: "New Name",
+          description: "New description",
+          address: "New Ave",
+        },
+        error: null,
       });
 
       await updateLocation({
@@ -177,14 +163,54 @@ describe("location service activity logging", () => {
 
   describe("updateLocationAssets", () => {
     it("records notes when assets are assigned", async () => {
-      dbMocks.asset.findMany.mockResolvedValueOnce([
-        {
-          id: "asset-1",
-          title: "Camera",
-          location: { id: "loc-3", name: "Warehouse" },
-          user: { id: "user-1", firstName: "Ada", lastName: "Lovelace" },
-        },
-      ]);
+      // First call: fetch location (single)
+      sbMock.enqueue({
+        data: { id: "loc-1", name: "Office" },
+        error: null,
+      });
+
+      // Second call: fetch current assets at location (thenable)
+      sbMock.enqueue({
+        data: [],
+        error: null,
+      });
+
+      // Third call: fetch modified assets (thenable)
+      sbMock.enqueue({
+        data: [
+          {
+            id: "asset-1",
+            title: "Camera",
+            locationId: "loc-3",
+            userId: "user-1",
+          },
+        ],
+        error: null,
+      });
+
+      // Fourth call: fetch locations for assets (thenable)
+      sbMock.enqueue({
+        data: [{ id: "loc-3", name: "Warehouse" }],
+        error: null,
+      });
+
+      // Fifth call: fetch users for assets (thenable)
+      sbMock.enqueue({
+        data: [{ id: "user-1", firstName: "Ada", lastName: "Lovelace" }],
+        error: null,
+      });
+
+      // Sixth call: update assets to set locationId (thenable)
+      sbMock.enqueue({
+        data: null,
+        error: null,
+      });
+
+      // Seventh call: createBulkLocationChangeNotes fetches user (single)
+      sbMock.enqueue({
+        data: { firstName: "Ada", lastName: "Lovelace" },
+        error: null,
+      });
 
       await updateLocationAssets({
         assetIds: ["asset-1"],
@@ -206,29 +232,60 @@ describe("location service activity logging", () => {
 
   describe("updateLocationKits", () => {
     it("records notes when kits are assigned", async () => {
-      dbMocks.location.findUniqueOrThrow.mockResolvedValueOnce({
-        id: "loc-1",
-        organizationId: "org-1",
-        kits: [],
+      // First call: fetch location (single)
+      sbMock.enqueue({
+        data: { id: "loc-1", name: "Office" },
+        error: null,
       });
 
-      dbMocks.location.update.mockResolvedValueOnce({ id: "loc-1" });
+      // Second call: fetch current kits at location (thenable)
+      sbMock.enqueue({
+        data: [],
+        error: null,
+      });
 
-      const kitAssets = [
-        {
-          id: "asset-1",
-          title: "Lens",
-          location: { id: "loc-9", name: "Main" },
-        },
-      ];
+      // Third call: fetch kits being added (thenable)
+      sbMock.enqueue({
+        data: [{ id: "kit-1", name: "Shoot Kit", locationId: "loc-9" }],
+        error: null,
+      });
 
-      const kitRecords = [
-        { id: "kit-1", name: "Shoot Kit", assets: kitAssets },
-      ];
+      // Fourth call: fetch kit locations (thenable)
+      sbMock.enqueue({
+        data: [{ id: "loc-9", name: "Main" }],
+        error: null,
+      });
 
-      dbMocks.kit.findMany
-        .mockResolvedValueOnce(kitRecords)
-        .mockResolvedValueOnce(kitRecords);
+      // Fifth call: fetch assets belonging to kits (thenable)
+      sbMock.enqueue({
+        data: [
+          {
+            id: "asset-1",
+            title: "Lens",
+            kitId: "kit-1",
+            locationId: "loc-9",
+          },
+        ],
+        error: null,
+      });
+
+      // Sixth call: fetch asset locations (thenable)
+      sbMock.enqueue({
+        data: [{ id: "loc-9", name: "Main" }],
+        error: null,
+      });
+
+      // Seventh call: update kits to set locationId (thenable)
+      sbMock.enqueue({
+        data: null,
+        error: null,
+      });
+
+      // Eighth call: update assets to set locationId (thenable)
+      sbMock.enqueue({
+        data: null,
+        error: null,
+      });
 
       await updateLocationKits({
         locationId: "loc-1",

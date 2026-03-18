@@ -6,8 +6,6 @@ import { useZorm } from "react-zorm";
 import { z } from "zod";
 import Input from "~/components/forms/input";
 import { Button } from "~/components/shared/button";
-// KEPT AS PRISMA: location update with relation disconnect
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
@@ -530,11 +528,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
     /** Disconnecting all the images from locations */
     if (movedLocationIds.length > 0) {
       await Promise.all(
-        movedLocationIds.map((id) =>
-          db.location.update({
-            where: { id },
-            data: { image: { disconnect: true } },
-          })
+        movedLocationIds.map((locId) =>
+          sbDb.from("Location").update({ imageId: null }).eq("id", locId)
         )
       );
     }

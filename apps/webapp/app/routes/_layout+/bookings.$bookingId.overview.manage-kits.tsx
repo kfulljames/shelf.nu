@@ -52,9 +52,6 @@ import {
 import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
 import When from "~/components/when/when";
-// KEPT AS PRISMA: booking findUniqueOrThrow with nested assets include,
-// removedKits findMany with nested assets select — not convertible to Supabase
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { sendBookingUpdatedEmail } from "~/modules/booking/email-helpers";
@@ -265,25 +262,30 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       { additionalData: { userId, bookingId } }
     );
 
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id: bookingId, organizationId },
-        select: {
-          id: true,
-          status: true,
-          assets: {
-            select: { id: true },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label: "Booking",
-          message:
-            "Booking not found. Are you sure it exists in current workspace?",
-        });
+    const { data: bookingRow, error: bookingErr } = (await sbDb
+      .from("Booking")
+      .select("id, status, assets:Asset(id)")
+      .eq("id", bookingId)
+      .eq("organizationId", organizationId)
+      .single()) as unknown as {
+      data: {
+        id: string;
+        status: BookingStatus;
+        assets: Array<{ id: string }>;
+      } | null;
+      error: any;
+    };
+
+    if (bookingErr || !bookingRow) {
+      throw new ShelfError({
+        cause: bookingErr,
+        label: "Booking",
+        message:
+          "Booking not found. Are you sure it exists in current workspace?",
       });
+    }
+
+    const booking = bookingRow;
 
     /** Self service can only manage kits for bookings that are DRAFT */
     const cantManageAssetsAsBase =
@@ -422,14 +424,25 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     /** If some kits were removed, we also need to handle those */
     if (removedKitIds.length > 0) {
-      const removedKits = await db.kit.findMany({
-        where: { id: { in: removedKitIds } },
-        select: {
-          id: true,
-          name: true,
-          assets: { select: { id: true } },
-        },
-      });
+      const { data: removedKits, error: removedKitsErr } = (await sbDb
+        .from("Kit")
+        .select("id, name, assets:Asset(id)")
+        .in("id", removedKitIds)) as unknown as {
+        data: Array<{
+          id: string;
+          name: string;
+          assets: Array<{ id: string }>;
+        }> | null;
+        error: any;
+      };
+
+      if (removedKitsErr || !removedKits) {
+        throw new ShelfError({
+          cause: removedKitsErr,
+          label: "Kit",
+          message: "Failed to fetch removed kits",
+        });
+      }
       const allRemovedAssetIds = removedKits.flatMap((k) =>
         k.assets.map((a) => a.id)
       );

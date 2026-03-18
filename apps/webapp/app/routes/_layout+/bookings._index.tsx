@@ -1,5 +1,4 @@
 import type { Prisma } from "@prisma/client";
-import { TagUseFor } from "@prisma/client";
 import type {
   MetaFunction,
   LoaderFunctionArgs,
@@ -27,8 +26,7 @@ import { DateS } from "~/components/shared/date";
 import { UserBadge } from "~/components/shared/user-badge";
 import { Td, Th } from "~/components/table";
 import { TeamMemberBadge } from "~/components/user/team-member-badge";
-// KEPT AS PRISMA: tag findMany with isEmpty/has filters on useFor array field
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import {
@@ -172,16 +170,22 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           })
         : Promise.resolve(null), // ADMIN users reuse teamMembersData
 
-      db.tag.findMany({
-        where: {
-          organizationId,
-          OR: [
-            { useFor: { isEmpty: true } },
-            { useFor: { has: TagUseFor.BOOKING } },
-          ],
-        },
-        orderBy: { name: "asc" },
-      }),
+      sbDb
+        .from("Tag")
+        .select("*")
+        .eq("organizationId", organizationId)
+        .or(`useFor.eq.{},useFor.cs.{BOOKING}`)
+        .order("name", { ascending: true })
+        .then(({ data: tags, error: tagErr }) => {
+          if (tagErr) {
+            throw new ShelfError({
+              cause: tagErr,
+              message: "Failed to load tags",
+              label: "Booking",
+            });
+          }
+          return tags ?? [];
+        }),
     ]);
 
     const totalPages = Math.ceil(bookingCount / perPage);

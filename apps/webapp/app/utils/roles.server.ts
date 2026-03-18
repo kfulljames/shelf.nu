@@ -1,6 +1,6 @@
 import type { SsoDetails } from "@prisma/client";
 import { OrganizationRoles, Roles } from "@prisma/client";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
 import { ShelfError } from "./error";
 import type {
@@ -11,11 +11,44 @@ import { validatePermission } from "./permissions/permission.validator.server";
 
 export async function requireUserWithPermission(name: Roles, userId: string) {
   try {
-    // KEPT AS PRISMA: nested many-to-many role check
-    return await db.user.findFirstOrThrow({
-      where: { id: userId, roles: { some: { name } } },
-      select: { id: true },
-    });
+    // Find the role ID for the given role name
+    const { data: role, error: roleErr } = await sbDb
+      .from("Role")
+      .select("id")
+      .eq("name", name)
+      .limit(1)
+      .single();
+
+    if (roleErr || !role) {
+      throw new ShelfError({
+        cause: roleErr,
+        message: "You do not have permission to access this resource",
+        additionalData: { userId, name },
+        label: "Permission",
+        status: 403,
+      });
+    }
+
+    // Check if user has this role via the join table
+    const { data: userRole, error: userRoleErr } = await sbDb
+      .from("_RoleToUser")
+      .select("B")
+      .eq("A", role.id)
+      .eq("B", userId)
+      .limit(1)
+      .maybeSingle();
+
+    if (userRoleErr || !userRole) {
+      throw new ShelfError({
+        cause: userRoleErr,
+        message: "You do not have permission to access this resource",
+        additionalData: { userId, name },
+        label: "Permission",
+        status: 403,
+      });
+    }
+
+    return { id: userId };
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -34,16 +67,26 @@ export async function requireAdmin(userId: string) {
 export async function isAdmin(context: Record<string, any>) {
   const authSession = context.getSession();
 
-  // KEPT AS PRISMA: nested many-to-many role check
-  const user = await db.user.findFirst({
-    where: {
-      id: authSession.userId,
-      roles: { some: { name: Roles["ADMIN"] } },
-    },
-    select: { id: true },
-  });
+  // Find the ADMIN role ID
+  const { data: role } = await sbDb
+    .from("Role")
+    .select("id")
+    .eq("name", Roles["ADMIN"])
+    .limit(1)
+    .single();
 
-  return !!user;
+  if (!role) return false;
+
+  // Check if user has this role via the join table
+  const { data: userRole } = await sbDb
+    .from("_RoleToUser")
+    .select("B")
+    .eq("A", role.id)
+    .eq("B", authSession.userId)
+    .limit(1)
+    .maybeSingle();
+
+  return !!userRole;
 }
 
 export async function requirePermission({

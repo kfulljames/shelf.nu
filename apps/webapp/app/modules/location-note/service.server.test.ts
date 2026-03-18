@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 
 import {
   createLocationNote,
@@ -7,17 +8,11 @@ import {
   getLocationNotes,
 } from "./service.server";
 
-// why: testing location note service logic without touching the real database
-vi.mock("~/database/db.server", () => ({
-  db: {
-    locationNote: {
-      create: vi.fn(),
-      findMany: vi.fn(),
-      deleteMany: vi.fn(),
-    },
-    location: {
-      findFirst: vi.fn(),
-    },
+const sbMock = createSupabaseMock();
+// why: testing location note service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -31,16 +26,9 @@ vi.mock("~/utils/error", () => ({
   },
 }));
 
-const mockDb = await import("~/database/db.server");
-
-const locationNoteCreateMock = vi.mocked(mockDb.db.locationNote.create);
-const locationNoteFindManyMock = vi.mocked(mockDb.db.locationNote.findMany);
-const locationNoteDeleteManyMock = vi.mocked(mockDb.db.locationNote.deleteMany);
-const locationFindFirstMock = vi.mocked(mockDb.db.location.findFirst);
-
 describe("location note service", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    sbMock.reset();
   });
 
   describe("createLocationNote", () => {
@@ -51,11 +39,11 @@ describe("location note service", () => {
         type: "COMMENT",
         locationId: "loc-1",
         userId: "user-1",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as const;
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-      locationNoteCreateMock.mockResolvedValue(note);
+      sbMock.setData(note);
 
       const result = await createLocationNote({
         content: "Manual note",
@@ -64,14 +52,14 @@ describe("location note service", () => {
         type: "COMMENT",
       });
 
-      expect(locationNoteCreateMock).toHaveBeenCalledWith({
-        data: {
-          content: "Manual note",
-          type: "COMMENT",
-          location: { connect: { id: "loc-1" } },
-          user: { connect: { id: "user-1" } },
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("LocationNote");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith({
+        content: "Manual note",
+        type: "COMMENT",
+        locationId: "loc-1",
+        userId: "user-1",
       });
+      expect(sbMock.calls.single).toHaveBeenCalled();
       expect(result).toEqual(note);
     });
 
@@ -82,11 +70,11 @@ describe("location note service", () => {
         type: "UPDATE",
         locationId: "loc-1",
         userId: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as const;
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-      locationNoteCreateMock.mockResolvedValue(note);
+      sbMock.setData(note);
 
       const result = await createLocationNote({
         content: "System note",
@@ -94,13 +82,13 @@ describe("location note service", () => {
         type: "UPDATE",
       });
 
-      expect(locationNoteCreateMock).toHaveBeenCalledWith({
-        data: {
-          content: "System note",
-          type: "UPDATE",
-          location: { connect: { id: "loc-1" } },
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("LocationNote");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith({
+        content: "System note",
+        type: "UPDATE",
+        locationId: "loc-1",
       });
+      expect(sbMock.calls.single).toHaveBeenCalled();
       expect(result).toEqual(note);
     });
   });
@@ -113,24 +101,24 @@ describe("location note service", () => {
         type: "UPDATE",
         locationId: "loc-1",
         userId: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as const;
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-      locationNoteCreateMock.mockResolvedValue(note);
+      sbMock.setData(note);
 
       const result = await createSystemLocationNote({
         content: "Profile updated",
         locationId: "loc-1",
       });
 
-      expect(locationNoteCreateMock).toHaveBeenCalledWith({
-        data: {
-          content: "Profile updated",
-          type: "UPDATE",
-          location: { connect: { id: "loc-1" } },
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("LocationNote");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith({
+        content: "Profile updated",
+        type: "UPDATE",
+        locationId: "loc-1",
       });
+      expect(sbMock.calls.single).toHaveBeenCalled();
       expect(result).toEqual(note);
     });
   });
@@ -144,43 +132,36 @@ describe("location note service", () => {
           type: "COMMENT" as const,
           locationId: "loc-1",
           userId: "user-1",
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
           user: { firstName: "Jane", lastName: "Doe" },
         },
       ];
 
-      locationFindFirstMock.mockResolvedValue({ id: "loc-1" } as any);
-      locationNoteFindManyMock.mockResolvedValue(notes);
+      // First call: location lookup (maybeSingle)
+      sbMock.enqueue({ data: { id: "loc-1" }, error: null });
+      // Second call: notes fetch (thenable)
+      sbMock.enqueue({ data: notes, error: null });
 
       const result = await getLocationNotes({
         locationId: "loc-1",
         organizationId: "org-1",
       });
 
-      expect(locationFindFirstMock).toHaveBeenCalledWith({
-        where: { id: "loc-1", organizationId: "org-1" },
-        select: { id: true },
-      });
-
-      expect(locationNoteFindManyMock).toHaveBeenCalledWith({
-        where: { locationId: "loc-1" },
-        orderBy: { createdAt: "desc" },
-        include: {
-          user: {
-            select: {
-              firstName: true,
-              lastName: true,
-            },
-          },
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Location");
+      expect(sbMock.calls.from).toHaveBeenCalledWith("LocationNote");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "loc-1");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
+      expect(sbMock.calls.order).toHaveBeenCalledWith("createdAt", {
+        ascending: false,
       });
 
       expect(result).toEqual(notes);
     });
 
     it("throws when location does not belong to organization", async () => {
-      locationFindFirstMock.mockResolvedValue(null);
+      // Location lookup returns null
+      sbMock.enqueue({ data: null, error: null });
 
       await expect(
         getLocationNotes({ locationId: "loc-2", organizationId: "org-9" })
@@ -190,17 +171,18 @@ describe("location note service", () => {
 
   describe("deleteLocationNote", () => {
     it("only deletes notes authored by the user", async () => {
-      locationNoteDeleteManyMock.mockResolvedValue({ count: 1 });
+      sbMock.setResponse({ data: null, error: null });
 
       const result = await deleteLocationNote({
         id: "lnote-1",
         userId: "user-1",
       });
 
-      expect(locationNoteDeleteManyMock).toHaveBeenCalledWith({
-        where: { id: "lnote-1", userId: "user-1" },
-      });
-      expect(result).toEqual({ count: 1 });
+      expect(sbMock.calls.from).toHaveBeenCalledWith("LocationNote");
+      expect(sbMock.calls.delete).toHaveBeenCalledWith({ count: "exact" });
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "lnote-1");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("userId", "user-1");
+      expect(result).toEqual({ count: undefined });
     });
   });
 });

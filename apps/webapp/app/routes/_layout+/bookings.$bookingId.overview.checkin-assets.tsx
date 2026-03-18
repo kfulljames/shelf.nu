@@ -14,8 +14,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import type { OnCodeDetectionSuccessProps } from "~/components/scanner/code-scanner";
 import { CodeScanner } from "~/components/scanner/code-scanner";
 import PartialCheckinDrawer from "~/components/scanner/drawer/uses/partial-checkin-drawer";
-// KEPT AS PRISMA: asset count with nested `some` filter on bookings relation
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useScannerCameraId } from "~/hooks/use-scanner-camera-id";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
 import {
@@ -100,16 +99,22 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     // Calculate partial check-in progress
     // For progress calculation, we need the TOTAL number of assets in the booking,
     // not the filtered count from booking.assets (which may be filtered by status)
-    const totalBookingAssets = await db.asset.count({
-      where: {
-        bookings: {
-          some: { id: booking.id },
-        },
-      },
-    });
+    // Count assets in this booking via the join table
+    const { count: totalBookingAssets, error: countErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("*", { count: "exact", head: true })
+      .eq("B", booking.id);
+
+    if (countErr) {
+      throw new ShelfError({
+        cause: countErr,
+        message: "Failed to count booking assets",
+        label: "Booking",
+      });
+    }
 
     const partialCheckinProgress = calculatePartialCheckinProgress(
-      totalBookingAssets,
+      totalBookingAssets ?? 0,
       checkedInAssetIds,
       booking.status
     );

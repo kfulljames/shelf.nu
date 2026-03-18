@@ -1,8 +1,6 @@
-import { Prisma } from "@prisma/client";
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { getAssets } from "~/modules/asset/service.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
@@ -102,62 +100,56 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           },
         }),
 
-        // Audits (permission-gated)
-        // KEEP AS PRISMA: uses nested `some` filter on `assignments` relation
+        // Audits (permission-gated) - Supabase
         hasAuditPermission
           ? (async () => {
-              const auditSearchConditions: Prisma.AuditSessionWhereInput[] =
-                searchTerms.map((term) => ({
-                  OR: [
-                    {
-                      name: {
-                        contains: term,
-                        mode: Prisma.QueryMode.insensitive,
-                      },
-                    },
-                    {
-                      description: {
-                        contains: term,
-                        mode: Prisma.QueryMode.insensitive,
-                      },
-                    },
-                    {
-                      id: {
-                        contains: term,
-                        mode: Prisma.QueryMode.insensitive,
-                      },
-                    },
-                  ],
-                }));
+              // For self-service/base users, pre-filter to assigned sessions
+              let assignedSessionIds: string[] | null = null;
+              if (isSelfServiceOrBase && userId) {
+                const { data: assignments } = await sbDb
+                  .from("AuditAssignment")
+                  .select("auditSessionId")
+                  .eq("userId", userId);
+                assignedSessionIds = (assignments ?? []).map(
+                  (a) => a.auditSessionId
+                );
+                if (assignedSessionIds.length === 0) {
+                  return [];
+                }
+              }
 
-              const auditWhere: Prisma.AuditSessionWhereInput = {
-                organizationId,
-                ...(auditSearchConditions.length
-                  ? { OR: auditSearchConditions }
-                  : {}),
-                ...(isSelfServiceOrBase && userId
-                  ? {
-                      assignments: {
-                        some: {
-                          userId,
-                        },
-                      },
-                    }
-                  : {}),
-              };
+              const auditSearchOr = searchTerms
+                .flatMap((term) => [
+                  `name.ilike.%${term}%`,
+                  `description.ilike.%${term}%`,
+                  `id.ilike.%${term}%`,
+                ])
+                .join(",");
 
-              return db.auditSession.findMany({
-                where: auditWhere,
-                take: 6,
-                orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-                select: {
-                  id: true,
-                  name: true,
-                  description: true,
-                  status: true,
-                  dueDate: true,
-                },
-              });
+              let auditQuery = sbDb
+                .from("AuditSession")
+                .select("id, name, description, status, dueDate")
+                .eq("organizationId", organizationId)
+                .or(auditSearchOr);
+
+              if (assignedSessionIds !== null) {
+                auditQuery = auditQuery.in("id", assignedSessionIds);
+              }
+
+              const { data: auditRows, error: auditError } = await auditQuery
+                .order("updatedAt", { ascending: false })
+                .order("name", { ascending: true })
+                .limit(6);
+
+              if (auditError) {
+                throw new ShelfError({
+                  cause: auditError,
+                  message: "Failed to search audits",
+                  label: "Audit",
+                });
+              }
+
+              return auditRows ?? [];
             })()
           : Promise.resolve([]),
 
@@ -310,95 +302,66 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             })()
           : Promise.resolve([]),
 
-        // Team members (permission-gated)
-        // KEEP AS PRISMA: uses nested `some` on `custodies`/`kitCustodies` relations
-        // and nested `user` relation search with `contains`
+        // Team members (permission-gated) - Supabase
         hasTeamMemberPermission
           ? (async () => {
-              const createTextSearchConditions = (
-                term: string,
-                fields: string[]
-              ) =>
-                fields.map((field) => ({
-                  [field]: {
-                    contains: term,
-                    mode: Prisma.QueryMode.insensitive,
-                  },
-                }));
+              // Search users table for term matches on firstName/lastName/email
+              const userSearchOr = searchTerms
+                .flatMap((term) => [
+                  `firstName.ilike.%${term}%`,
+                  `lastName.ilike.%${term}%`,
+                  `email.ilike.%${term}%`,
+                ])
+                .join(",");
 
-              const teamMemberSearchConditions: Prisma.TeamMemberWhereInput[] =
-                searchTerms.map((term) => ({
-                  OR: [
-                    {
-                      name: {
-                        contains: term,
-                        mode: Prisma.QueryMode.insensitive,
-                      },
-                    },
-                    {
-                      id: {
-                        contains: term,
-                        mode: Prisma.QueryMode.insensitive,
-                      },
-                    },
-                    {
-                      user: {
-                        OR: [
-                          ...createTextSearchConditions(term, [
-                            "firstName",
-                            "lastName",
-                            "email",
-                          ]),
-                        ],
-                      },
-                    },
-                  ],
-                }));
+              const { data: matchingUsers } = await sbDb
+                .from("User")
+                .select("id")
+                .or(userSearchOr);
+              const matchingUserIds = (matchingUsers ?? []).map((u) => u.id);
 
-              const teamMemberWhere: Prisma.TeamMemberWhereInput = {
-                organizationId,
-                deletedAt: null,
-                ...(teamMemberSearchConditions.length
-                  ? { OR: teamMemberSearchConditions }
-                  : {}),
-                // BASE and SELF_SERVICE users can only see team members they have custody access to
-                ...(canSeeAllCustody
-                  ? {}
-                  : {
-                      OR: [
-                        {
-                          custodies: {
-                            some: {
-                              custodian: { userId },
-                            },
-                          },
-                        },
-                        {
-                          kitCustodies: {
-                            some: {
-                              custodian: { userId },
-                            },
-                          },
-                        },
-                        { userId },
-                      ],
-                    }),
-              };
+              // Build TM search: name/id ilike OR userId in matching users
+              const tmOrParts = searchTerms.flatMap((term) => [
+                `name.ilike.%${term}%`,
+                `id.ilike.%${term}%`,
+              ]);
+              if (matchingUserIds.length > 0) {
+                tmOrParts.push(`userId.in.(${matchingUserIds.join(",")})`);
+              }
 
-              return db.teamMember.findMany({
-                where: teamMemberWhere,
-                take: 8,
-                orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-                include: {
-                  user: {
-                    select: {
-                      firstName: true,
-                      lastName: true,
-                      email: true,
-                    },
-                  },
-                },
-              });
+              let tmQuery = sbDb
+                .from("TeamMember")
+                .select("*, user:User(firstName, lastName, email)")
+                .eq("organizationId", organizationId)
+                .is("deletedAt", null)
+                .or(tmOrParts.join(","));
+
+              // BASE/SELF_SERVICE: restrict to own team member
+              // The Prisma nested `custodies.some.custodian.userId`
+              // simplifies to TM.userId since custodian IS the TM
+              if (!canSeeAllCustody) {
+                tmQuery = tmQuery.eq("userId", userId);
+              }
+
+              const { data: tmRows, error: tmError } = await tmQuery
+                .order("updatedAt", { ascending: false })
+                .order("name", { ascending: true })
+                .limit(8);
+
+              if (tmError) {
+                throw new ShelfError({
+                  cause: tmError,
+                  message: "Failed to search team members",
+                  label: "Team",
+                });
+              }
+
+              return (tmRows ?? []).map((tm: any) => ({
+                ...tm,
+                user: Array.isArray(tm.user)
+                  ? tm.user[0] ?? null
+                  : tm.user ?? null,
+              }));
             })()
           : Promise.resolve([]),
       ]);

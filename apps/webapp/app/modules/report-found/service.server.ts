@@ -1,6 +1,5 @@
 import { sbDb } from "~/database/supabase.server";
 import { sendEmail } from "~/emails/mail.server";
-import type { QR_SELECT_FOR_REPORT } from "~/routes/qr+/_public+/$qrId_.contact-owner";
 import { ShelfError } from "~/utils/error";
 import { normalizeQrData } from "~/utils/qr";
 

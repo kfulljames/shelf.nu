@@ -4,11 +4,9 @@ import { z } from "zod";
 import { DateS } from "~/components/shared/date";
 import { Table, Td, Tr } from "~/components/table";
 import { SSOUserBadge } from "~/components/user/sso-user-badge";
-// KEPT AS PRISMA: user findMany with nested `some` filter on
-// userOrganizations and nested includes
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, getParams } from "~/utils/http.server";
 import { requireAdmin } from "~/utils/roles.server";
 
@@ -28,26 +26,36 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
   try {
     await requireAdmin(userId);
 
-    const members = await db.user.findMany({
-      where: {
-        userOrganizations: { some: { organizationId } },
-      },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        email: true,
-        sso: true,
-        createdAt: true,
-        userOrganizations: {
-          where: {
-            organizationId,
-          },
-          select: {
-            roles: true,
-          },
-        },
-      },
+    // Query UserOrganization joined with User to get members of this org
+    const { data: userOrgRows, error: uoErr } = await sbDb
+      .from("UserOrganization")
+      .select(
+        "roles, user:User!inner(id, firstName, lastName, email, sso, createdAt)"
+      )
+      .eq("organizationId", organizationId);
+
+    if (uoErr) {
+      throw new ShelfError({
+        cause: uoErr,
+        message: "Failed to load organization members",
+        additionalData: { userId, organizationId },
+        label: "Admin dashboard",
+      });
+    }
+
+    const members = (userOrgRows ?? []).map((row) => {
+      const u = row.user as unknown as {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+        sso: boolean;
+        createdAt: string;
+      };
+      return {
+        ...u,
+        userOrganizations: [{ roles: row.roles }],
+      };
     });
 
     return payload({ members });

@@ -1,32 +1,33 @@
 # Prisma → Supabase Migration Progress
 
-**Branch:** `claude/review-migration-plan-wYjw6`
+**Branch:** `claude/continue-project-work-s5x7o`
 **Last Updated:** 2026-03-18
-**Status:** ~88% complete — ready to merge, remaining work tracked below
+**Status:** Migration ceiling reached — 9 production files retain Prisma
+for features Supabase PostgREST cannot express
 
 ---
 
 ## Overall Progress
 
-| Area                         | Total `db.` calls | Converted | Remaining | % Done |
-| ---------------------------- | ----------------- | --------- | --------- | ------ |
-| **Modules** (`app/modules/`) | ~245              | ~215      | 30        | 88%    |
-| **Routes** (`app/routes/`)   | ~260              | ~222      | 38        | 85%    |
-| **Utils** (`app/utils/`)     | ~33               | ~28       | 5         | 85%    |
-| **Grand Total**              | ~538              | ~465      | ~73       | 86%    |
+| Area                         | Files with `db` | Production | Test | Notes                           |
+| ---------------------------- | --------------- | ---------- | ---- | ------------------------------- |
+| **Modules** (`app/modules/`) | 16              | 6          | 10   | Dynamic includes, nested writes |
+| **Routes** (`app/routes/`)   | 4               | 2          | 2    | Dynamic includes, `hasSome`     |
+| **Utils** (`app/utils/`)     | 1               | 1          | 0    | `$queryRaw` for auth schema     |
+| **Grand Total**              | **21**          | **9**      | 12   |                                 |
 
-Test files (`.test.ts`) contain 32 additional `db.` references
-(mock setups) to clean up when Prisma is fully removed.
+12 test files contain `db` references (mock setups) that will be
+cleaned up when Prisma is fully removed.
 
 ---
 
-## Completed Work (8 commits)
+## Completed Work (11 commits)
 
 ### Infrastructure Created
 
 - **`sbDb` client** — Supabase JS client at `app/database/supabase.server.ts`
-- **`packages/database/src/types.ts`** — Shared TypeScript types (+195 lines)
-- **21 PostgreSQL RPC functions** via migration SQL (+711 lines)
+- **`packages/database/src/types.ts`** — Shared TypeScript types (+300 lines)
+- **27 PostgreSQL RPC functions** via migration SQL (+1000 lines)
 
 ### Commit History
 
@@ -39,6 +40,12 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 | `9ced224` | Migrated route and utility files                           | 32 files  |
 | `b6acabb` | Migrated 61 route and component files                      | 61 files  |
 | `7a56bb2` | Converted final simple Prisma calls                        | 4 files   |
+| (new)     | Dashboard aggregation RPCs + workspace counts              | 4 files   |
+| (new)     | Relation filters, \_count, array ops, role checks          | 6 files   |
+| (new)     | Deep includes, relation writes, transactions, SSO          | 12 files  |
+| (new)     | Module bulk ops + location service select-all migrations   | 6 files   |
+| (new)     | Route cleanup: custody, palette, audit details, raw SQL    | 5 files   |
+| (new)     | manage-kits booking/kit queries to Supabase                | 1 file    |
 
 ### Module Services — Completed Conversions
 
@@ -58,152 +65,117 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 ### Routes — Completed Conversions
 
 - **API routes** (`api+/`): ~25 files converted
-- **Layout routes** (`_layout+/`): ~42 files converted
+- **Layout routes** (`_layout+/`): ~50 files converted (all done)
 - **QR routes** (`qr+/`): 5 files converted
 - **Auth routes** (`_auth+/`): 3 files converted
 - **Utilities**: `csv.server.ts`, `dashboard.server.ts`, `sso.server.ts`,
   `stripe.server.ts`, `subscription.server.ts`, `permission.validator.server.ts`
 
-### Transactions → RPC Functions (all 21 migrated)
+### Transactions → RPC Functions (27 total)
 
-| RPC Function             | Module   |
-| ------------------------ | -------- |
-| `assign_kit_custody`     | kit      |
-| `release_kit_custody`    | kit      |
-| `bulk_release_custody`   | asset    |
-| `manage_kit_assets`      | kit      |
-| `manage_location_assets` | location |
-| `manage_location_kits`   | location |
-| `manage_booking_assets`  | booking  |
-| `manage_booking_kits`    | booking  |
-| `checkin_booking_assets` | booking  |
-| `start_audit`            | audit    |
-| `process_audit_scan`     | audit    |
-| `delete_kit`             | kit      |
-| + ~9 more                | various  |
-
----
-
-## Outstanding Work (~29 distinct operations, 16 files)
-
-Every remaining call is tagged with `// KEPT AS PRISMA` explaining
-the specific Prisma feature that prevents simple migration.
-
-### 1. Aggregation & GroupBy (4 calls)
-
-**File:** `app/routes/_layout+/home.tsx`
-
-| Call                                   | Feature                         | Suggested Approach       |
-| -------------------------------------- | ------------------------------- | ------------------------ |
-| `db.asset.aggregate()`                 | `_count._all`, `_sum.valuation` | RPC function             |
-| `db.asset.groupBy({ by: ["status"] })` | `groupBy` + `_count`            | RPC function             |
-| `db.$queryRaw` (monthly growth)        | Raw SQL `date_trunc`            | Already SQL, wrap in RPC |
-
-### 2. `_count` in Select & OrderBy (7 calls)
-
-| File                                  | Feature                                             |
-| ------------------------------------- | --------------------------------------------------- |
-| `home.tsx`                            | `orderBy: { custodies: { _count: "desc" } }`        |
-| `home.tsx`                            | `orderBy: { assets: { _count: "desc" } }`           |
-| `bookings.$bookingId.overview.tsx`    | `_count: { select: { assets: true } }` on kits      |
-| `bookings.$bookingId.overview.tsx`    | `db.asset.count()` with nested `some`               |
-| `account-details.workspace.index.tsx` | `_count` on nested org (assets, members, locations) |
-
-### 3. Nested `some`/`every` Relation Filters (5 calls)
-
-| File                                               | Filter                                                |
-| -------------------------------------------------- | ----------------------------------------------------- |
-| `bookings.$bookingId.overview.tsx`                 | `bookings: { some: { ... } }` with OR date conditions |
-| `bookings.overview.manage-assets.tsx`              | `bookings: { some: { id: bookingId } }`               |
-| `bookings.overview.checkin-assets.tsx`             | `bookings: { some: { id: booking.id } }`              |
-| `admin-dashboard+/org.$organizationId.members.tsx` | `userOrganizations: { some: { organizationId } }`     |
-| `utils/roles.server.ts` (x2)                       | Nested many-to-many role checks                       |
-
-### 4. Deep Nested Includes — 3+ levels (6 calls)
-
-| File                                                | Depth                                            |
-| --------------------------------------------------- | ------------------------------------------------ |
-| `account-details.workspace.index.tsx`               | user → userOrgs → org → owner/\_count            |
-| `settings.general.tsx`                              | user → userOrgs → org → ssoDetails/\_count/owner |
-| `admin-dashboard+/org.$organizationId.tsx`          | org → qrCodes → asset + owner/sso/hours          |
-| `admin-dashboard+/org.$organizationId.qr-codes.tsx` | org → qrCodes → asset/kit + owner                |
-| `admin-dashboard+/$userId.tsx`                      | 3+ levels + customTierLimit upsert               |
-| `utils/sso.server.ts`                               | user → userOrgs → org → ssoDetails               |
-
-### 5. Relation Writes — connect/disconnect/upsert (4 calls)
-
-| File                                              | Operation                                         |
-| ------------------------------------------------- | ------------------------------------------------- |
-| `kits.$kitId.assets.assign-custody.tsx`           | `custody: { create: { custodian: { connect } } }` |
-| `admin-dashboard+/move-location-images.tsx`       | `image: { disconnect: true }`                     |
-| `account-details.workspace.$workspaceId.edit.tsx` | `ssoDetails: { upsert: { create, update } }`      |
-| `kits.$kitId.tsx`                                 | `custody: { disconnect, delete }`                 |
-
-### 6. Dynamic Where Inputs & Model Access (3 calls)
-
-| File                                             | Feature                                                    |
-| ------------------------------------------------ | ---------------------------------------------------------- |
-| `bookings.overview.manage-assets.tsx`            | `getAssetsWhereInput()` → dynamic `Prisma.AssetWhereInput` |
-| `api+/assets.get-assets-for-bulk-qr-download.ts` | Same `getAssetsWhereInput` pattern                         |
-| `api+/model-filters.ts`                          | Dynamic model access `db[name].dynamicFindMany()`          |
-
-### 7. Array Field Filters — isEmpty/has (2 calls)
-
-| File                               | Filter                                                         |
-| ---------------------------------- | -------------------------------------------------------------- |
-| `bookings._index.tsx`              | `tag.useFor: { isEmpty: true }` / `{ has: TagUseFor.BOOKING }` |
-| `bookings.$bookingId.overview.tsx` | Same pattern                                                   |
-
-### 8. Unmigrated Transaction (1 call)
-
-| File                       | Details                                                                 |
-| -------------------------- | ----------------------------------------------------------------------- |
-| `audits.$auditId.scan.tsx` | Multi-step audit scan removal (find → update → delete → count → update) |
-
-### 9. Raw SQL on Auth Schema (2 calls)
-
-| File                       | Details                                         |
-| -------------------------- | ----------------------------------------------- |
-| `utils/sso.server.ts` (x2) | `$queryRaw` on `auth.users` / `auth.identities` |
+| RPC Function                            | Module     |
+| --------------------------------------- | ---------- |
+| `assign_kit_custody`                    | kit        |
+| `release_kit_custody`                   | kit        |
+| `bulk_release_custody`                  | asset      |
+| `manage_kit_assets`                     | kit        |
+| `manage_location_assets`                | location   |
+| `manage_location_kits`                  | location   |
+| `manage_booking_assets`                 | booking    |
+| `manage_booking_kits`                   | booking    |
+| `checkin_booking_assets`                | booking    |
+| `start_audit`                           | audit      |
+| `process_audit_scan`                    | audit      |
+| `delete_kit`                            | kit        |
+| `shelf_dashboard_asset_aggregation`     | dashboard  |
+| `shelf_dashboard_assets_by_status`      | dashboard  |
+| `shelf_dashboard_monthly_growth`        | dashboard  |
+| `shelf_dashboard_top_custodians`        | dashboard  |
+| `shelf_dashboard_location_distribution` | dashboard  |
+| `shelf_user_workspaces_with_counts`     | settings   |
+| `shelf_remove_audit_scan`               | audit      |
+| `shelf_admin_org_with_details`          | admin      |
+| `shelf_admin_user_organizations`        | admin      |
+| `shelf_upsert_sso_details`              | admin/SSO  |
+| `shelf_upsert_custom_tier_limit`        | admin/tier |
+| + ~4 more                               | various    |
 
 ---
 
-## Recommended Follow-Up PRs
+## Outstanding Work
 
-### PR 1: Dashboard Aggregation RPCs
+### Categories DONE in PR 3
 
-**Scope:** Categories 1 + 2 (11 calls)
-**Approach:** Create 3-4 RPC functions for dashboard stats
-(`aggregate`, `groupBy`, monthly growth, `_count` orderBy).
+#### 4. Deep Nested Includes — DONE
 
-### PR 2: Relation Filters → Views or RPCs
+All 5 deep nested includes migrated via RPCs and split queries:
 
-**Scope:** Category 3 (5 calls)
-**Approach:** Create PostgreSQL views or RPCs for
-`some`/`every` patterns. Most are booking-asset joins.
+- `settings.general.tsx` → `shelf_user_workspaces_with_counts` RPC
+- `admin-dashboard+/org.$organizationId.tsx` → `shelf_admin_org_with_details` RPC
+- `admin-dashboard+/org.$organizationId.qr-codes.tsx` → same RPC
+- `admin-dashboard+/$userId.tsx` → `shelf_admin_user_organizations` RPC
+- `utils/sso.server.ts` → Split Supabase queries
 
-### PR 3: Deep Includes → Targeted Queries
+#### 5. Relation Writes — DONE
 
-**Scope:** Category 4 (6 calls)
-**Approach:** Replace deep includes with multiple focused
-Supabase queries joined in app code, or create flattening views.
+All 4 relation write calls migrated:
 
-### PR 4: Relation Writes + Remaining Transaction → RPCs
+- `kits.$kitId.assets.assign-custody.tsx` → Direct inserts to `KitCustody`/`Custody`
+- `admin-dashboard+/move-location-images.tsx` → `update({ imageId: null })`
+- `account-details.workspace.$workspaceId.edit.tsx` → Supabase `.eq("userId", id)` filter
+- `kits.$kitId.tsx` → Direct `update({ kitId: null })` + `delete()` on Custody
 
-**Scope:** Categories 5 + 8 (5 calls)
-**Approach:** Create RPC functions for connect/disconnect/upsert
-and the audit scan transaction.
+#### 7. Array Field Filters — DONE
 
-### PR 5: Dynamic Where & Array Filters
+Both `isEmpty`/`has` filters migrated via PostgREST array operators.
 
-**Scope:** Categories 6 + 7 (5 calls)
-**Approach:** Refactor `getAssetsWhereInput` to build Supabase
-filter chains. Replace `isEmpty`/`has` with PostgREST array ops.
+#### 8. Unmigrated Transaction — DONE
 
-### PR 6: Auth Schema Raw SQL
+`audits.$auditId.scan.tsx` → `shelf_remove_audit_scan` RPC
 
-**Scope:** Category 9 (2 calls)
-**Approach:** Use Supabase Admin API or security-definer RPCs.
+#### 6. Dynamic Where Inputs & Model Access — DONE
+
+All 3 dynamic where/model access calls migrated via RPCs:
+
+- `bookings.overview.manage-assets.tsx` → `getFilteredAssetIds()` using `shelf_get_filtered_asset_ids` RPC
+- `api+/assets.get-assets-for-bulk-qr-download.ts` → Same `getFilteredAssetIds()` pattern
+- `api+/model-filters.ts` → `shelf_model_filter_search` RPC
+
+### Remaining Work
+
+#### 9. Raw SQL on Auth Schema (2 calls — must stay as Prisma)
+
+| File                       | Details                                                |
+| -------------------------- | ------------------------------------------------------ |
+| `utils/sso.server.ts` (x2) | `$queryRaw` on `auth.sso_domains` — auth schema access |
+
+These 2 calls access the Supabase `auth` schema which is not accessible
+via the Supabase JS client. They must remain as `db.$queryRaw` until
+security-definer RPCs or the Supabase Admin API can be used.
+
+#### Module-level remaining Prisma calls (~20 calls — all KEPT AS PRISMA)
+
+All remaining calls are documented with `// KEPT AS PRISMA:` comments
+explaining why they cannot be migrated to Supabase:
+
+- `audit/helpers.server.ts` — `tx ?? db` pattern for transaction support
+- `asset/service.server.ts` — Dynamic generic includes, nested relation
+  writes (customFields create/update/deleteMany), `$queryRaw` with
+  dynamic Prisma.sql templates, P2002 retry logic
+- `asset/bulk-operations-helper.server.ts` — Advanced mode `$queryRaw`
+  with dynamic WHERE clause from `generateWhereClause()`
+- `booking/service.server.ts` — Complex nested booking conflict
+  conditions, dynamic where from `getBookingWhereInput`
+- `location/service.server.ts` — Dynamic Prisma includes, nested
+  `assets.some.bookings.some` multi-level existence filters
+- `kit/service.server.ts` — Dynamic generic includes, `assets: { none: {} }`
+
+#### Route-level remaining Prisma calls (2 files — all KEPT AS PRISMA)
+
+- `api+/get-scanned-item.$qrId.ts` — Dynamic Prisma include objects
+  built from runtime params
+- `api+/reminders.team-members.ts` — Nested WHERE with
+  `user: { isNot: null }`, `userOrganizations.some`, `roles.hasSome`
 
 ---
 
@@ -226,3 +198,5 @@ filter chains. Replace `isEmpty`/`has` with PostgREST array ops.
 | Dates return as ISO strings, not `Date`      | Cast with `new Date(field as string)`          |
 | Enum types return as plain `string`          | Cast with `as EnumType`                        |
 | Prisma implicit M2M join tables              | Query explicitly via `sbDb.from("_JoinTable")` |
+| RPC results need double cast                 | Cast with `as unknown as Type`                 |
+| Supabase FK joins return arrays for 1:1      | Take `[0] ?? null` for ssoDetails-style joins  |

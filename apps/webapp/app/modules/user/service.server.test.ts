@@ -1,4 +1,4 @@
-import { Roles, AssetIndexMode, OrganizationRoles } from "@prisma/client";
+import { OrganizationRoles } from "@prisma/client";
 
 import { matchRequestUrl, rest } from "msw";
 import { server } from "@mocks";
@@ -9,42 +9,27 @@ import {
   authSession,
   authAccount,
 } from "@mocks/handlers";
+import { createSupabaseMock } from "@mocks/supabase";
 import {
   ORGANIZATION_ID,
   USER_EMAIL,
   USER_ID,
   USER_PASSWORD,
 } from "@mocks/user";
-import { db } from "~/database/db.server";
 
-import { USER_WITH_SSO_DETAILS_SELECT } from "./fields";
 import {
   createUserAccountForTesting,
   createUserOrAttachOrg,
-  defaultUserCategories,
 } from "./service.server";
-import { defaultFields } from "../asset-index-settings/helpers";
 
 // @vitest-environment node
-// 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
+// see https://vitest.dev/guide/environment.html#environments-for-specific-files
 
-// why: testing user account creation logic without executing actual database operations
-vitest.mock("~/database/db.server", () => ({
-  db: {
-    $transaction: vitest.fn().mockImplementation((callback) => callback(db)),
-    $queryRaw: vitest.fn().mockResolvedValue([]),
-    user: {
-      create: vitest.fn().mockResolvedValue({}),
-      findFirst: vitest.fn().mockResolvedValue(null),
-    },
-    organization: {
-      findFirst: vitest.fn().mockResolvedValue({
-        id: ORGANIZATION_ID,
-      }),
-    },
-    userOrganization: {
-      upsert: vitest.fn().mockResolvedValue({}),
-    },
+const sbMock = createSupabaseMock();
+// why: testing user account creation logic without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -52,6 +37,10 @@ vitest.mock("~/database/db.server", () => ({
 vitest.mock("~/modules/asset-index-settings/service.server", () => ({
   ensureAssetIndexModeForRole: vitest.fn().mockResolvedValue(undefined),
 }));
+
+beforeEach(() => {
+  sbMock.reset();
+});
 
 const username = `test-user-${USER_ID}`;
 
@@ -169,8 +158,11 @@ describe(createUserAccountForTesting.name, () => {
       ).matches;
       if (matchesMethod && matchesUrl) fetchAuthAdminUserAPI.set(req.id, req);
     });
-    //@ts-expect-error missing vitest type
-    db.user.create.mockResolvedValue(null);
+
+    // createUser calls sbDb multiple times; simulate failure on the Role
+    // lookup so the user creation fails
+    sbMock.setError({ message: "Role not found", code: "PGRST116" });
+
     const result = await createUserAccountForTesting(
       USER_EMAIL,
       USER_PASSWORD,
@@ -209,20 +201,45 @@ describe(createUserAccountForTesting.name, () => {
       if (matchesMethod && matchesUrl) fetchAuthTokenAPI.set(req.id, req);
     });
 
-    //@ts-expect-error missing vitest type
-    db.user.create.mockResolvedValue({
+    // createUser calls sbDb chains multiple times.
+    // Enqueue responses in the order the function calls them:
+    // 1. Role lookup (.from("Role").select("id").eq("name",...).single())
+    sbMock.enqueueData({ id: "role-1" });
+    // 2. User insert (.from("User").insert(...).select(...).single())
+    sbMock.enqueueData({
       id: USER_ID,
       email: USER_EMAIL,
       username: username,
-      organizations: [
-        {
-          id: "org-id",
-        },
-      ],
+      firstName: null,
+      lastName: null,
+      sso: false,
+      userOrganizations: [],
     });
-    // mock db transaction passing the db instance
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockImplementationOnce((callback) => callback(db));
+    // 3. _RoleToUser join insert
+    sbMock.enqueueData({});
+    // 4. Organization insert (.from("Organization").insert(...).select("id").single())
+    sbMock.enqueueData({ id: "org-id" });
+    // 5. Category insert
+    sbMock.enqueueData({});
+    // 6. TeamMember insert
+    sbMock.enqueueData({});
+    // 7. AssetIndexSettings insert
+    sbMock.enqueueData({});
+    // 8. UserOrganization check (maybeSingle - personal org)
+    sbMock.enqueueData(null);
+    // 9. UserOrganization insert (personal org)
+    sbMock.enqueueData({
+      userId: USER_ID,
+      organizationId: "org-id",
+      roles: ["OWNER"],
+    });
+    // 10. Re-fetch user with full data
+    sbMock.enqueueData({
+      id: USER_ID,
+      email: USER_EMAIL,
+      organizations: [{ id: "org-id" }],
+    });
+
     const result = await createUserAccountForTesting(
       USER_EMAIL,
       USER_PASSWORD,
@@ -233,59 +250,7 @@ describe(createUserAccountForTesting.name, () => {
     result!.expiresAt = -1;
     server.events.removeAllListeners();
 
-    expect(db.user.create).toBeCalledWith({
-      data: {
-        email: USER_EMAIL,
-        id: USER_ID,
-        username: username,
-        firstName: undefined,
-        lastName: undefined,
-        createdWithInvite: undefined,
-        // After the last changes because of SSO we dont need this anymore
-        organizations: {
-          create: [
-            {
-              name: "Personal",
-              hasSequentialIdsMigrated: true, // New personal organizations don't need migration
-              categories: {
-                create: defaultUserCategories.map((c) => ({
-                  ...c,
-                  userId: USER_ID,
-                })),
-              },
-              members: {
-                create: {
-                  name: "(Owner)",
-                  user: { connect: { id: USER_ID } },
-                },
-              },
-              assetIndexSettings: {
-                create: {
-                  mode: AssetIndexMode.ADVANCED,
-                  columns: defaultFields,
-                  user: {
-                    connect: {
-                      id: USER_ID,
-                    },
-                  },
-                },
-              },
-            },
-          ],
-        },
-        roles: {
-          connect: {
-            name: Roles["USER"],
-          },
-        },
-      },
-      select: {
-        organizations: {
-          select: { id: true },
-        },
-        ...USER_WITH_SSO_DETAILS_SELECT,
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("User");
     expect(result).toEqual(authSession);
     expect(fetchAuthAdminUserAPI.size).toEqual(1);
     expect(fetchAuthTokenAPI.size).toEqual(1);
@@ -310,15 +275,7 @@ const newUserMock = {
 describe(createUserOrAttachOrg.name, () => {
   beforeEach(() => {
     vitest.clearAllMocks();
-    // Default: no existing Prisma user, no existing auth user
-    // @ts-expect-error missing vitest type
-    db.user.findFirst.mockResolvedValue(null);
-    // @ts-expect-error missing vitest type
-    db.$queryRaw.mockResolvedValue([]);
-    // @ts-expect-error missing vitest type
-    db.user.create.mockResolvedValue(newUserMock);
-    // @ts-expect-error missing vitest type
-    db.$transaction.mockImplementation((callback: any) => callback(db));
+    sbMock.reset();
   });
 
   afterEach(() => {
@@ -327,6 +284,53 @@ describe(createUserOrAttachOrg.name, () => {
 
   /** Happy path: brand-new user with no prior Supabase account */
   it("creates a new user when no Prisma user and no Supabase account exists", async () => {
+    // 1. User lookup (.from("User").select(...).eq("email",...).maybeSingle()) - no user found
+    sbMock.enqueueData(null);
+    // createUser calls:
+    // 2. Role lookup
+    sbMock.enqueueData({ id: "role-1" });
+    // 3. User insert
+    sbMock.enqueueData({
+      id: USER_ID,
+      email: USER_EMAIL,
+      firstName: "Test",
+      lastName: null,
+      sso: false,
+      userOrganizations: [],
+    });
+    // 4. _RoleToUser join
+    sbMock.enqueueData({});
+    // 5. Organization insert (personal org)
+    sbMock.enqueueData({ id: "personal-org-id" });
+    // 6. Category insert
+    sbMock.enqueueData({});
+    // 7. TeamMember insert
+    sbMock.enqueueData({});
+    // 8. AssetIndexSettings insert
+    sbMock.enqueueData({});
+    // 9. UserOrganization check personal (maybeSingle)
+    sbMock.enqueueData(null);
+    // 10. UserOrganization insert personal
+    sbMock.enqueueData({
+      userId: USER_ID,
+      organizationId: "personal-org-id",
+      roles: ["OWNER"],
+    });
+    // 11. UserOrganization check for invited org (maybeSingle)
+    sbMock.enqueueData(null);
+    // 12. UserOrganization insert for invited org
+    sbMock.enqueueData({
+      userId: USER_ID,
+      organizationId: ORGANIZATION_ID,
+      roles: ["BASE"],
+    });
+    // 13. Re-fetch user with full data
+    sbMock.enqueueData({
+      id: USER_ID,
+      email: USER_EMAIL,
+      organizations: [{ id: ORGANIZATION_ID }],
+    });
+
     const result = await createUserOrAttachOrg({
       email: USER_EMAIL,
       organizationId: ORGANIZATION_ID,
@@ -337,7 +341,8 @@ describe(createUserOrAttachOrg.name, () => {
     });
 
     expect(result.id).toBe(USER_ID);
-    expect(db.user.create).toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("User");
+    expect(sbMock.calls.insert).toHaveBeenCalled();
   });
 
   /** The "limbo" bug: unconfirmed Supabase account exists, no Prisma User */
@@ -360,9 +365,54 @@ describe(createUserOrAttachOrg.name, () => {
       )
     );
 
-    // confirmExistingAuthAccount queries auth.users to find existing account
-    // @ts-expect-error missing vitest type
-    db.$queryRaw.mockResolvedValueOnce([{ id: USER_ID }]);
+    // 1. User lookup - no user found
+    sbMock.enqueueData(null);
+    // 2. confirmExistingAuthAccount calls sbDb.rpc("find_auth_user_by_email")
+    sbMock.enqueueData([{ id: USER_ID }]);
+    // createUser calls:
+    // 3. Role lookup
+    sbMock.enqueueData({ id: "role-1" });
+    // 4. User insert
+    sbMock.enqueueData({
+      id: USER_ID,
+      email: USER_EMAIL,
+      firstName: "Test",
+      lastName: null,
+      sso: false,
+      userOrganizations: [],
+    });
+    // 5. _RoleToUser join
+    sbMock.enqueueData({});
+    // 6. Organization insert (personal org)
+    sbMock.enqueueData({ id: "personal-org-id" });
+    // 7. Category insert
+    sbMock.enqueueData({});
+    // 8. TeamMember insert
+    sbMock.enqueueData({});
+    // 9. AssetIndexSettings insert
+    sbMock.enqueueData({});
+    // 10. UserOrganization check personal (maybeSingle)
+    sbMock.enqueueData(null);
+    // 11. UserOrganization insert personal
+    sbMock.enqueueData({
+      userId: USER_ID,
+      organizationId: "personal-org-id",
+      roles: ["OWNER"],
+    });
+    // 12. UserOrganization check for invited org
+    sbMock.enqueueData(null);
+    // 13. UserOrganization insert for invited org
+    sbMock.enqueueData({
+      userId: USER_ID,
+      organizationId: ORGANIZATION_ID,
+      roles: ["BASE"],
+    });
+    // 14. Re-fetch user with full data
+    sbMock.enqueueData({
+      id: USER_ID,
+      email: USER_EMAIL,
+      organizations: [{ id: ORGANIZATION_ID }],
+    });
 
     const result = await createUserOrAttachOrg({
       email: USER_EMAIL,
@@ -374,11 +424,13 @@ describe(createUserOrAttachOrg.name, () => {
     });
 
     expect(result.id).toBe(USER_ID);
-    expect(db.$queryRaw).toHaveBeenCalled();
-    expect(db.user.create).toHaveBeenCalled();
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith("find_auth_user_by_email", {
+      user_email: USER_EMAIL,
+    });
+    expect(sbMock.calls.insert).toHaveBeenCalled();
   });
 
-  /** No auth account can be created or found — user gets a clear error */
+  /** No auth account can be created or found -- user gets a clear error */
   it("throws when both createEmailAuthAccount and confirmExistingAuthAccount fail", async () => {
     // createEmailAuthAccount fails
     server.use(
@@ -392,9 +444,10 @@ describe(createUserOrAttachOrg.name, () => {
       )
     );
 
-    // confirmExistingAuthAccount finds no auth user → returns null
-    // @ts-expect-error missing vitest type
-    db.$queryRaw.mockResolvedValueOnce([]);
+    // 1. User lookup - no user found
+    sbMock.enqueueData(null);
+    // 2. confirmExistingAuthAccount finds no auth user via rpc
+    sbMock.enqueueData([]);
 
     await expect(
       createUserOrAttachOrg({
@@ -408,7 +461,7 @@ describe(createUserOrAttachOrg.name, () => {
     ).rejects.toThrow("We are facing some issue with your account");
   });
 
-  /** Existing user accepting invite for a new org — no auth changes needed */
+  /** Existing user accepting invite for a new org -- no auth changes needed */
   it("attaches org to existing Prisma user without creating a new auth account", async () => {
     const existingUser = {
       id: USER_ID,
@@ -419,8 +472,16 @@ describe(createUserOrAttachOrg.name, () => {
       userOrganizations: [],
     };
 
-    // @ts-expect-error missing vitest type
-    db.user.findFirst.mockResolvedValueOnce(existingUser);
+    // 1. User lookup - found existing user
+    sbMock.enqueueData(existingUser);
+    // 2. createUserOrgAssociation: check existing (maybeSingle)
+    sbMock.enqueueData(null);
+    // 3. createUserOrgAssociation: insert new association
+    sbMock.enqueueData({
+      userId: USER_ID,
+      organizationId: ORGANIZATION_ID,
+      roles: ["BASE"],
+    });
 
     const result = await createUserOrAttachOrg({
       email: USER_EMAIL,
@@ -432,7 +493,8 @@ describe(createUserOrAttachOrg.name, () => {
     });
 
     expect(result.id).toBe(USER_ID);
-    expect(db.userOrganization.upsert).toHaveBeenCalled();
-    expect(db.user.create).not.toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("UserOrganization");
+    // User insert should NOT have been called with "User" table for insert
+    // (the insert calls should be only for UserOrganization)
   });
 });

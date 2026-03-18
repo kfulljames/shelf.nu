@@ -21,10 +21,6 @@ import UpcomingBookings from "~/components/home/upcoming-bookings";
 import UpcomingReminders from "~/components/home/upcoming-reminders";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
-// KEPT AS PRISMA: aggregate, groupBy, $queryRaw, _count includes,
-// nested `some` filter, orderBy with _count, findMany with _count select
-// — not convertible to Supabase
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { getUpcomingRemindersForHomePage } from "~/modules/asset-reminder/service.server";
 import { getBookings } from "~/modules/booking/service.server";
@@ -100,19 +96,24 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       cookieResult,
     ] = await Promise.all([
       // 1a. Asset count + total valuation
-      db.asset
-        .aggregate({
-          where: { organizationId },
-          _count: { _all: true },
-          _sum: { valuation: true },
+      sbDb
+        .rpc("shelf_dashboard_asset_aggregation", {
+          p_organization_id: organizationId,
         })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "Failed to load asset aggregation",
-            additionalData: { userId, organizationId },
-            label: "Dashboard",
-          });
+        .single()
+        .then(({ data: rpcData, error: rpcErr }) => {
+          if (rpcErr) {
+            throw new ShelfError({
+              cause: rpcErr,
+              message: "Failed to load asset aggregation",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return rpcData as unknown as {
+            totalAssets: number;
+            totalValuation: number;
+          };
         }),
 
       // 1a. Count of assets with known valuation
@@ -134,21 +135,54 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
 
       // 1b. Assets grouped by status
-      db.asset.groupBy({
-        by: ["status"],
-        where: { organizationId },
-        _count: { _all: true },
-      }),
+      sbDb
+        .rpc("shelf_dashboard_assets_by_status", {
+          p_organization_id: organizationId,
+        })
+        .single()
+        .then(({ data: rpcData, error: rpcErr }) => {
+          if (rpcErr) {
+            throw new ShelfError({
+              cause: rpcErr,
+              message: "Failed to load assets by status",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return (
+            rpcData as unknown as { status: string; count: number }[]
+          ).map((g) => ({
+            status: g.status,
+            _count: { _all: g.count },
+          }));
+        }),
 
       // 1c. Monthly asset creation counts (last 12 months)
-      db.$queryRaw<{ month_start: Date; assets_created: number }[]>`
-        SELECT date_trunc('month', "createdAt") AS month_start,
-               COUNT(*)::int AS assets_created
-        FROM "Asset"
-        WHERE "organizationId" = ${organizationId}
-          AND "createdAt" >= ${twelveMonthsAgo}
-        GROUP BY 1
-        ORDER BY 1`,
+      sbDb
+        .rpc("shelf_dashboard_monthly_growth", {
+          p_organization_id: organizationId,
+          p_since: twelveMonthsAgo.toISOString(),
+        })
+        .single()
+        .then(({ data: rpcData, error: rpcErr }) => {
+          if (rpcErr) {
+            throw new ShelfError({
+              cause: rpcErr,
+              message: "Failed to load monthly growth data",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return (
+            rpcData as unknown as {
+              monthStart: string;
+              assetsCreated: number;
+            }[]
+          ).map((row) => ({
+            month_start: new Date(row.monthStart),
+            assets_created: row.assetsCreated,
+          }));
+        }),
 
       // 1c. Baseline count (assets before the 12-month window)
       sbDb
@@ -169,22 +203,39 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
 
       // 1d. Team members with direct custody counts
-      db.teamMember.findMany({
-        where: { organizationId, custodies: { some: {} } },
-        include: {
-          user: {
-            select: {
-              firstName: true,
-              lastName: true,
-              profilePicture: true,
-              email: true,
-            },
-          },
-          _count: { select: { custodies: true } },
-        },
-        orderBy: { custodies: { _count: "desc" } },
-        take: 20,
-      }),
+      sbDb
+        .rpc("shelf_dashboard_top_custodians", {
+          p_organization_id: organizationId,
+          p_limit: 20,
+        })
+        .single()
+        .then(({ data: rpcData, error: rpcErr }) => {
+          if (rpcErr) {
+            throw new ShelfError({
+              cause: rpcErr,
+              message: "Failed to load top custodians",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return (
+            rpcData as unknown as {
+              id: string;
+              name: string;
+              userId: string | null;
+              user: {
+                firstName: string | null;
+                lastName: string | null;
+                profilePicture: string | null;
+                email: string;
+              } | null;
+              custodyCount: number;
+            }[]
+          ).map((tm) => ({
+            ...tm,
+            _count: { custodies: tm.custodyCount },
+          }));
+        }),
 
       // 1d. Ongoing + overdue bookings for custodian merge
       getBookings({
@@ -308,26 +359,27 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
 
       // Location distribution (top 5)
-      db.location
-        .findMany({
-          where: { organizationId },
-          select: {
-            id: true,
-            name: true,
-            _count: { select: { assets: true } },
-          },
-          orderBy: { assets: { _count: "desc" } },
-          take: 5,
+      sbDb
+        .rpc("shelf_dashboard_location_distribution", {
+          p_organization_id: organizationId,
+          p_limit: 5,
         })
-        .then((locs) =>
-          locs
-            .filter((l) => l._count.assets > 0)
-            .map((l) => ({
-              locationId: l.id,
-              locationName: l.name,
-              assetCount: l._count.assets,
-            }))
-        ),
+        .single()
+        .then(({ data: rpcData, error: rpcErr }) => {
+          if (rpcErr) {
+            throw new ShelfError({
+              cause: rpcErr,
+              message: "Failed to load location distribution",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return rpcData as unknown as {
+            locationId: string;
+            locationName: string;
+            assetCount: number;
+          }[];
+        }),
 
       // KPI: total locations
       sbDb
@@ -367,8 +419,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       userPrefs.parse(request.headers.get("Cookie")).then((c: any) => c || {}),
     ]);
 
-    const totalAssets = assetAggregation._count._all;
-    const totalValuation = assetAggregation._sum.valuation ?? 0;
+    const totalAssets = assetAggregation.totalAssets;
+    const totalValuation = assetAggregation.totalValuation;
 
     const header: HeaderData = {
       title: "Home",

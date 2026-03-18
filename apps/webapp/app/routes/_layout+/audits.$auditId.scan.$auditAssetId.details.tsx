@@ -25,9 +25,6 @@ import {
 } from "~/components/audit/audit-image-upload-box";
 import { AuditImageUploadDialog } from "~/components/audit/audit-image-upload-dialog";
 import { Button } from "~/components/shared/button";
-// KEPT AS PRISMA: db.auditAsset.findFirst with nested include
-// (auditSession -> assignments) — not convertible to Supabase
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
 import { createAuditAssetImagesAddedNote } from "~/modules/audit/helpers.server";
@@ -69,40 +66,60 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
 
     const { organizationId, isSelfServiceOrBase } = permissionResult;
 
-    // Fetch audit asset with notes and images
-    const auditAsset = await db.auditAsset.findFirst({
-      where: {
-        id: auditAssetId,
-        auditSession: {
-          organizationId,
-        },
-      },
-      include: {
-        asset: {
-          select: {
-            id: true,
-            title: true,
-          },
-        },
-        auditSession: {
-          select: {
-            assignments: {
-              select: { userId: true },
-            },
-          },
-        },
-      },
-    });
+    // Fetch audit asset with asset info, verify org via session
+    const { data: auditAssetRow, error: aaErr } = await sbDb
+      .from("AuditAsset")
+      .select(
+        "id, status, expected, scannedAt, auditSessionId, asset:Asset(id, title)"
+      )
+      .eq("id", auditAssetId)
+      .single();
 
-    if (!auditAsset) {
+    if (aaErr || !auditAssetRow) {
       throw new ShelfError({
-        cause: null,
+        cause: aaErr,
         message: "Audit asset not found",
         additionalData: { auditAssetId, organizationId },
         label: "Audit",
         status: 404,
       });
     }
+
+    // Verify organization ownership via audit session
+    const { data: sessionRow, error: sessionErr } = await sbDb
+      .from("AuditSession")
+      .select("organizationId")
+      .eq("id", auditAssetRow.auditSessionId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (sessionErr || !sessionRow) {
+      throw new ShelfError({
+        cause: sessionErr,
+        message: "Audit asset not found",
+        additionalData: { auditAssetId, organizationId },
+        label: "Audit",
+        status: 404,
+      });
+    }
+
+    // Get assignments for permission check
+    const { data: assignmentRows } = await sbDb
+      .from("AuditAssignment")
+      .select("userId")
+      .eq("auditSessionId", auditAssetRow.auditSessionId);
+
+    const auditAsset = {
+      ...auditAssetRow,
+      asset: Array.isArray(auditAssetRow.asset)
+        ? auditAssetRow.asset[0] ?? null
+        : auditAssetRow.asset ?? null,
+      auditSession: {
+        assignments: (assignmentRows ?? []) as Array<{
+          userId: string;
+        }>,
+      },
+    };
 
     requireAuditAssigneeForBaseSelfService({
       audit: auditAsset.auditSession,

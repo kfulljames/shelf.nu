@@ -1,8 +1,6 @@
-// KEPT AS PRISMA: uses Prisma.AssetWhereInput type and getAssetsWhereInput helper
-import type { Prisma } from "@prisma/client";
 import { data, type ActionFunctionArgs } from "react-router";
-import { db } from "~/database/db.server";
-import { getAssetsWhereInput } from "~/modules/asset/utils.server";
+import { sbDb } from "~/database/supabase.server";
+import { getFilteredAssetIds } from "~/modules/asset/utils.server";
 import { generateQrObj } from "~/modules/qr/utils.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
@@ -61,17 +59,29 @@ export async function loader({ context, request }: ActionFunctionArgs) {
     }
 
     /* If we are selecting all assets in list then we have to consider other filters  */
-    const where: Prisma.AssetWhereInput = assetIds.includes(ALL_SELECTED_KEY)
-      ? getAssetsWhereInput({
-          organizationId,
-          currentSearchParams: searchParams.toString(),
-        })
-      : { id: { in: assetIds }, organizationId };
+    let filteredAssetIds: string[];
+    if (assetIds.includes(ALL_SELECTED_KEY)) {
+      filteredAssetIds = await getFilteredAssetIds({
+        organizationId,
+        currentSearchParams: searchParams.toString(),
+      });
+    } else {
+      filteredAssetIds = assetIds;
+    }
 
-    const assets = await db.asset.findMany({
-      where,
-      select: { id: true, title: true, createdAt: true, sequentialId: true },
-    });
+    const { data: assets, error: assetsErr } = await sbDb
+      .from("Asset")
+      .select("id, title, createdAt, sequentialId")
+      .in("id", filteredAssetIds)
+      .eq("organizationId", organizationId);
+
+    if (assetsErr) {
+      throw new ShelfError({
+        cause: assetsErr,
+        message: "Failed to fetch assets for QR download",
+        label: "Assets",
+      });
+    }
 
     if (assets.length > 100) {
       throw new ShelfError({

@@ -59,11 +59,10 @@ import {
   KIT_SELECT_FIELDS_FOR_LIST_ITEMS,
   KITS_INCLUDE_FIELDS,
 } from "./types";
-import { getKitsWhereInput } from "./utils.server";
 import { resolveAssetIdsForBulkOperation } from "../asset/bulk-operations-helper.server";
 import type { CreateAssetFromContentImportPayload } from "../asset/types";
 import {
-  getAssetsWhereInput,
+  getFilteredAssetIds,
   getKitLocationUpdateNoteContent,
 } from "../asset/utils.server";
 import { createSystemLocationNote } from "../location-note/service.server";
@@ -569,6 +568,8 @@ export async function getPaginatedAndFilterableKits<
       ...KITS_INCLUDE_FIELDS,
     } as MergeInclude<typeof KITS_INCLUDE_FIELDS, T>;
 
+    // KEPT AS PRISMA: Dynamic generic include + complex where with
+    // nested booking/custody relations + `assets: { none: {} }` filter
     let [kits, totalKits, totalKitsWithoutAssets] = await Promise.all([
       db.kit.findMany({
         skip,
@@ -639,6 +640,7 @@ export async function getKit<T extends Prisma.KitInclude | undefined>({
       ...extraInclude,
     } as MergeInclude<typeof GET_KIT_STATIC_INCLUDES, T>;
 
+    // KEPT AS PRISMA: Dynamic generic include varies per caller
     const kit = await db.kit.findFirstOrThrow({
       where: {
         OR: [
@@ -746,6 +748,8 @@ export async function getAssetsForKits({
       ...extraWhere,
     };
 
+    // KEPT AS PRISMA: Dynamic where from extraWhere parameter +
+    // KIT_SELECT_FIELDS_FOR_LIST_ITEMS with nested relations
     const [items, totalItems] = await Promise.all([
       db.asset.findMany({
         skip,
@@ -2599,15 +2603,11 @@ export async function updateKitAssets({
     const hasSelectedAll = assetIds.includes(ALL_SELECTED_KEY);
     if (hasSelectedAll) {
       const searchParams = getCurrentSearchParams(request);
-      const assetsWhere = getAssetsWhereInput({
+      const allAssetIds = await getFilteredAssetIds({
         organizationId,
         currentSearchParams: searchParams.toString(),
       });
 
-      const allAssets = await db.asset.findMany({
-        where: assetsWhere,
-        select: { id: true },
-      });
       const kitAssets = kit.assets.map((asset) => asset.id);
       const removedAssetsIds = removedAssets.map((asset) => asset.id);
 
@@ -2618,7 +2618,7 @@ export async function updateKitAssets({
        */
       assetIds = [
         ...new Set([
-          ...allAssets.map((asset) => asset.id),
+          ...allAssetIds,
           ...kitAssets.filter((asset) => !removedAssetsIds.includes(asset)),
         ]),
       ];

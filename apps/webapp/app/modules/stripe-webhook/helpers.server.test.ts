@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 import { ShelfError } from "~/utils/error";
 
 // why: env module reads process.env at import time; we need to control
@@ -47,16 +48,11 @@ vi.mock("~/utils/stripe.server", () => ({
   },
 }));
 
-// why: Database module connects to Prisma during import
-const { mockFindFirstOrThrow } = vi.hoisted(() => ({
-  mockFindFirstOrThrow: vi.fn(),
-}));
-
-vi.mock("~/database/db.server", () => ({
-  db: {
-    user: {
-      findFirstOrThrow: mockFindFirstOrThrow,
-    },
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -219,6 +215,7 @@ describe("constructVerifiedWebhookEvent", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
     mockStripeWebhookEndpointSecret.value = "whsec_test";
     mockCustomInstallCustomers.value = "";
   });
@@ -320,7 +317,8 @@ describe("constructVerifiedWebhookEvent", () => {
       type: "invoice.paid",
       data: { object: { customer: "cus_custom1" } },
     });
-    mockFindFirstOrThrow.mockResolvedValue(baseUser);
+    // User lookup via sbDb.from("User").select(...).eq(...).single()
+    sbMock.setData(baseUser);
 
     const req = makeRequest();
     const result = await constructVerifiedWebhookEvent(req);
@@ -335,7 +333,8 @@ describe("constructVerifiedWebhookEvent", () => {
       type: "invoice.paid",
       data: { object: { customer: "cus_regular" } },
     });
-    mockFindFirstOrThrow.mockResolvedValue(baseUser);
+    // User lookup via sbDb.from("User").select(...).eq(...).single()
+    sbMock.setData(baseUser);
 
     const req = makeRequest();
     const result = await constructVerifiedWebhookEvent(req);
@@ -343,6 +342,11 @@ describe("constructVerifiedWebhookEvent", () => {
     expect(result.event.type).toBe("invoice.paid");
     expect(result.customerId).toBe("cus_regular");
     expect(result.user).toEqual(baseUser);
+
+    // Verify the Supabase query was made correctly
+    expect(sbMock.calls.from).toHaveBeenCalledWith("User");
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("customerId", "cus_regular");
+    expect(sbMock.calls.single).toHaveBeenCalled();
   });
 });
 

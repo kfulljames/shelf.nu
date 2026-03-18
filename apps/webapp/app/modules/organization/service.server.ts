@@ -506,38 +506,31 @@ export async function updateOrganization({
   }
 }
 
-const ORGANIZATION_SELECT_FIELDS = {
-  id: true,
-  type: true,
-  name: true,
-  imageId: true,
-  userId: true,
-  updatedAt: true,
-  currency: true,
-  enabledSso: true,
-  owner: {
-    select: {
-      id: true,
-      email: true,
-    },
-  },
-  ssoDetails: true,
-  workspaceDisabled: true,
-  selfServiceCanSeeCustody: true,
-  selfServiceCanSeeBookings: true,
-  baseUserCanSeeCustody: true,
-  baseUserCanSeeBookings: true,
-  barcodesEnabled: true,
-  auditsEnabled: true,
-  usedAuditTrial: true,
-  hasSequentialIdsMigrated: true,
-  qrIdDisplayPreference: true,
-  showShelfBranding: true,
-  customEmailFooter: true,
-};
-
 export type OrganizationFromUser = Prisma.OrganizationGetPayload<{
-  select: typeof ORGANIZATION_SELECT_FIELDS;
+  select: {
+    id: true;
+    type: true;
+    name: true;
+    imageId: true;
+    userId: true;
+    updatedAt: true;
+    currency: true;
+    enabledSso: true;
+    owner: { select: { id: true; email: true } };
+    ssoDetails: true;
+    workspaceDisabled: true;
+    selfServiceCanSeeCustody: true;
+    selfServiceCanSeeBookings: true;
+    baseUserCanSeeCustody: true;
+    baseUserCanSeeBookings: true;
+    barcodesEnabled: true;
+    auditsEnabled: true;
+    usedAuditTrial: true;
+    hasSequentialIdsMigrated: true;
+    qrIdDisplayPreference: true;
+    showShelfBranding: true;
+    customEmailFooter: true;
+  };
 }>;
 
 export async function getUserOrganizations({ userId }: { userId: string }) {

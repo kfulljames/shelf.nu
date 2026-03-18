@@ -1,6 +1,5 @@
 import { type ActionFunctionArgs, redirect, data } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { setCookie } from "~/utils/cookies.server";
@@ -38,15 +37,13 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
-    // KEPT AS PRISMA: $executeRaw for raw SQL update
     // Best-effort persist to database for cross-device workspace persistence.
-    // Uses raw SQL to avoid bumping the User.updatedAt timestamp.
+    // Supabase .update() only touches specified fields, so updatedAt is not bumped.
     try {
-      await db.$executeRaw`
-        UPDATE "User"
-        SET "lastSelectedOrganizationId" = ${organizationId}
-        WHERE "id" = ${userId}
-      `;
+      await sbDb
+        .from("User")
+        .update({ lastSelectedOrganizationId: organizationId })
+        .eq("id", userId);
     } catch (cause) {
       Logger.warn(
         "Failed to persist lastSelectedOrganizationId",

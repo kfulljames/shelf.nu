@@ -23,9 +23,6 @@ import {
   EditWorkspaceSSOSettingsFormSchema,
   WorkspaceEditForms,
 } from "~/components/workspace/edit-form";
-// KEPT AS PRISMA: organization findUniqueOrThrow with nested `owner.is`
-// filter and ssoDetails include
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import {
   getOrganizationAdmins,
@@ -77,32 +74,34 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     });
 
     /** We get the organization and make sure the current user is the owner as only owner should be able to edit it */
-    const organization = await db.organization
-      .findUniqueOrThrow({
-        where: {
+    const { data: orgData, error: orgErr } = await sbDb
+      .from("Organization")
+      .select("*, ssoDetails:SsoDetails(*)")
+      .eq("id", id)
+      .eq("userId", authSession.userId)
+      .single();
+
+    if (orgErr || !orgData) {
+      throw new ShelfError({
+        cause: orgErr,
+        message: "Your are not the owner of this organization.",
+        additionalData: {
+          userId,
           id,
-          owner: {
-            is: {
-              id: authSession.userId,
-            },
-          },
         },
-        include: {
-          ssoDetails: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Your are not the owner of this organization.",
-          additionalData: {
-            userId,
-            id,
-          },
-          label: "Organization",
-          status: 403,
-        });
+        label: "Organization",
+        status: 403,
       });
+    }
+
+    const organization = {
+      ...orgData,
+      createdAt: new Date(orgData.createdAt as string),
+      updatedAt: new Date(orgData.updatedAt as string),
+      ssoDetails: Array.isArray((orgData as any).ssoDetails)
+        ? (orgData as any).ssoDetails[0] ?? null
+        : (orgData as any).ssoDetails ?? null,
+    };
 
     const [admins, tierLimit, { data: user }] = await Promise.all([
       getOrganizationAdmins({
@@ -200,32 +199,34 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     /** Because you can access this view even when you have a different currentOrganization than the one you are editing
      * We need to query the org using the orgId from the params
      */
-    const organization = await db.organization
-      .findUniqueOrThrow({
-        where: {
+    const { data: orgData, error: orgErr } = await sbDb
+      .from("Organization")
+      .select("*, ssoDetails:SsoDetails(*)")
+      .eq("id", id)
+      .eq("userId", authSession.userId)
+      .single();
+
+    if (orgErr || !orgData) {
+      throw new ShelfError({
+        cause: orgErr,
+        message: "Your are not the owner of this organization.",
+        additionalData: {
+          userId,
           id,
-          owner: {
-            is: {
-              id: authSession.userId,
-            },
-          },
         },
-        include: {
-          ssoDetails: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Your are not the owner of this organization.",
-          additionalData: {
-            userId,
-            id,
-          },
-          label: "Organization",
-          status: 403,
-        });
+        label: "Organization",
+        status: 403,
       });
+    }
+
+    const organization = {
+      ...orgData,
+      createdAt: new Date(orgData.createdAt as string),
+      updatedAt: new Date(orgData.updatedAt as string),
+      ssoDetails: Array.isArray((orgData as any).ssoDetails)
+        ? (orgData as any).ssoDetails[0] ?? null
+        : (orgData as any).ssoDetails ?? null,
+    };
 
     const [tierLimit, { data: user }] = await Promise.all([
       getOrganizationTierLimit({

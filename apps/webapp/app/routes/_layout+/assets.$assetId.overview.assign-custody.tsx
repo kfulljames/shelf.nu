@@ -16,7 +16,6 @@ import DynamicSelect from "~/components/dynamic-select/dynamic-select";
 import { UserIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
 import { WarningBox } from "~/components/shared/warning-box";
-import { db } from "~/database/db.server"; // KEPT AS PRISMA: asset.update with nested custody.create
 import { sbDb } from "~/database/supabase.server";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getAsset } from "~/modules/asset/service.server";
@@ -232,36 +231,44 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       });
     }
 
-    /** In order to do it with a single query
-     * 1. We update the asset status
-     * 2. We create a new custody record for that specific asset
-     * 3. We link it to the custodian
+    /**
+     * 1. Update the asset status to IN_CUSTODY
+     * 2. Create a new custody record linking asset to custodian
+     * 3. Fetch the asset title for the note
      */
-    const asset = await db.asset
-      .update({
-        where: { id: assetId, organizationId } as Prisma.AssetWhereUniqueInput,
-        data: {
-          status: AssetStatus.IN_CUSTODY,
-          custody: {
-            create: {
-              custodian: { connect: { id: custodianId } },
-            },
-          },
-        },
-        select: {
-          id: true,
-          title: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message:
-            "Something went wrong while updating asset. Please try again or contact support.",
-          additionalData: { userId, assetId, custodianId },
-          label: "Assets",
-        });
+    const [updateResult, custodyResult] = await Promise.all([
+      sbDb
+        .from("Asset")
+        .update({ status: AssetStatus.IN_CUSTODY })
+        .eq("id", assetId)
+        .eq("organizationId", organizationId),
+      sbDb.from("Custody").insert({ assetId, teamMemberId: custodianId }),
+    ]);
+
+    if (updateResult.error || custodyResult.error) {
+      throw new ShelfError({
+        cause: updateResult.error || custodyResult.error,
+        message:
+          "Something went wrong while updating asset. Please try again or contact support.",
+        additionalData: { userId, assetId, custodianId },
+        label: "Assets",
       });
+    }
+
+    const { data: asset } = await sbDb
+      .from("Asset")
+      .select("id, title")
+      .eq("id", assetId)
+      .single();
+
+    if (!asset) {
+      throw new ShelfError({
+        cause: null,
+        message: "Asset not found after custody assignment",
+        additionalData: { assetId },
+        label: "Assets",
+      });
+    }
 
     /** Once the asset is updated, we create the note */
     const actor = wrapUserLinkForNote({

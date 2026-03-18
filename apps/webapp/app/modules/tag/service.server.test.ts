@@ -1,63 +1,90 @@
-import { TagUseFor } from "@prisma/client";
+import type { Sb } from "@shelf/database";
 import { describe, vitest } from "vitest";
 import { USER_ID, ORGANIZATION_ID } from "@factories";
-import { db } from "~/database/db.server";
+import { createSupabaseMock } from "@mocks/supabase";
 import { createTag, updateTag } from "~/modules/tag/service.server";
 
-// why: avoid database dependency and test tag service business logic in isolation
-vitest.mock("~/database/db.server", () => ({
-  db: {
-    $transaction: vitest.fn().mockImplementation((callback) => callback(db)),
-    tag: {
-      create: vitest.fn().mockResolvedValue({}),
-      update: vitest.fn().mockResolvedValue({}),
-    },
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
 describe("tag service", () => {
   beforeEach(() => {
-    vitest.resetAllMocks();
+    sbMock.reset();
   });
 
   describe("create", () => {
     it("should create tag", async () => {
+      sbMock.setData({
+        id: "tag-1",
+        name: "test_tag",
+        description: "my test tag",
+        color: "#ffffff",
+        useFor: ["ASSET"],
+        userId: USER_ID,
+        organizationId: ORGANIZATION_ID,
+      });
+
       await createTag({
         description: "my test tag",
         organizationId: ORGANIZATION_ID,
         userId: USER_ID,
         name: "test_tag",
         color: "#ffffff",
-        useFor: [TagUseFor.ASSET],
+        useFor: ["ASSET"],
       });
+
       expectTagToBeCreated({
         name: "test_tag",
         description: "my test tag",
         color: "#ffffff",
-        useFor: [TagUseFor.ASSET],
+        useFor: ["ASSET"],
       });
     });
 
     it("should trim tag name", async () => {
+      sbMock.setData({
+        id: "tag-1",
+        name: "test_tag",
+        description: "my test tag",
+        color: "#ffffff",
+        useFor: ["ASSET"],
+        userId: USER_ID,
+        organizationId: ORGANIZATION_ID,
+      });
+
       await createTag({
         description: "my test tag",
         organizationId: ORGANIZATION_ID,
         userId: USER_ID,
         name: " test_tag ",
         color: "#ffffff",
-        useFor: [TagUseFor.ASSET],
+        useFor: ["ASSET"],
       });
+
       expectTagToBeCreated({
         name: "test_tag",
         description: "my test tag",
         color: "#ffffff",
-        useFor: [TagUseFor.ASSET],
+        useFor: ["ASSET"],
       });
     });
   });
 
   describe("update", () => {
     it("should update tag", async () => {
+      sbMock.setData({
+        id: USER_ID,
+        name: "test_tag",
+        description: "my test tag",
+        color: "#ffffff",
+        organizationId: ORGANIZATION_ID,
+      });
+
       await updateTag({
         description: "my test tag",
         organizationId: ORGANIZATION_ID,
@@ -65,6 +92,7 @@ describe("tag service", () => {
         name: "test_tag",
         color: "#ffffff",
       });
+
       expectTagToBeUpdated({
         name: "test_tag",
         description: "my test tag",
@@ -75,6 +103,14 @@ describe("tag service", () => {
     });
 
     it("should trim tag name on update", async () => {
+      sbMock.setData({
+        id: USER_ID,
+        name: "test_tag",
+        description: "my test tag",
+        color: "#ffffff",
+        organizationId: ORGANIZATION_ID,
+      });
+
       await updateTag({
         description: "my test tag",
         organizationId: ORGANIZATION_ID,
@@ -82,6 +118,7 @@ describe("tag service", () => {
         name: " test_tag ",
         color: "#ffffff",
       });
+
       expectTagToBeUpdated({
         name: "test_tag",
         description: "my test tag",
@@ -92,21 +129,31 @@ describe("tag service", () => {
     });
 
     it("should update tag with useFor", async () => {
+      sbMock.setData({
+        id: USER_ID,
+        name: "test_tag",
+        description: "my test tag",
+        color: "#ffffff",
+        useFor: ["ASSET"],
+        organizationId: ORGANIZATION_ID,
+      });
+
       await updateTag({
         description: "my test tag",
         organizationId: ORGANIZATION_ID,
         id: USER_ID,
         name: "test_tag",
         color: "#ffffff",
-        useFor: [TagUseFor.ASSET],
+        useFor: ["ASSET"],
       });
+
       expectTagToBeUpdated({
         name: "test_tag",
         description: "my test tag",
         organizationId: ORGANIZATION_ID,
         id: USER_ID,
         color: "#ffffff",
-        useFor: [TagUseFor.ASSET],
+        useFor: ["ASSET"],
       });
     });
   });
@@ -121,26 +168,19 @@ function expectTagToBeCreated({
   name: string;
   description: string;
   color: string;
-  useFor: TagUseFor[];
+  useFor: Sb.TagUseFor[];
 }): void {
-  expect(db.tag.create).toHaveBeenCalledWith({
-    data: {
-      name,
-      description,
-      color,
-      useFor,
-      user: {
-        connect: {
-          id: USER_ID,
-        },
-      },
-      organization: {
-        connect: {
-          id: ORGANIZATION_ID,
-        },
-      },
-    },
+  expect(sbMock.calls.from).toHaveBeenCalledWith("Tag");
+  expect(sbMock.calls.insert).toHaveBeenCalledWith({
+    name,
+    description,
+    color,
+    useFor,
+    userId: USER_ID,
+    organizationId: ORGANIZATION_ID,
   });
+  expect(sbMock.calls.select).toHaveBeenCalled();
+  expect(sbMock.calls.single).toHaveBeenCalled();
 }
 
 function expectTagToBeUpdated({
@@ -156,20 +196,25 @@ function expectTagToBeUpdated({
   id: string;
   organizationId: string;
   color: string;
-  useFor?: TagUseFor[];
+  useFor?: Sb.TagUseFor[];
 }): void {
-  expect(db.tag.update).toHaveBeenCalledWith({
-    where: {
-      id,
-      organizationId,
-    },
-    data: {
-      name,
-      description,
-      color,
-      useFor: {
-        set: useFor,
-      },
-    },
-  });
+  expect(sbMock.calls.from).toHaveBeenCalledWith("Tag");
+
+  const expectedUpdateData: Record<string, unknown> = {
+    name,
+    description,
+    color,
+  };
+  if (useFor !== undefined) {
+    expectedUpdateData.useFor = useFor;
+  }
+
+  expect(sbMock.calls.update).toHaveBeenCalledWith(expectedUpdateData);
+  expect(sbMock.calls.eq).toHaveBeenCalledWith("id", id);
+  expect(sbMock.calls.eq).toHaveBeenCalledWith(
+    "organizationId",
+    organizationId
+  );
+  expect(sbMock.calls.select).toHaveBeenCalled();
+  expect(sbMock.calls.single).toHaveBeenCalled();
 }

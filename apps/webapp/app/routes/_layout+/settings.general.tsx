@@ -26,8 +26,6 @@ import {
   EditWorkspaceSSOSettingsFormSchema,
   WorkspaceEditForms,
 } from "~/components/workspace/edit-form";
-// KEPT AS PRISMA: Complex nested includes (3+ levels: user -> userOrganizations -> organization -> ssoDetails/_count/owner)
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import {
   getOrganizationAdmins,
@@ -71,47 +69,55 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       });
 
     const [user, tierLimit, admins, ownerSubscriptionInfo] = await Promise.all([
-      db.user
-        .findUniqueOrThrow({
-          where: {
-            id: userId,
-          },
-          select: {
-            firstName: true,
-            tierId: true,
+      sbDb
+        .rpc("shelf_user_workspaces_with_counts", { p_user_id: userId })
+        .then(({ data: rpcData, error: rpcErr }) => {
+          if (rpcErr || !rpcData) {
+            throw new ShelfError({
+              cause: rpcErr,
+              message: "User not found",
+              additionalData: { userId, organizationId },
+              label: "Settings",
+            });
+          }
+          return rpcData as unknown as {
+            firstName: string | null;
+            tierId: string | null;
+            tier: { id: string; name: string };
             userOrganizations: {
-              include: {
-                organization: {
-                  include: {
-                    ssoDetails: true,
-                    _count: {
-                      select: {
-                        assets: true,
-                        members: true,
-                        locations: true,
-                      },
-                    },
-                    owner: {
-                      select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true,
-                        profilePicture: true,
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "User not found",
-            additionalData: { userId, organizationId },
-            label: "Settings",
-          });
+              id: string;
+              roles: string[];
+              organization: {
+                id: string;
+                name: string;
+                type: string;
+                imageId: string | null;
+                userId: string;
+                updatedAt: string;
+                enabledSso: boolean;
+                currency: string;
+                owner: {
+                  id: string;
+                  firstName: string | null;
+                  lastName: string | null;
+                  profilePicture: string | null;
+                };
+                ssoDetails: {
+                  id: string;
+                  domain: string;
+                  organizationId: string;
+                  adminGroupId: string | null;
+                  selfServiceGroupId: string | null;
+                  baseUserGroupId: string | null;
+                } | null;
+                _count: {
+                  assets: number;
+                  members: number;
+                  locations: number;
+                };
+              };
+            }[];
+          };
         }),
       /* Check the tier limit */
       getOrganizationTierLimit({

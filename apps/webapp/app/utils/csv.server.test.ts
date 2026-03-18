@@ -25,9 +25,9 @@ vi.mock("@remix-run/form-data-parser", async () => {
     parseFormData: vi.fn(),
   };
 });
-// why: avoid Prisma connections when importing server utilities
-vi.mock("~/database/db.server", () => ({
-  db: {},
+// why: avoid Supabase connections when importing server utilities
+vi.mock("~/database/supabase.server", () => ({
+  sbDb: {},
 }));
 // why: suppress lottie animation initialization during module imports
 vi.mock("lottie-react", () => ({
@@ -467,9 +467,9 @@ describe("buildCsvExportDataFromTeamMembers", () => {
   it("returns CSV content with headers and row values", () => {
     const csv = buildCsvExportDataFromTeamMembers({
       teamMembers: [
-        { id: "tm-1", name: "Alex", _count: { custodies: 3 } },
-        { id: "tm-2", name: "Riley", _count: { custodies: 0 } },
-      ] as any,
+        { id: "tm-1", name: "Alex", custodyCount: 3 },
+        { id: "tm-2", name: "Riley", custodyCount: 0 },
+      ],
     });
 
     expect(csv).toBe(

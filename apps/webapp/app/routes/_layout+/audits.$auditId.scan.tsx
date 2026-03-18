@@ -25,8 +25,6 @@ import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import { CodeScanner } from "~/components/scanner/code-scanner";
 import type { OnCodeDetectionSuccessProps } from "~/components/scanner/code-scanner";
-// KEPT AS PRISMA: db.$transaction with complex multi-step audit scan removal logic
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { useAuditScanPersistence } from "~/hooks/use-audit-scan-persistence";
 import { useAuditSessionInitialization } from "~/hooks/use-audit-session-initialization";
@@ -158,95 +156,27 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         });
       }
 
-      await db.$transaction(async (tx) => {
-        const existingScan = await tx.auditScan.findFirst({
-          where: { auditSessionId: auditId, assetId },
-          include: {
-            auditAsset: {
-              select: { id: true, expected: true },
-            },
-          },
+      // Use RPC for atomic scan removal + count recalculation
+      const { error: rpcErr } = await sbDb.rpc("shelf_remove_audit_scan", {
+        p_session_id: auditId,
+        p_asset_id: assetId,
+        p_removed_by_id: userId,
+      });
+
+      if (rpcErr) {
+        throw new ShelfError({
+          cause: rpcErr,
+          message: "Failed to remove audit scan",
+          additionalData: { auditId, assetId },
+          label: "Audit",
         });
+      }
 
-        if (!existingScan) {
-          return;
-        }
-
-        // Keep audit asset state aligned with removal before recalculating counts.
-        if (existingScan.auditAsset?.expected) {
-          await tx.auditAsset.update({
-            where: { id: existingScan.auditAsset.id },
-            data: {
-              status: "MISSING",
-              scannedAt: null,
-              scannedById: null,
-            },
-          });
-
-          await tx.auditSession.update({
-            where: { id: auditId },
-            data: {
-              foundAssetCount: { decrement: 1 },
-              missingAssetCount: { increment: 1 },
-            },
-          });
-        } else if (existingScan.auditAsset?.id) {
-          await tx.auditAsset.delete({
-            where: { id: existingScan.auditAsset.id },
-          });
-
-          await tx.auditSession.update({
-            where: { id: auditId },
-            data: {
-              unexpectedAssetCount: { decrement: 1 },
-            },
-          });
-        }
-
-        await tx.auditScan.delete({
-          where: { id: existingScan.id },
-        });
-
-        // Recalculate counts to ensure overview stats reflect current state.
-        const [foundCount, missingCount, unexpectedCount] = await Promise.all([
-          tx.auditAsset.count({
-            where: {
-              auditSessionId: auditId,
-              expected: true,
-              status: "FOUND",
-            },
-          }),
-          tx.auditAsset.count({
-            where: {
-              auditSessionId: auditId,
-              expected: true,
-              status: "MISSING",
-            },
-          }),
-          tx.auditAsset.count({
-            where: {
-              auditSessionId: auditId,
-              expected: false,
-              status: "UNEXPECTED",
-            },
-          }),
-        ]);
-
-        await tx.auditSession.update({
-          where: { id: auditId },
-          data: {
-            foundAssetCount: foundCount,
-            missingAssetCount: missingCount,
-            unexpectedAssetCount: unexpectedCount,
-          },
-        });
-
-        await createAssetScanRemovedNote({
-          auditSessionId: auditId,
-          assetId,
-          userId,
-          tx,
-        });
+      // Create the audit note (outside transaction - uses its own db client)
+      await createAssetScanRemovedNote({
+        auditSessionId: auditId,
+        assetId,
+        userId,
       });
 
       return payload({ success: true });
