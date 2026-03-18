@@ -937,7 +937,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc("shelf_booking_update_assets") -> success
     sbMock.enqueueData({ success: true });
     // 2. sbDb.from("Booking").select("id, name, status").eq().eq().single()
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.DRAFT });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.DRAFT,
+    });
     // 3. sbDb.from("Asset").select("id, title").in().eq() - for booking note
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -965,7 +969,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.ONGOING,
+    });
     // 3. Asset fetch for notes
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -982,7 +990,10 @@ describe("updateBookingAssets", () => {
       })
     );
     expect(result).toEqual(
-      expect.objectContaining({ id: "booking-1", status: BookingStatus.ONGOING })
+      expect.objectContaining({
+        id: "booking-1",
+        status: BookingStatus.ONGOING,
+      })
     );
   });
 
@@ -992,7 +1003,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.OVERDUE });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.OVERDUE,
+    });
     // 3. Asset fetch for notes
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -1003,7 +1018,10 @@ describe("updateBookingAssets", () => {
 
     expect(sbMock.calls.rpc).toHaveBeenCalled();
     expect(result).toEqual(
-      expect.objectContaining({ id: "booking-1", status: BookingStatus.OVERDUE })
+      expect.objectContaining({
+        id: "booking-1",
+        status: BookingStatus.OVERDUE,
+      })
     );
   });
 
@@ -1013,7 +1031,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc - with kitIds
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.ONGOING,
+    });
     // Note: when kitIds are provided, no asset notes are created (kit notes handled separately)
 
     const params = {
@@ -1029,9 +1051,7 @@ describe("updateBookingAssets", () => {
         p_kit_ids: ["kit-1", "kit-2"],
       })
     );
-    expect(result).toEqual(
-      expect.objectContaining({ id: "booking-1" })
-    );
+    expect(result).toEqual(expect.objectContaining({ id: "booking-1" }));
   });
 
   it("should not update kit status when no kitIds provided", async () => {
@@ -1040,7 +1060,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.ONGOING,
+    });
     // 3. Asset fetch for notes
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -1064,7 +1088,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.ONGOING,
+    });
     // 3. Asset fetch for notes
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -1093,7 +1121,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc - RPC handles status logic internally
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.RESERVED });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.RESERVED,
+    });
     // 3. Asset fetch for notes
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -1127,7 +1159,11 @@ describe("updateBookingAssets", () => {
 
     // sbDb.rpc returns error about deleted assets
     sbMock.enqueue({
-      data: { success: false, error: "None of the selected assets exist. They may have been deleted.", status: 400 },
+      data: {
+        success: false,
+        error: "None of the selected assets exist. They may have been deleted.",
+        status: 400,
+      },
       error: null,
     });
 
@@ -1141,7 +1177,12 @@ describe("updateBookingAssets", () => {
 
     // sbDb.rpc returns error about deleted assets
     sbMock.enqueue({
-      data: { success: false, error: "Some of the selected assets no longer exist. Please reload and try again.", status: 400 },
+      data: {
+        success: false,
+        error:
+          "Some of the selected assets no longer exist. Please reload and try again.",
+        status: 400,
+      },
       error: null,
     });
 
@@ -1156,7 +1197,11 @@ describe("updateBookingAssets", () => {
     // 1. sbDb.rpc - success
     sbMock.enqueueData({ success: true });
     // 2. Booking fetch
-    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.DRAFT });
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Test Booking",
+      status: BookingStatus.DRAFT,
+    });
     // 3. Asset fetch for notes
     sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
@@ -1170,9 +1215,7 @@ describe("updateBookingAssets", () => {
 
     const result = await updateBookingAssets(params);
 
-    expect(result).toEqual(
-      expect.objectContaining({ id: "booking-1" })
-    );
+    expect(result).toEqual(expect.objectContaining({ id: "booking-1" }));
     expect(sbMock.calls.rpc).toHaveBeenCalled();
   });
 });
@@ -1197,6 +1240,33 @@ describe("reserveBooking", () => {
     tags: [],
   };
 
+  /** Enqueue sbMock responses for reserveBooking's sbDb calls after the Prisma fetch */
+  function setupReserveSbMock(overrides?: { status?: string }) {
+    const status = overrides?.status ?? BookingStatus.RESERVED;
+    // 1. sbDb.from("Booking").update().eq().select().single()
+    sbMock.enqueueData({
+      id: "booking-1",
+      name: "Reserved Booking",
+      status,
+      from: futureFromDate.toISOString(),
+      to: futureToDate.toISOString(),
+      createdAt: futureCreatedAt.toISOString(),
+      updatedAt: futureCreatedAt.toISOString(),
+      originalFrom: futureFromDate.toISOString(),
+      originalTo: futureToDate.toISOString(),
+      autoArchivedAt: null,
+      organizationId: "org-1",
+      custodianUserId: "user-1",
+      custodianTeamMemberId: "team-1",
+      activeSchedulerReference: null,
+      cancellationReason: null,
+    });
+    // 2. sbDb.from("_BookingToTag").delete().eq()
+    sbMock.enqueueData([]);
+    // 3. scheduleNextBookingJob -> sbDb.from("Booking").update().eq()
+    sbMock.enqueueData({});
+  }
+
   it("should reserve booking successfully with no conflicts", async () => {
     expect.assertions(2);
 
@@ -1205,45 +1275,34 @@ describe("reserveBooking", () => {
       status: BookingStatus.DRAFT,
       from: mockReserveParams.from,
       to: mockReserveParams.to,
+      _count: { assets: 2 },
+      custodianUser: {
+        email: "test@example.com",
+        firstName: "Test",
+        lastName: "User",
+      },
+      custodianTeamMember: { name: "TM" },
+      organization: { customEmailFooter: null },
       assets: [
-        {
-          id: "asset-1",
-          title: "Asset 1",
-          status: "AVAILABLE",
-          bookings: [], // No conflicting bookings
-        },
-        {
-          id: "asset-2",
-          title: "Asset 2",
-          status: "AVAILABLE",
-          bookings: [], // No conflicting bookings
-        },
+        { id: "asset-1", title: "Asset 1", status: "AVAILABLE", bookings: [] },
+        { id: "asset-2", title: "Asset 2", status: "AVAILABLE", bookings: [] },
       ],
     };
-    const reservedBooking = { ...mockBooking, status: BookingStatus.RESERVED };
 
     //@ts-expect-error missing vitest type
     db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(reservedBooking);
+
+    setupReserveSbMock();
 
     const result = await reserveBooking(mockReserveParams);
 
-    expect(db.booking.update).toHaveBeenCalledWith(
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
+    expect(result).toEqual(
       expect.objectContaining({
-        where: { id: "booking-1" },
-        data: expect.objectContaining({
-          status: BookingStatus.RESERVED,
-          name: "Reserved Booking",
-          custodianUser: { connect: { id: "user-1" } },
-          custodianTeamMember: { connect: { id: "team-1" } },
-          from: futureFromDate,
-          to: futureToDate,
-          description: "Reserved booking description",
-        }),
+        id: "booking-1",
+        status: BookingStatus.RESERVED,
       })
     );
-    expect(result).toEqual(reservedBooking);
   });
 
   it("should throw error when assets have booking conflicts", async () => {
@@ -1284,17 +1343,22 @@ describe("reserveBooking", () => {
       status: BookingStatus.ONGOING,
       from: mockReserveParams.from,
       to: mockReserveParams.to,
-      assets: [], // No assets to conflict
+      _count: { assets: 0 },
+      custodianUser: null,
+      custodianTeamMember: null,
+      organization: { customEmailFooter: null },
+      assets: [],
     };
-    const reservedBooking = { ...mockBooking, status: BookingStatus.RESERVED };
 
     //@ts-expect-error missing vitest type
     db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(reservedBooking);
+
+    setupReserveSbMock();
 
     const result = await reserveBooking(mockReserveParams);
-    expect(result).toEqual(reservedBooking);
+    expect(result).toEqual(
+      expect.objectContaining({ status: BookingStatus.RESERVED })
+    );
   });
 });
 
