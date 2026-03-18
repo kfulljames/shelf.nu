@@ -5,6 +5,7 @@ import {
   OrganizationRoles,
 } from "@prisma/client";
 
+import { createSupabaseMock } from "@mocks/supabase";
 import { db } from "~/database/db.server";
 import * as noteService from "~/modules/note/service.server";
 import { ShelfError } from "~/utils/error";
@@ -37,6 +38,8 @@ import {
   getActionTextFromTransition,
   getSystemActionText,
 } from "./service.server";
+
+const sbMock = createSupabaseMock();
 
 // @vitest-environment node
 // 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files

@@ -55,6 +55,7 @@ export function createSupabaseMock() {
     maybeSingle: vi.fn(),
     rpc: vi.fn(),
     columns: vi.fn(),
+    ilike: vi.fn(),
   };
 
   const buildChain = (): any => {
@@ -83,6 +84,7 @@ export function createSupabaseMock() {
       "limit",
       "range",
       "columns",
+      "ilike",
     ];
 
     for (const method of chainMethods) {

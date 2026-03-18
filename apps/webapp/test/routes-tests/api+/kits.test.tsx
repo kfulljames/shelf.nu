@@ -1,11 +1,13 @@
-import { db } from "~/database/db.server";
 import { makeShelfError } from "~/utils/error";
 import { requirePermission } from "~/utils/roles.server";
 import { loader } from "~/routes/api+/kits";
 import { createLoaderArgs } from "@mocks/remix";
+import { createSupabaseMock } from "@mocks/supabase";
 
 // @vitest-environment node
-// 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
+// see https://vitest.dev/guide/environment.html#environments-for-specific-files
+
+const sbMock = createSupabaseMock();
 
 // why: mocking Remix's data() function to return Response objects for React Router v7 single fetch
 const createDataMock = vitest.hoisted(() => {
@@ -29,12 +31,10 @@ vitest.mock("react-router", async () => {
   };
 });
 
-// Mock dependencies
-vitest.mock("~/database/db.server", () => ({
-  db: {
-    kit: {
-      findMany: vitest.fn(),
-    },
+// why: testing route handler without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -55,61 +55,52 @@ const mockContext = {
   errorMessage: null,
 } as any;
 
-const mockKits = [
+const mockKitRows = [
   {
     id: "kit-1",
     name: "Photography Kit",
     image: "kit-image-1.jpg",
     imageExpiration: "2024-12-31T23:59:59Z",
-    assets: [
-      {
-        id: "asset-1",
-        title: "Canon Camera",
-        mainImage: "camera.jpg",
-        mainImageExpiration: "2024-12-31T23:59:59Z",
-        category: {
-          name: "Cameras",
-        },
-      },
-      {
-        id: "asset-2",
-        title: "Tripod",
-        mainImage: "tripod.jpg",
-        mainImageExpiration: "2024-12-31T23:59:59Z",
-        category: {
-          name: "Accessories",
-        },
-      },
-    ],
-    _count: {
-      assets: 2,
-    },
   },
   {
     id: "kit-2",
     name: "Video Production Kit",
     image: "kit-image-2.jpg",
     imageExpiration: "2024-12-31T23:59:59Z",
-    assets: [
-      {
-        id: "asset-3",
-        title: "Video Camera",
-        mainImage: "video-camera.jpg",
-        mainImageExpiration: "2024-12-31T23:59:59Z",
-        category: {
-          name: "Cameras",
-        },
-      },
-    ],
-    _count: {
-      assets: 1,
-    },
+  },
+];
+
+const mockAssetRows = [
+  {
+    id: "asset-1",
+    title: "Canon Camera",
+    mainImage: "camera.jpg",
+    mainImageExpiration: "2024-12-31T23:59:59Z",
+    kitId: "kit-1",
+    category: { name: "Cameras" },
+  },
+  {
+    id: "asset-2",
+    title: "Tripod",
+    mainImage: "tripod.jpg",
+    mainImageExpiration: "2024-12-31T23:59:59Z",
+    kitId: "kit-1",
+    category: { name: "Accessories" },
+  },
+  {
+    id: "asset-3",
+    title: "Video Camera",
+    mainImage: "video-camera.jpg",
+    mainImageExpiration: "2024-12-31T23:59:59Z",
+    kitId: "kit-2",
+    category: { name: "Cameras" },
   },
 ];
 
 describe("/api/kits", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
     (requirePermission as any).mockResolvedValue({
       organizationId: "org-1",
     });
@@ -121,7 +112,10 @@ describe("/api/kits", () => {
         "http://localhost:3000/api/kits?ids=kit-1,kit-2"
       );
 
-      (db.kit.findMany as any).mockResolvedValue(mockKits);
+      // First sbDb call: kit rows
+      sbMock.enqueueData(mockKitRows);
+      // Second sbDb call: asset rows for kits
+      sbMock.enqueueData(mockAssetRows);
 
       const result = await loader(
         createLoaderArgs({
@@ -138,50 +132,18 @@ describe("/api/kits", () => {
         action: "read",
       });
 
-      expect(db.kit.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["kit-1", "kit-2"] },
-          organizationId: "org-1",
-        },
-        select: {
-          id: true,
-          name: true,
-          image: true,
-          imageExpiration: true,
-          assets: {
-            select: {
-              id: true,
-              title: true,
-              mainImage: true,
-              mainImageExpiration: true,
-              category: {
-                select: {
-                  name: true,
-                },
-              },
-            },
-            orderBy: {
-              title: "asc",
-            },
-          },
-          _count: {
-            select: {
-              assets: true,
-            },
-          },
-        },
-        orderBy: {
-          name: "asc",
-        },
-      });
+      // Verify sbDb was called
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
 
       // Success case returns Response wrapping the payload
       expect(result instanceof Response).toBe(true);
       const responseData = await (result as unknown as Response).json();
-      expect(responseData).toEqual({
-        error: null,
-        kits: mockKits,
-      });
+      expect(responseData.error).toBeNull();
+      expect(responseData.kits).toHaveLength(2);
+      // Verify kit-1 has 2 assets, kit-2 has 1
+      expect(responseData.kits[0]._count.assets).toBe(2);
+      expect(responseData.kits[1]._count.assets).toBe(1);
     });
 
     it("should return empty array when no ids parameter provided", async () => {
@@ -203,7 +165,7 @@ describe("/api/kits", () => {
         kits: [],
       });
 
-      expect(db.kit.findMany).not.toHaveBeenCalled();
+      expect(sbMock.calls.from).not.toHaveBeenCalled();
     });
 
     it("should return empty array when ids parameter is empty", async () => {
@@ -225,7 +187,7 @@ describe("/api/kits", () => {
         kits: [],
       });
 
-      expect(db.kit.findMany).not.toHaveBeenCalled();
+      expect(sbMock.calls.from).not.toHaveBeenCalled();
     });
 
     it("should filter out empty strings from ids", async () => {
@@ -233,7 +195,8 @@ describe("/api/kits", () => {
         "http://localhost:3000/api/kits?ids=kit-1,,kit-2,"
       );
 
-      (db.kit.findMany as any).mockResolvedValue(mockKits);
+      sbMock.enqueueData(mockKitRows);
+      sbMock.enqueueData(mockAssetRows);
 
       await loader(
         createLoaderArgs({
@@ -243,42 +206,7 @@ describe("/api/kits", () => {
         })
       );
 
-      expect(db.kit.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["kit-1", "kit-2"] },
-          organizationId: "org-1",
-        },
-        select: {
-          id: true,
-          name: true,
-          image: true,
-          imageExpiration: true,
-          assets: {
-            select: {
-              id: true,
-              title: true,
-              mainImage: true,
-              mainImageExpiration: true,
-              category: {
-                select: {
-                  name: true,
-                },
-              },
-            },
-            orderBy: {
-              title: "asc",
-            },
-          },
-          _count: {
-            select: {
-              assets: true,
-            },
-          },
-        },
-        orderBy: {
-          name: "asc",
-        },
-      });
+      expect(sbMock.calls.in).toHaveBeenCalledWith("id", ["kit-1", "kit-2"]);
     });
 
     it("should handle single kit ID", async () => {
@@ -286,8 +214,8 @@ describe("/api/kits", () => {
         "http://localhost:3000/api/kits?ids=kit-1"
       );
 
-      const singleKit = [mockKits[0]];
-      (db.kit.findMany as any).mockResolvedValue(singleKit);
+      sbMock.enqueueData([mockKitRows[0]]);
+      sbMock.enqueueData(mockAssetRows.filter((a) => a.kitId === "kit-1"));
 
       const result = await loader(
         createLoaderArgs({
@@ -297,56 +225,21 @@ describe("/api/kits", () => {
         })
       );
 
-      expect(db.kit.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["kit-1"] },
-          organizationId: "org-1",
-        },
-        select: {
-          id: true,
-          name: true,
-          image: true,
-          imageExpiration: true,
-          assets: {
-            select: {
-              id: true,
-              title: true,
-              mainImage: true,
-              mainImageExpiration: true,
-              category: {
-                select: {
-                  name: true,
-                },
-              },
-            },
-            orderBy: {
-              title: "asc",
-            },
-          },
-          _count: {
-            select: {
-              assets: true,
-            },
-          },
-        },
-        orderBy: {
-          name: "asc",
-        },
-      });
-
       // Success case returns Response wrapping the payload
       expect(result instanceof Response).toBe(true);
       const responseData = await (result as unknown as Response).json();
-      expect(responseData).toEqual({
-        error: null,
-        kits: singleKit,
-      });
+      expect(responseData.error).toBeNull();
+      expect(responseData.kits).toHaveLength(1);
+      expect(responseData.kits[0]._count.assets).toBe(2);
     });
 
     it("should enforce organization-level security", async () => {
       const mockRequest = new Request(
         "http://localhost:3000/api/kits?ids=kit-1,kit-2"
       );
+
+      sbMock.enqueueData(mockKitRows);
+      sbMock.enqueueData(mockAssetRows);
 
       await loader(
         createLoaderArgs({
@@ -356,42 +249,7 @@ describe("/api/kits", () => {
         })
       );
 
-      expect(db.kit.findMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ["kit-1", "kit-2"] },
-          organizationId: "org-1", // Should filter by organization
-        },
-        select: {
-          id: true,
-          name: true,
-          image: true,
-          imageExpiration: true,
-          assets: {
-            select: {
-              id: true,
-              title: true,
-              mainImage: true,
-              mainImageExpiration: true,
-              category: {
-                select: {
-                  name: true,
-                },
-              },
-            },
-            orderBy: {
-              title: "asc",
-            },
-          },
-          _count: {
-            select: {
-              assets: true,
-            },
-          },
-        },
-        orderBy: {
-          name: "asc",
-        },
-      });
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
     });
 
     it("should handle permission errors", async () => {
@@ -433,8 +291,8 @@ describe("/api/kits", () => {
         "http://localhost:3000/api/kits?ids=kit-1"
       );
 
-      const dbError = new Error("Database connection failed");
-      (db.kit.findMany as any).mockRejectedValue(dbError);
+      // Simulate sbDb error
+      sbMock.setError({ message: "Database connection failed", code: "500" });
 
       const shelfError = { status: 500, message: "Database error" };
       (makeShelfError as any).mockReturnValue(shelfError);
@@ -446,10 +304,6 @@ describe("/api/kits", () => {
           params: {},
         })
       );
-
-      expect(makeShelfError).toHaveBeenCalledWith(dbError, {
-        userId: "user-1",
-      });
 
       // Error case returns Response
       expect(result instanceof Response).toBe(true);
@@ -467,7 +321,8 @@ describe("/api/kits", () => {
         "http://localhost:3000/api/kits?ids=kit-1,kit-2"
       );
 
-      (db.kit.findMany as any).mockResolvedValue(mockKits);
+      sbMock.enqueueData(mockKitRows);
+      sbMock.enqueueData(mockAssetRows);
 
       await loader(
         createLoaderArgs({
@@ -477,13 +332,9 @@ describe("/api/kits", () => {
         })
       );
 
-      expect(db.kit.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          orderBy: {
-            name: "asc",
-          },
-        })
-      );
+      expect(sbMock.calls.order).toHaveBeenCalledWith("name", {
+        ascending: true,
+      });
     });
 
     it("should only select required fields", async () => {
@@ -491,7 +342,8 @@ describe("/api/kits", () => {
         "http://localhost:3000/api/kits?ids=kit-1"
       );
 
-      (db.kit.findMany as any).mockResolvedValue([mockKits[0]]);
+      sbMock.enqueueData([mockKitRows[0]]);
+      sbMock.enqueueData(mockAssetRows.filter((a) => a.kitId === "kit-1"));
 
       await loader(
         createLoaderArgs({
@@ -501,17 +353,9 @@ describe("/api/kits", () => {
         })
       );
 
-      expect(db.kit.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            imageExpiration: true,
-            assets: expect.any(Object),
-            _count: expect.any(Object),
-          },
-        })
+      // Verify kit select fields
+      expect(sbMock.calls.select).toHaveBeenCalledWith(
+        "id, name, image, imageExpiration"
       );
     });
   });

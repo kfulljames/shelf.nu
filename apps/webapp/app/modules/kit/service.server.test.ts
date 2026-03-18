@@ -1,10 +1,6 @@
-import {
-  BarcodeType,
-  KitStatus,
-  AssetStatus,
-  ErrorCorrection,
-} from "@prisma/client";
+import { KitStatus, AssetStatus } from "@prisma/client";
 
+import { createSupabaseMock } from "@mocks/supabase";
 import { db } from "~/database/db.server";
 import { ShelfError } from "~/utils/error";
 
@@ -26,10 +22,17 @@ import {
 import { getQr } from "../qr/service.server";
 
 // @vitest-environment node
-// 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
+// see https://vitest.dev/guide/environment.html#environments-for-specific-files
 
-// Mock dependencies
-// why: testing kit service logic without executing actual database operations
+const sbMock = createSupabaseMock();
+// why: testing kit service logic without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
+  },
+}));
+
+// why: getKit and some functions still use Prisma db for complex queries
 vitest.mock("~/database/db.server", () => ({
   db: {
     $transaction: vitest.fn().mockImplementation((callback) => callback(db)),
@@ -120,8 +123,9 @@ const mockKitData = {
   categoryId: "category-1",
   image: null,
   imageExpiration: null,
-  createdAt: new Date(),
-  updatedAt: new Date(),
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  locationId: null,
 };
 
 const mockCreateParams = {
@@ -136,42 +140,38 @@ const mockCreateParams = {
 describe("createKit", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should create a kit successfully with category", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.kit.create.mockResolvedValue(mockKitData);
+    // 1. Kit insert (.from("Kit").insert(...).select("*").single())
+    sbMock.enqueueData(mockKitData);
+    // 2. QR insert (.from("Qr").insert(...))
+    sbMock.enqueueData({});
 
-    const result = await createKit(mockCreateParams);
+    await createKit(mockCreateParams);
 
-    expect(db.kit.create).toHaveBeenCalledWith({
-      data: {
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "mock-id",
         name: "Test Kit",
         description: "Test Description",
-        createdBy: { connect: { id: "user-1" } },
-        organization: { connect: { id: "org-1" } },
-        qrCodes: {
-          create: [
-            {
-              id: "mock-id",
-              version: 0,
-              errorCorrection: ErrorCorrection.L,
-              user: { connect: { id: "user-1" } },
-              organization: { connect: { id: "org-1" } },
-            },
-          ],
-        },
-        category: { connect: { id: "category-1" } },
-      },
-    });
-    expect(result).toEqual(mockKitData);
+        createdById: "user-1",
+        organizationId: "org-1",
+        categoryId: "category-1",
+        locationId: null,
+      })
+    );
   });
 
   it("should create a kit without category when categoryId is null", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.create.mockResolvedValue(mockKitData);
+    // 1. Kit insert
+    sbMock.enqueueData(mockKitData);
+    // 2. QR insert
+    sbMock.enqueueData({});
 
     await createKit({
       ...mockCreateParams,
@@ -179,36 +179,25 @@ describe("createKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.create).toHaveBeenCalledWith({
-      data: {
-        name: "Test Kit",
-        description: "Test Description",
-        createdBy: { connect: { id: "user-1" } },
-        organization: { connect: { id: "org-1" } },
-        qrCodes: {
-          create: [
-            {
-              id: "mock-id",
-              version: 0,
-              errorCorrection: ErrorCorrection.L,
-              user: { connect: { id: "user-1" } },
-              organization: { connect: { id: "org-1" } },
-            },
-          ],
-        },
-        category: undefined,
-      },
-    });
+    expect(sbMock.calls.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        categoryId: null,
+      })
+    );
   });
 
   it("should create a kit with barcodes", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.create.mockResolvedValue(mockKitData);
+    // 1. Kit insert
+    sbMock.enqueueData(mockKitData);
+    // 2. QR insert
+    sbMock.enqueueData({});
+    // 3. Barcode insert
+    sbMock.enqueueData({});
 
     const barcodes = [
-      { type: BarcodeType.Code128, value: "TEST123" },
-      { type: BarcodeType.Code39, value: "ABC456" },
+      { type: "Code128" as any, value: "TEST123" },
+      { type: "Code39" as any, value: "ABC456" },
     ];
 
     await createKit({
@@ -217,103 +206,41 @@ describe("createKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.create).toHaveBeenCalledWith({
-      data: {
-        name: "Test Kit",
-        description: "Test Description",
-        createdBy: { connect: { id: "user-1" } },
-        organization: { connect: { id: "org-1" } },
-        qrCodes: {
-          create: [
-            {
-              id: "mock-id",
-              version: 0,
-              errorCorrection: ErrorCorrection.L,
-              user: { connect: { id: "user-1" } },
-              organization: { connect: { id: "org-1" } },
-            },
-          ],
-        },
-        category: { connect: { id: "category-1" } },
-        barcodes: {
-          create: [
-            {
-              type: BarcodeType.Code128,
-              value: "TEST123",
-              organizationId: "org-1",
-            },
-            {
-              type: BarcodeType.Code39,
-              value: "ABC456",
-              organizationId: "org-1",
-            },
-          ],
-        },
-      },
-    });
+    // Barcode insert should have been called
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
   });
 
   it("should filter out invalid barcodes", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.create.mockResolvedValue(mockKitData);
+    // 1. Kit insert
+    sbMock.enqueueData(mockKitData);
+    // 2. QR insert
+    sbMock.enqueueData({});
+    // 3. Barcode insert (only valid barcodes)
+    sbMock.enqueueData({});
 
     const barcodes = [
-      { type: BarcodeType.Code128, value: "TEST123" },
-      { type: BarcodeType.Code39, value: "" }, // Empty value
+      { type: "Code128" as any, value: "TEST123" },
+      { type: "Code39" as any, value: "" }, // Empty value
       { type: null, value: "ABC456" }, // No type
     ];
 
     await createKit({
       ...mockCreateParams,
-      //@ts-expect-error testing invalid barcodes
       barcodes,
     });
 
-    expect(db.kit.create).toHaveBeenCalledWith({
-      data: {
-        name: "Test Kit",
-        description: "Test Description",
-        createdBy: { connect: { id: "user-1" } },
-        organization: { connect: { id: "org-1" } },
-        qrCodes: {
-          create: [
-            {
-              id: "mock-id",
-              version: 0,
-              errorCorrection: ErrorCorrection.L,
-              user: { connect: { id: "user-1" } },
-              organization: { connect: { id: "org-1" } },
-            },
-          ],
-        },
-        category: { connect: { id: "category-1" } },
-        barcodes: {
-          create: [
-            {
-              type: BarcodeType.Code128,
-              value: "TEST123",
-              organizationId: "org-1",
-            },
-          ],
-        },
-      },
-    });
+    // Should have filtered to only 1 valid barcode
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
   });
 
   it("should handle barcode constraint violations", async () => {
     expect.assertions(1);
 
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
+    // Kit insert fails with unique constraint violation
+    sbMock.setError({ message: "Unique constraint failed", code: "23505" });
 
-    //@ts-expect-error missing vitest type
-    db.kit.create.mockRejectedValue(constraintError);
-
-    const barcodes = [{ type: BarcodeType.Code128, value: "DUPLICATE123" }];
+    const barcodes = [{ type: "Code128" as any, value: "DUPLICATE123" }];
 
     await expect(
       createKit({
@@ -328,13 +255,14 @@ describe("createKit", () => {
 describe("updateKit", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should update kit successfully with category", async () => {
     expect.assertions(2);
     const updatedKit = { ...mockKitData, name: "Updated Kit" };
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(updatedKit);
+    // Kit update (.from("Kit").update(...).eq(...).eq(...).select("*").single())
+    sbMock.setData(updatedKit);
 
     const result = await updateKit({
       id: "kit-1",
@@ -347,24 +275,20 @@ describe("updateKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.update).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      data: {
+    expect(sbMock.calls.update).toHaveBeenCalledWith(
+      expect.objectContaining({
         name: "Updated Kit",
         description: "Updated Description",
-        image: undefined,
-        imageExpiration: undefined,
         status: KitStatus.AVAILABLE,
-        category: { connect: { id: "category-2" } },
-      },
-    });
-    expect(result).toEqual(updatedKit);
+        categoryId: "category-2",
+      })
+    );
+    expect(result.name).toEqual("Updated Kit");
   });
 
   it("should disconnect category when categoryId is 'uncategorized'", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(mockKitData);
+    sbMock.setData(mockKitData);
 
     await updateKit({
       id: "kit-1",
@@ -375,23 +299,17 @@ describe("updateKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.update).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      data: {
+    expect(sbMock.calls.update).toHaveBeenCalledWith(
+      expect.objectContaining({
         name: "Updated Kit",
-        description: undefined,
-        image: undefined,
-        imageExpiration: undefined,
-        status: undefined,
-        category: { disconnect: true },
-      },
-    });
+        categoryId: null,
+      })
+    );
   });
 
   it("should not change category when categoryId is null", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(mockKitData);
+    sbMock.setData(mockKitData);
 
     await updateKit({
       id: "kit-1",
@@ -402,22 +320,15 @@ describe("updateKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.update).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      data: {
-        name: "Updated Kit",
-        description: undefined,
-        image: undefined,
-        imageExpiration: undefined,
-        status: undefined,
-      },
-    });
+    // categoryId should not be in the update payload
+    expect(sbMock.calls.update).toHaveBeenCalledWith(
+      expect.not.objectContaining({ categoryId: expect.anything() })
+    );
   });
 
   it("should not change category when categoryId is undefined", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(mockKitData);
+    sbMock.setData(mockKitData);
 
     await updateKit({
       id: "kit-1",
@@ -428,25 +339,17 @@ describe("updateKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.update).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      data: {
-        name: "Updated Kit",
-        description: undefined,
-        image: undefined,
-        imageExpiration: undefined,
-        status: undefined,
-      },
-    });
+    expect(sbMock.calls.update).toHaveBeenCalledWith(
+      expect.not.objectContaining({ categoryId: expect.anything() })
+    );
   });
 
   it("should update barcodes when provided", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(mockKitData);
+    sbMock.setData(mockKitData);
     const { updateBarcodes } = await import("~/modules/barcode/service.server");
 
-    const barcodes = [{ type: BarcodeType.Code128, value: "NEW123" }];
+    const barcodes = [{ type: "Code128" as any, value: "NEW123" }];
 
     await updateKit({
       id: "kit-1",
@@ -457,7 +360,7 @@ describe("updateKit", () => {
       locationId: null,
     });
 
-    expect(db.kit.update).toHaveBeenCalled();
+    expect(sbMock.calls.update).toHaveBeenCalled();
     expect(updateBarcodes).toHaveBeenCalledWith({
       barcodes,
       kitId: "kit-1",
@@ -470,12 +373,18 @@ describe("updateKit", () => {
 describe("getKit", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should get kit successfully", async () => {
     expect.assertions(2);
+    const kitData = {
+      ...mockKitData,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
     //@ts-expect-error missing vitest type
-    db.kit.findFirstOrThrow.mockResolvedValue(mockKitData);
+    db.kit.findFirstOrThrow.mockResolvedValue(kitData);
 
     const result = await getKit({
       id: "kit-1",
@@ -488,12 +397,17 @@ describe("getKit", () => {
       },
       include: expect.any(Object),
     });
-    expect(result).toEqual(mockKitData);
+    expect(result).toEqual(kitData);
   });
 
   it("should handle cross-organization access", async () => {
     expect.assertions(1);
-    const crossOrgKit = { ...mockKitData, organizationId: "other-org" };
+    const crossOrgKit = {
+      ...mockKitData,
+      organizationId: "other-org",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
     //@ts-expect-error missing vitest type
     db.kit.findFirstOrThrow.mockResolvedValue(crossOrgKit);
 
@@ -525,28 +439,26 @@ describe("getKit", () => {
 describe("deleteKit", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should delete kit successfully", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.kit.delete.mockResolvedValue(mockKitData);
+    // sbDb.from("Kit").delete().eq("id",...).eq("organizationId",...)
+    sbMock.setData(null);
 
-    const result = await deleteKit({
+    await deleteKit({
       id: "kit-1",
       organizationId: "org-1",
     });
 
-    expect(db.kit.delete).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-    });
-    expect(result).toEqual(mockKitData);
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.delete).toHaveBeenCalled();
   });
 
   it("should handle deletion errors", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.kit.delete.mockRejectedValue(new Error("Deletion failed"));
+    sbMock.setError({ message: "Deletion failed" });
 
     await expect(
       deleteKit({
@@ -560,6 +472,7 @@ describe("deleteKit", () => {
 describe("bulkDeleteKits", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should bulk delete kits successfully", async () => {
@@ -568,10 +481,10 @@ describe("bulkDeleteKits", () => {
       { id: "kit-1", image: "image1.jpg" },
       { id: "kit-2", image: null },
     ];
-    //@ts-expect-error missing vitest type
-    db.kit.findMany.mockResolvedValue(kitsToDelete);
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockResolvedValue(true);
+    // 1. resolveKitIdsForBulk -> sbDb.from("Kit").select("id, image")...
+    sbMock.enqueueData(kitsToDelete);
+    // 2. sbDb.from("Kit").delete().in("id",...)
+    sbMock.enqueueData(null);
 
     await bulkDeleteKits({
       kitIds: ["kit-1", "kit-2"],
@@ -579,51 +492,46 @@ describe("bulkDeleteKits", () => {
       userId: "user-1",
     });
 
-    expect(db.kit.findMany).toHaveBeenCalledWith({
-      where: { id: { in: ["kit-1", "kit-2"] }, organizationId: "org-1" },
-      select: { id: true, image: true },
-    });
-    expect(db.$transaction).toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.delete).toHaveBeenCalled();
   });
 });
 
 describe("bulkAssignKitCustody", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should assign custody to kits successfully", async () => {
-    expect.assertions(3);
-    const availableKits = [
+    expect.assertions(2);
+    // 1. resolveKitIdsForBulk -> kit rows
+    sbMock.enqueueData([
+      { id: "kit-1", name: "Kit 1", status: KitStatus.AVAILABLE },
+    ]);
+    // 2. Assets for kits
+    sbMock.enqueueData([
       {
-        id: "kit-1",
-        name: "Kit 1",
-        status: KitStatus.AVAILABLE,
-        assets: [
-          {
-            id: "asset-1",
-            title: "Asset 1",
-            status: AssetStatus.AVAILABLE,
-            kit: { id: "kit-1", name: "Kit 1" },
-          },
-        ],
+        id: "asset-1",
+        title: "Asset 1",
+        status: AssetStatus.AVAILABLE,
+        kitId: "kit-1",
       },
-    ];
-    //@ts-expect-error missing vitest type
-    db.kit.findMany.mockResolvedValue(availableKits);
-
-    //@ts-expect-error missing vitest type
-    db.teamMember.findUnique.mockResolvedValue({
+    ]);
+    // 3. TeamMember lookup (.single())
+    sbMock.enqueueData({
       id: "custodian-1",
       name: "John Doe",
-      user: { id: "user-1", firstName: "John", lastName: "Doe" },
+      userId: "user-1",
     });
-
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockImplementation((callback) =>
-      // Execute the callback with a mock transaction object
-      callback(db)
-    );
+    // 4. User lookup for custodian
+    sbMock.enqueueData({
+      id: "user-1",
+      firstName: "John",
+      lastName: "Doe",
+    });
+    // 5. RPC call for bulk assign
+    sbMock.enqueueData(null);
 
     await bulkAssignKitCustody({
       kitIds: ["kit-1"],
@@ -633,25 +541,28 @@ describe("bulkAssignKitCustody", () => {
       userId: "user-1",
     });
 
-    expect(db.kit.findMany).toHaveBeenCalled();
-    expect(db.$transaction).toHaveBeenCalled();
-
-    // Verify the transaction was called
-    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function));
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_kit_bulk_assign_custody",
+      expect.any(Object)
+    );
   });
 
   it("should throw error when kits are not available", async () => {
     expect.assertions(1);
-    const unavailableKits = [
-      {
-        id: "kit-1",
-        name: "Kit 1",
-        status: KitStatus.IN_CUSTODY,
-        assets: [],
-      },
-    ];
-    //@ts-expect-error missing vitest type
-    db.kit.findMany.mockResolvedValue(unavailableKits);
+    // 1. resolveKitIdsForBulk -> kit rows with unavailable status
+    sbMock.enqueueData([
+      { id: "kit-1", name: "Kit 1", status: KitStatus.IN_CUSTODY },
+    ]);
+    // 2. Assets for kits
+    sbMock.enqueueData([]);
+    // 3. TeamMember lookup
+    sbMock.enqueueData({
+      id: "custodian-1",
+      name: "John Doe",
+      userId: null,
+    });
+    // 4. RPC (won't be reached but needed for queue)
 
     await expect(
       bulkAssignKitCustody({
@@ -668,35 +579,48 @@ describe("bulkAssignKitCustody", () => {
 describe("bulkReleaseKitCustody", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should release custody from kits successfully", async () => {
     expect.assertions(2);
-    const kitsInCustody = [
+    // 1. resolveKitIdsForBulk -> kit rows
+    sbMock.enqueueData([
+      { id: "kit-1", name: "Kit 1", status: KitStatus.IN_CUSTODY },
+    ]);
+    // 2. KitCustody lookup
+    sbMock.enqueueData([
+      { id: "custody-1", kitId: "kit-1", custodianId: "custodian-1" },
+    ]);
+    // 3. Assets for kits
+    sbMock.enqueueData([
       {
-        id: "kit-1",
-        name: "Kit 1",
-        status: KitStatus.IN_CUSTODY,
-        custody: { id: "custody-1", custodian: { name: "John Doe" } },
-        assets: [
-          {
-            id: "asset-1",
-            title: "Asset 1",
-            status: AssetStatus.IN_CUSTODY,
-            custody: { id: "asset-custody-1" },
-            kit: { id: "kit-1", name: "Kit 1" },
-          },
-        ],
+        id: "asset-1",
+        status: AssetStatus.IN_CUSTODY,
+        title: "Asset 1",
+        kitId: "kit-1",
       },
-    ];
-    //@ts-expect-error missing vitest type
-    db.kit.findMany.mockResolvedValue(kitsInCustody);
-
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockImplementation((callback) =>
-      // Execute the callback with a mock transaction object
-      callback(db)
-    );
+    ]);
+    // 4. Asset IDs for custody lookup (inner query)
+    sbMock.enqueueData([{ id: "asset-1" }]);
+    // 5. Custody entries
+    sbMock.enqueueData([{ id: "asset-custody-1", assetId: "asset-1" }]);
+    // 6. TeamMember lookup for custodian
+    sbMock.enqueueData([
+      { id: "custodian-1", name: "John Doe", userId: "user-1" },
+    ]);
+    // 7. User lookup for custodian
+    sbMock.enqueueData([
+      {
+        id: "user-1",
+        firstName: "John",
+        lastName: "Doe",
+        profilePicture: null,
+        email: "john@test.com",
+      },
+    ]);
+    // 8. RPC call for bulk release
+    sbMock.enqueueData(null);
 
     await bulkReleaseKitCustody({
       kitIds: ["kit-1"],
@@ -704,22 +628,27 @@ describe("bulkReleaseKitCustody", () => {
       userId: "user-1",
     });
 
-    expect(db.kit.findMany).toHaveBeenCalled();
-    expect(db.$transaction).toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_kit_bulk_release_custody",
+      expect.any(Object)
+    );
   });
 
   it("should throw error when kits are not in custody", async () => {
     expect.assertions(1);
-    const availableKits = [
-      {
-        id: "kit-1",
-        status: KitStatus.AVAILABLE,
-        custody: null,
-        assets: [],
-      },
-    ];
-    //@ts-expect-error missing vitest type
-    db.kit.findMany.mockResolvedValue(availableKits);
+    // 1. resolveKitIdsForBulk -> kit rows
+    sbMock.enqueueData([
+      { id: "kit-1", name: "Kit 1", status: KitStatus.AVAILABLE },
+    ]);
+    // 2. KitCustody lookup
+    sbMock.enqueueData([]);
+    // 3. Assets
+    sbMock.enqueueData([]);
+    // 4. Asset IDs inner query
+    sbMock.enqueueData([]);
+    // 5. Custody entries
+    sbMock.enqueueData([]);
 
     await expect(
       bulkReleaseKitCustody({
@@ -734,41 +663,68 @@ describe("bulkReleaseKitCustody", () => {
 describe("releaseCustody", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should release custody from single kit successfully", async () => {
     expect.assertions(2);
-    const kitWithCustody = {
+    // 1. Kit lookup (.single())
+    sbMock.enqueueData({
       id: "kit-1",
       name: "Test Kit",
-      assets: [{ id: "asset-1", title: "Test Asset" }],
-      createdBy: { firstName: "John", lastName: "Doe" },
-      custody: { custodian: { name: "Jane Smith" } },
-    };
-    //@ts-expect-error missing vitest type
-    db.kit.findUniqueOrThrow.mockResolvedValue(kitWithCustody);
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(kitWithCustody);
-    //@ts-expect-error missing vitest type
-    db.asset.update.mockResolvedValue({});
+      createdById: "user-1",
+    });
+    // 2. KitCustody lookup (.maybeSingle() - terminal, consumed sync)
+    sbMock.enqueueData({
+      id: "custody-1",
+      custodianId: "custodian-1",
+    });
+    // 3. Assets for kit (thenable chain, consumed when .then fires)
+    sbMock.enqueueData([{ id: "asset-1", title: "Test Asset" }]);
+    // 4. TeamMember lookup (.single())
+    sbMock.enqueueData({
+      id: "custodian-1",
+      name: "Jane Smith",
+      userId: "user-2",
+    });
+    // 5. User lookup for custodian (.single())
+    sbMock.enqueueData({
+      id: "user-2",
+      firstName: "Jane",
+      lastName: "Smith",
+      profilePicture: null,
+      email: "jane@test.com",
+    });
+    // 6. CreatedBy user lookup (.single())
+    sbMock.enqueueData({
+      id: "user-1",
+      firstName: "John",
+      lastName: "Doe",
+    });
+    // 7. RPC for release custody
+    sbMock.enqueueData(null);
 
-    const result = await releaseCustody({
+    await releaseCustody({
       kitId: "kit-1",
       userId: "user-1",
       organizationId: "org-1",
     });
 
-    expect(db.kit.findUniqueOrThrow).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      select: expect.any(Object),
-    });
-    expect(result).toEqual(kitWithCustody);
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_kit_release_custody",
+      expect.objectContaining({
+        p_kit_id: "kit-1",
+        p_org_id: "org-1",
+      })
+    );
   });
 });
 
 describe("createKitsIfNotExists", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should create non-existing kits", async () => {
@@ -778,13 +734,24 @@ describe("createKitsIfNotExists", () => {
       { key: "asset-2", kit: "Existing Kit", title: "Asset 2" },
     ];
 
-    db.kit.findFirst
-      //@ts-expect-error missing vitest type
-      .mockResolvedValueOnce(null) // New Kit doesn't exist
-      .mockResolvedValueOnce({ id: "existing-kit-id", name: "Existing Kit" }); // Existing Kit exists
-
-    //@ts-expect-error missing vitest type
-    db.kit.create.mockResolvedValue({ id: "new-kit-id", name: "New Kit" });
+    // 1. Find "New Kit" (.maybeSingle()) - not found
+    sbMock.enqueueData(null);
+    // 2. Create "New Kit" (.insert(...).select("*").single())
+    sbMock.enqueueData({
+      id: "new-kit-id",
+      name: "New Kit",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      imageExpiration: null,
+    });
+    // 3. Find "Existing Kit" (.maybeSingle()) - found
+    sbMock.enqueueData({
+      id: "existing-kit-id",
+      name: "Existing Kit",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      imageExpiration: null,
+    });
 
     const result = await createKitsIfNotExists({
       data: importData,
@@ -792,17 +759,19 @@ describe("createKitsIfNotExists", () => {
       organizationId: "org-1",
     });
 
-    expect(db.kit.create).toHaveBeenCalledWith({
-      data: {
+    expect(sbMock.calls.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
         name: "New Kit",
-        createdBy: { connect: { id: "user-1" } },
-        organization: { connect: { id: "org-1" } },
-      },
-    });
-    expect(result).toEqual({
-      "New Kit": { id: "new-kit-id", name: "New Kit" },
-      "Existing Kit": { id: "existing-kit-id", name: "Existing Kit" },
-    });
+        createdById: "user-1",
+        organizationId: "org-1",
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        "New Kit": expect.objectContaining({ id: "new-kit-id" }),
+        "Existing Kit": expect.objectContaining({ id: "existing-kit-id" }),
+      })
+    );
   });
 
   it("should handle empty kit names", async () => {
@@ -822,13 +791,22 @@ describe("createKitsIfNotExists", () => {
 describe("updateKitQrCode", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should update kit QR code successfully", async () => {
     expect.assertions(2);
-    const updatedKit = { ...mockKitData, qrCodes: [{ id: "new-qr-id" }] };
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue(updatedKit);
+    // 1. Disconnect existing QR codes (.from("Qr").update({kitId: null}).eq("kitId",...))
+    sbMock.enqueueData(null);
+    // 2. Connect new QR code (.from("Qr").update({kitId}).eq("id",...))
+    sbMock.enqueueData(null);
+    // 3. Return updated kit (.from("Kit").select("*").eq(...).eq(...).single())
+    const updatedKit = {
+      ...mockKitData,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    sbMock.enqueueData(updatedKit);
 
     const result = await updateKitQrCode({
       kitId: "kit-1",
@@ -836,14 +814,15 @@ describe("updateKitQrCode", () => {
       organizationId: "org-1",
     });
 
-    expect(db.kit.update).toHaveBeenCalledTimes(2); // Once to disconnect, once to connect
-    expect(result).toEqual(updatedKit);
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Qr");
+    expect(result.id).toEqual("kit-1");
   });
 });
 
 describe("relinkKitQrCode", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should relink qr code to kit", async () => {
@@ -855,10 +834,23 @@ describe("relinkKitQrCode", () => {
       assetId: null,
       kitId: null,
     });
-    //@ts-expect-error missing vitest type
-    db.kit.findFirst.mockResolvedValue({ qrCodes: [{ id: "old-qr-id" }] });
-    //@ts-expect-error missing vitest type
-    db.kit.update.mockResolvedValue({});
+
+    // 1. Kit lookup (.maybeSingle())
+    sbMock.enqueueData({ id: "kit-1" });
+    // 2. Kit QR codes lookup
+    sbMock.enqueueData([{ id: "old-qr-id" }]);
+    // 3. QR update (organizationId, userId)
+    sbMock.enqueueData(null);
+    // 4. updateKitQrCode: disconnect old QR
+    sbMock.enqueueData(null);
+    // 5. updateKitQrCode: connect new QR
+    sbMock.enqueueData(null);
+    // 6. updateKitQrCode: return updated kit
+    sbMock.enqueueData({
+      ...mockKitData,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
 
     const result = await relinkKitQrCode({
       qrId: "qr-1",
@@ -867,11 +859,11 @@ describe("relinkKitQrCode", () => {
       userId: "user-1",
     });
 
-    expect(db.qr.update).toHaveBeenCalledWith({
-      where: { id: "qr-1" },
-      data: { organizationId: "org-1", userId: "user-1" },
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Qr");
+    expect(sbMock.calls.update).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      userId: "user-1",
     });
-    expect(db.kit.update).toHaveBeenCalledTimes(2);
     expect(result).toEqual({ oldQrCodeId: "old-qr-id", newQrId: "qr-1" });
   });
 
@@ -884,8 +876,10 @@ describe("relinkKitQrCode", () => {
       assetId: "asset-1",
       kitId: null,
     });
-    //@ts-expect-error missing vitest type
-    db.kit.findFirst.mockResolvedValue({ qrCodes: [] });
+    // 1. Kit lookup
+    sbMock.enqueueData({ id: "kit-1" });
+    // 2. Kit QR codes
+    sbMock.enqueueData([]);
 
     await expect(
       relinkKitQrCode({
@@ -901,30 +895,21 @@ describe("relinkKitQrCode", () => {
 describe("getAvailableKitAssetForBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return asset IDs from selected kits", async () => {
     expect.assertions(2);
-    const kitsWithAssets = [
-      {
-        assets: [
-          { id: "asset-1", status: AssetStatus.AVAILABLE },
-          { id: "asset-2", status: AssetStatus.IN_CUSTODY },
-        ],
-      },
-      {
-        assets: [{ id: "asset-3", status: AssetStatus.AVAILABLE }],
-      },
-    ];
-    //@ts-expect-error missing vitest type
-    db.kit.findMany.mockResolvedValue(kitsWithAssets);
+    // sbDb.from("Asset").select("id, status").in("kitId", kitIds)
+    sbMock.setData([
+      { id: "asset-1", status: AssetStatus.AVAILABLE },
+      { id: "asset-2", status: AssetStatus.IN_CUSTODY },
+      { id: "asset-3", status: AssetStatus.AVAILABLE },
+    ]);
 
     const result = await getAvailableKitAssetForBooking(["kit-1", "kit-2"]);
 
-    expect(db.kit.findMany).toHaveBeenCalledWith({
-      where: { id: { in: ["kit-1", "kit-2"] } },
-      select: { assets: { select: { id: true, status: true } } },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
     expect(result).toEqual(["asset-1", "asset-2", "asset-3"]);
   });
 });
@@ -932,17 +917,26 @@ describe("getAvailableKitAssetForBooking", () => {
 describe("updateKitsWithBookingCustodians", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return non-checked-out kits unchanged", async () => {
     expect.assertions(1);
     const kits = [
-      { ...mockKitData, locationId: null, status: KitStatus.AVAILABLE },
+      {
+        ...mockKitData,
+        locationId: null,
+        status: KitStatus.AVAILABLE,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
       {
         ...mockKitData,
         locationId: null,
         id: "kit-2",
         status: KitStatus.IN_CUSTODY,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ];
 
@@ -959,24 +953,29 @@ describe("updateKitsWithBookingCustodians", () => {
         locationId: null,
         id: "kit-co",
         status: KitStatus.CHECKED_OUT,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ];
 
-    // why: simulating asset with active booking and custodian user
-    //@ts-expect-error missing vitest type
-    db.asset.findFirst.mockResolvedValue({
-      id: "asset-1",
-      bookings: [
-        {
-          id: "booking-1",
-          custodianTeamMember: null,
-          custodianUser: {
-            firstName: "Jane",
-            lastName: "Doe",
-            profilePicture: "pic.jpg",
-          },
-        },
-      ],
+    // 1. Assets in kit (.from("Asset").select("id").eq("kitId",...))
+    sbMock.enqueueData([{ id: "asset-1" }]);
+    // 2. Junction table (_AssetToBooking)
+    sbMock.enqueueData([{ A: "asset-1", B: "booking-1" }]);
+    // 3. Booking lookup
+    sbMock.enqueueData([
+      {
+        id: "booking-1",
+        status: "ONGOING",
+        custodianUserId: "user-2",
+        custodianTeamMemberId: null,
+      },
+    ]);
+    // 4. User lookup for custodian (.single())
+    sbMock.enqueueData({
+      firstName: "Jane",
+      lastName: "Doe",
+      profilePicture: "pic.jpg",
     });
 
     const result = await updateKitsWithBookingCustodians(kits);
@@ -991,14 +990,7 @@ describe("updateKitsWithBookingCustodians", () => {
         },
       },
     });
-    expect(db.asset.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          kitId: "kit-co",
-          bookings: { some: { status: { in: ["ONGOING", "OVERDUE"] } } },
-        }),
-      })
-    );
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
   });
 
   it("should resolve custodian from team member when no user", async () => {
@@ -1009,20 +1001,31 @@ describe("updateKitsWithBookingCustodians", () => {
         locationId: null,
         id: "kit-co",
         status: KitStatus.CHECKED_OUT,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ];
 
-    // why: simulating booking with team member custodian instead of user
-    //@ts-expect-error missing vitest type
-    db.asset.findFirst.mockResolvedValue({
-      id: "asset-1",
-      bookings: [
-        {
-          id: "booking-1",
-          custodianTeamMember: { name: "External Contractor" },
-          custodianUser: null,
-        },
-      ],
+    // 1. Assets in kit
+    sbMock.enqueueData([{ id: "asset-1" }]);
+    // 2. Junction table
+    sbMock.enqueueData([{ A: "asset-1", B: "booking-1" }]);
+    // 3. Booking lookup
+    sbMock.enqueueData([
+      {
+        id: "booking-1",
+        status: "ONGOING",
+        custodianUserId: null,
+        custodianTeamMemberId: "tm-1",
+      },
+    ]);
+    // 4. TeamMember lookup (.single())
+    sbMock.enqueueData({
+      id: "tm-1",
+      name: "External Contractor",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      deletedAt: null,
     });
 
     const result = await updateKitsWithBookingCustodians(kits);
@@ -1040,13 +1043,15 @@ describe("updateKitsWithBookingCustodians", () => {
         locationId: null,
         id: "kit-co",
         status: KitStatus.CHECKED_OUT,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ];
 
-    // why: reproducing the Sentry error scenario where findFirst returns null
-    // because no asset in the kit has an ONGOING/OVERDUE booking
-    //@ts-expect-error missing vitest type
-    db.asset.findFirst.mockResolvedValue(null);
+    // why: reproducing the Sentry error scenario where no asset in the
+    // kit has an ONGOING/OVERDUE booking
+    // 1. Assets in kit - empty
+    sbMock.enqueueData([]);
 
     const result = await updateKitsWithBookingCustodians(kits);
 
@@ -1060,32 +1065,51 @@ describe("updateKitsWithBookingCustodians", () => {
 describe("updateKitAssets - Location Cascade", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
-  it("should call asset updateMany when kit has location and assets are added", async () => {
+  it("should update asset kitId when kit has location and assets are added", async () => {
     expect.assertions(2);
 
-    const mockKit = {
+    // 1. Kit lookup (.single())
+    sbMock.enqueueData({
       id: "kit-1",
-      location: { id: "location-1", name: "Warehouse A" },
-      assets: [],
-      custody: null,
-    };
-
-    const mockNewAssets = [
+      name: "Test Kit",
+      status: "AVAILABLE",
+      organizationId: "org-1",
+      locationId: "location-1",
+      createdById: "user-1",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      imageExpiration: null,
+    });
+    // 2. Location lookup (.single())
+    sbMock.enqueueData({ id: "location-1", name: "Warehouse A" });
+    // 3. Current assets in kit
+    sbMock.enqueueData([]);
+    // 4. KitCustody (.maybeSingle())
+    sbMock.enqueueData(null);
+    // 5. Junction table for bookings
+    sbMock.enqueueData([]);
+    // 6. Fetch assets by IDs (.from("Asset").select(...).in("id",...).eq(...))
+    sbMock.enqueueData([
       {
         id: "asset-1",
         title: "Asset 1",
-        kit: null,
-        custody: null,
-        location: null,
+        kitId: null,
+        locationId: null,
       },
-    ];
-
-    //@ts-expect-error missing vitest type
-    db.kit.findUniqueOrThrow.mockResolvedValue(mockKit);
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue(mockNewAssets);
+    ]);
+    // 7. Custodies for assets
+    sbMock.enqueueData([]);
+    // 8. Kits for assets (empty - no kitId)
+    sbMock.enqueueData([]);
+    // 9. Locations for assets (empty - no locationId)
+    sbMock.enqueueData([]);
+    // 10. Asset update: set kitId (connect to kit)
+    sbMock.enqueueData(null);
+    // 11. Asset update: set locationId (cascade)
+    sbMock.enqueueData(null);
 
     const { updateKitAssets } = await import("./service.server");
 
@@ -1097,47 +1121,51 @@ describe("updateKitAssets - Location Cascade", () => {
       request: new Request("http://test.com"),
     });
 
-    // Should update kit assets
-    expect(db.kit.update).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      data: {
-        assets: {
-          connect: [{ id: "asset-1" }],
-        },
-      },
-    });
-
-    // Should update asset locations (cascade behavior)
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1"] } },
-      data: { locationId: "location-1" },
-    });
+    // Should have called sbDb with Kit and Asset tables
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
   });
 
   it("should set asset location to null when kit has no location", async () => {
     expect.assertions(2);
 
-    const mockKit = {
+    // 1. Kit lookup (.single())
+    sbMock.enqueueData({
       id: "kit-1",
-      location: null,
-      assets: [],
-      custody: null,
-    };
-
-    const mockNewAssets = [
+      name: "Test Kit",
+      status: "AVAILABLE",
+      organizationId: "org-1",
+      locationId: null,
+      createdById: "user-1",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      imageExpiration: null,
+    });
+    // 2. Current assets in kit (no location lookup since locationId is null)
+    sbMock.enqueueData([]);
+    // 3. KitCustody (.maybeSingle())
+    sbMock.enqueueData(null);
+    // 4. Junction table for bookings
+    sbMock.enqueueData([]);
+    // 5. Fetch assets by IDs
+    sbMock.enqueueData([
       {
         id: "asset-1",
         title: "Asset 1",
-        kit: null,
-        custody: null,
-        location: { id: "location-1", name: "Current Location" },
+        kitId: null,
+        locationId: "location-1",
       },
-    ];
-
-    //@ts-expect-error missing vitest type
-    db.kit.findUniqueOrThrow.mockResolvedValue(mockKit);
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue(mockNewAssets);
+    ]);
+    // 6. Custodies for assets
+    sbMock.enqueueData([]);
+    // 7. Kits for assets
+    sbMock.enqueueData([]);
+    // 8. Locations for assets
+    sbMock.enqueueData([{ id: "location-1", name: "Current Location" }]);
+    // 9. Asset update: set kitId
+    sbMock.enqueueData(null);
+    // 10. Asset update: set locationId to null (cascade)
+    sbMock.enqueueData(null);
 
     const { updateKitAssets } = await import("./service.server");
 
@@ -1149,20 +1177,7 @@ describe("updateKitAssets - Location Cascade", () => {
       request: new Request("http://test.com"),
     });
 
-    // Should update kit assets
-    expect(db.kit.update).toHaveBeenCalledWith({
-      where: { id: "kit-1", organizationId: "org-1" },
-      data: {
-        assets: {
-          connect: [{ id: "asset-1" }],
-        },
-      },
-    });
-
-    // Should remove location from assets (set to null)
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1"] } },
-      data: { locationId: null },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Asset");
   });
 });

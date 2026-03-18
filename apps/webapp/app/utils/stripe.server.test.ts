@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 
 // why: Stripe SDK makes external API calls that should not run in tests
 // Using vi.hoisted to ensure the mock function is available when vi.mock runs
@@ -25,17 +26,12 @@ vi.mock("stripe", () => ({
   })),
 }));
 
-// why: Database module tries to connect to Prisma during import
-const { mockUserFindUnique } = vi.hoisted(() => ({
-  mockUserFindUnique: vi.fn(),
-}));
+const sbMock = createSupabaseMock();
 
-vi.mock("~/database/db.server", () => ({
-  db: {
-    user: {
-      update: vi.fn(),
-      findUnique: mockUserFindUnique,
-    },
+// why: testing service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -55,6 +51,7 @@ describe("getCustomerNotificationData", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should deduplicate emails when Stripe and user email are the same", async () => {
@@ -192,6 +189,7 @@ describe("getInvoiceNotificationData", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should format amount due correctly", async () => {
@@ -338,15 +336,17 @@ describe("getInvoiceNotificationData", () => {
   });
 });
 
-// ─── getUserActiveSubscriptions ─────────────────────────────
+// --- getUserActiveSubscriptions ---
 
 describe("getUserActiveSubscriptions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return empty array when user has no customerId", async () => {
-    mockUserFindUnique.mockResolvedValue({ customerId: null });
+    // sbDb.from("User").select("customerId").eq("id", ...).single()
+    sbMock.setData({ customerId: null });
 
     const result = await getUserActiveSubscriptions("user_123");
 
@@ -356,7 +356,7 @@ describe("getUserActiveSubscriptions", () => {
   });
 
   it("should filter to only active and trialing subscriptions", async () => {
-    mockUserFindUnique.mockResolvedValue({ customerId: "cus_456" });
+    sbMock.setData({ customerId: "cus_456" });
 
     const activeSub = {
       id: "sub_active",
@@ -397,18 +397,18 @@ describe("getUserActiveSubscriptions", () => {
   });
 });
 
-// ─── getOwnerSubscriptionInfo ───────────────────────────────
+// --- getOwnerSubscriptionInfo ---
 
 describe("getOwnerSubscriptionInfo", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return hasActiveSubscription false when user has no customerId", async () => {
-    mockUserFindUnique.mockResolvedValue({
-      customerId: null,
-      tierId: "free",
-    });
+    // sbDb calls: first for getUserActiveSubscriptions, second for tierId lookup
+    sbMock.enqueueData({ customerId: null });
+    sbMock.enqueueData({ tierId: "free" });
 
     const result = await getOwnerSubscriptionInfo("owner_1", "org_1");
 
@@ -420,10 +420,8 @@ describe("getOwnerSubscriptionInfo", () => {
   });
 
   it("should classify tier subscriptions correctly", async () => {
-    mockUserFindUnique.mockResolvedValue({
-      customerId: "cus_owner",
-      tierId: "tier_2",
-    });
+    // First call: getUserActiveSubscriptions user lookup
+    sbMock.enqueueData({ customerId: "cus_owner" });
 
     const tierSub = {
       id: "sub_tier",
@@ -446,6 +444,9 @@ describe("getOwnerSubscriptionInfo", () => {
     mockSubscriptionsList.mockResolvedValue({ data: [tierSub] });
     mockSubscriptionsRetrieve.mockResolvedValue(tierSub);
 
+    // Second call: tierId lookup
+    sbMock.enqueueData({ tierId: "tier_2" });
+
     const result = await getOwnerSubscriptionInfo("owner_1", "org_1");
 
     expect(result.hasActiveSubscription).toBe(true);
@@ -459,10 +460,7 @@ describe("getOwnerSubscriptionInfo", () => {
   });
 
   it("should classify addon subscriptions and filter by matching organizationId", async () => {
-    mockUserFindUnique.mockResolvedValue({
-      customerId: "cus_owner",
-      tierId: "tier_2",
-    });
+    sbMock.enqueueData({ customerId: "cus_owner" });
 
     const addonSub = {
       id: "sub_addon",
@@ -485,6 +483,8 @@ describe("getOwnerSubscriptionInfo", () => {
     mockSubscriptionsList.mockResolvedValue({ data: [addonSub] });
     mockSubscriptionsRetrieve.mockResolvedValue(addonSub);
 
+    sbMock.enqueueData({ tierId: "tier_2" });
+
     const result = await getOwnerSubscriptionInfo("owner_1", "org_1");
 
     expect(result.hasActiveSubscription).toBe(true);
@@ -498,10 +498,7 @@ describe("getOwnerSubscriptionInfo", () => {
   });
 
   it("should exclude addon subscriptions for different organizations", async () => {
-    mockUserFindUnique.mockResolvedValue({
-      customerId: "cus_owner",
-      tierId: "tier_2",
-    });
+    sbMock.enqueueData({ customerId: "cus_owner" });
 
     const addonForOtherOrg = {
       id: "sub_addon_other",
@@ -523,6 +520,8 @@ describe("getOwnerSubscriptionInfo", () => {
 
     mockSubscriptionsList.mockResolvedValue({ data: [addonForOtherOrg] });
     mockSubscriptionsRetrieve.mockResolvedValue(addonForOtherOrg);
+
+    sbMock.enqueueData({ tierId: "tier_2" });
 
     const result = await getOwnerSubscriptionInfo("owner_1", "org_1");
 

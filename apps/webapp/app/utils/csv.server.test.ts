@@ -25,9 +25,9 @@ vi.mock("@remix-run/form-data-parser", async () => {
     parseFormData: vi.fn(),
   };
 });
-// why: avoid Prisma connections when importing server utilities
-vi.mock("~/database/db.server", () => ({
-  db: {},
+// why: avoid Supabase connections when importing server utilities
+vi.mock("~/database/supabase.server", () => ({
+  sbDb: {},
 }));
 // why: suppress lottie animation initialization during module imports
 vi.mock("lottie-react", () => ({
