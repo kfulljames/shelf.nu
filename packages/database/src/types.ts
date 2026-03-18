@@ -1821,6 +1821,87 @@ export type Database = {
           bookingId?: string;
         };
       };
+      shelf_dashboard_asset_aggregation: {
+        Args: { p_organization_id: string };
+        Returns: {
+          totalAssets: number;
+          totalValuation: number;
+        };
+      };
+      shelf_dashboard_assets_by_status: {
+        Args: { p_organization_id: string };
+        Returns: { status: string; count: number }[];
+      };
+      shelf_dashboard_monthly_growth: {
+        Args: {
+          p_organization_id: string;
+          p_since: string;
+        };
+        Returns: {
+          monthStart: string;
+          assetsCreated: number;
+        }[];
+      };
+      shelf_dashboard_top_custodians: {
+        Args: {
+          p_organization_id: string;
+          p_limit?: number;
+        };
+        Returns: {
+          id: string;
+          name: string;
+          userId: string | null;
+          user: {
+            firstName: string | null;
+            lastName: string | null;
+            profilePicture: string | null;
+            email: string;
+          } | null;
+          custodyCount: number;
+        }[];
+      };
+      shelf_dashboard_location_distribution: {
+        Args: {
+          p_organization_id: string;
+          p_limit?: number;
+        };
+        Returns: {
+          locationId: string;
+          locationName: string;
+          assetCount: number;
+        }[];
+      };
+      shelf_user_workspaces_with_counts: {
+        Args: { p_user_id: string };
+        Returns: {
+          firstName: string | null;
+          tier: { id: string; name: string };
+          userOrganizations: {
+            id: string;
+            roles: string[];
+            organization: {
+              id: string;
+              name: string;
+              type: string;
+              imageId: string | null;
+              userId: string;
+              updatedAt: string;
+              enabledSso: boolean;
+              owner: {
+                id: string;
+                firstName: string | null;
+                lastName: string | null;
+                profilePicture: string | null;
+              };
+              _count: {
+                assets: number;
+                members: number;
+                locations: number;
+              };
+            };
+          }[];
+        };
+      };
     };
     Enums: {
       AssetStatus: AssetStatus;

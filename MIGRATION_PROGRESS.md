@@ -2,7 +2,7 @@
 
 **Branch:** `claude/review-migration-plan-wYjw6`
 **Last Updated:** 2026-03-18
-**Status:** ~88% complete — ready to merge, remaining work tracked below
+**Status:** ~91% complete — remaining work tracked below
 
 ---
 
@@ -11,9 +11,9 @@
 | Area                         | Total `db.` calls | Converted | Remaining | % Done |
 | ---------------------------- | ----------------- | --------- | --------- | ------ |
 | **Modules** (`app/modules/`) | ~245              | ~215      | 30        | 88%    |
-| **Routes** (`app/routes/`)   | ~260              | ~222      | 38        | 85%    |
+| **Routes** (`app/routes/`)   | ~260              | ~233      | 27        | 90%    |
 | **Utils** (`app/utils/`)     | ~33               | ~28       | 5         | 85%    |
-| **Grand Total**              | ~538              | ~465      | ~73       | 86%    |
+| **Grand Total**              | ~538              | ~476      | ~62       | 88%    |
 
 Test files (`.test.ts`) contain 32 additional `db.` references
 (mock setups) to clean up when Prisma is fully removed.
@@ -39,6 +39,7 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 | `9ced224` | Migrated route and utility files                           | 32 files  |
 | `b6acabb` | Migrated 61 route and component files                      | 61 files  |
 | `7a56bb2` | Converted final simple Prisma calls                        | 4 files   |
+| (new)     | Dashboard aggregation RPCs + workspace counts              | 4 files   |
 
 ### Module Services — Completed Conversions
 
@@ -84,30 +85,26 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 
 ---
 
-## Outstanding Work (~29 distinct operations, 16 files)
+## Outstanding Work (~18 distinct operations, 14 files)
 
 Every remaining call is tagged with `// KEPT AS PRISMA` explaining
 the specific Prisma feature that prevents simple migration.
 
-### 1. Aggregation & GroupBy (4 calls)
+### 1. Aggregation & GroupBy — DONE
 
-**File:** `app/routes/_layout+/home.tsx`
+Migrated via RPC functions: `shelf_dashboard_asset_aggregation`,
+`shelf_dashboard_assets_by_status`, `shelf_dashboard_monthly_growth`,
+`shelf_dashboard_top_custodians`, `shelf_dashboard_location_distribution`.
 
-| Call                                   | Feature                         | Suggested Approach       |
-| -------------------------------------- | ------------------------------- | ------------------------ |
-| `db.asset.aggregate()`                 | `_count._all`, `_sum.valuation` | RPC function             |
-| `db.asset.groupBy({ by: ["status"] })` | `groupBy` + `_count`            | RPC function             |
-| `db.$queryRaw` (monthly growth)        | Raw SQL `date_trunc`            | Already SQL, wrap in RPC |
+### 2. `_count` in Select & OrderBy (2 remaining calls)
 
-### 2. `_count` in Select & OrderBy (7 calls)
+| File                               | Feature                                        |
+| ---------------------------------- | ---------------------------------------------- |
+| `bookings.$bookingId.overview.tsx` | `_count: { select: { assets: true } }` on kits |
+| `bookings.$bookingId.overview.tsx` | `db.asset.count()` with nested `some`          |
 
-| File                                  | Feature                                             |
-| ------------------------------------- | --------------------------------------------------- |
-| `home.tsx`                            | `orderBy: { custodies: { _count: "desc" } }`        |
-| `home.tsx`                            | `orderBy: { assets: { _count: "desc" } }`           |
-| `bookings.$bookingId.overview.tsx`    | `_count: { select: { assets: true } }` on kits      |
-| `bookings.$bookingId.overview.tsx`    | `db.asset.count()` with nested `some`               |
-| `account-details.workspace.index.tsx` | `_count` on nested org (assets, members, locations) |
+**Completed:** `home.tsx` (2 calls — top custodians + location distribution)
+and `account-details.workspace.index.tsx` (via `shelf_user_workspaces_with_counts` RPC).
 
 ### 3. Nested `some`/`every` Relation Filters (5 calls)
 
@@ -119,11 +116,10 @@ the specific Prisma feature that prevents simple migration.
 | `admin-dashboard+/org.$organizationId.members.tsx` | `userOrganizations: { some: { organizationId } }`     |
 | `utils/roles.server.ts` (x2)                       | Nested many-to-many role checks                       |
 
-### 4. Deep Nested Includes — 3+ levels (6 calls)
+### 4. Deep Nested Includes — 3+ levels (5 calls)
 
 | File                                                | Depth                                            |
 | --------------------------------------------------- | ------------------------------------------------ |
-| `account-details.workspace.index.tsx`               | user → userOrgs → org → owner/\_count            |
 | `settings.general.tsx`                              | user → userOrgs → org → ssoDetails/\_count/owner |
 | `admin-dashboard+/org.$organizationId.tsx`          | org → qrCodes → asset + owner/sso/hours          |
 | `admin-dashboard+/org.$organizationId.qr-codes.tsx` | org → qrCodes → asset/kit + owner                |
@@ -170,11 +166,11 @@ the specific Prisma feature that prevents simple migration.
 
 ## Recommended Follow-Up PRs
 
-### PR 1: Dashboard Aggregation RPCs
+### PR 1: Dashboard Aggregation RPCs — DONE
 
-**Scope:** Categories 1 + 2 (11 calls)
-**Approach:** Create 3-4 RPC functions for dashboard stats
-(`aggregate`, `groupBy`, monthly growth, `_count` orderBy).
+**Scope:** Categories 1 + 2 + partial 4 (11 calls)
+**Result:** Created 6 RPC functions. Migrated `home.tsx` (5 calls)
+and `account-details.workspace.index.tsx` (1 call).
 
 ### PR 2: Relation Filters → Views or RPCs
 
