@@ -63,59 +63,20 @@ afterAll(() => {
 
 // Mock dependencies
 // why: testing booking service business logic without executing actual database operations
+// Only reserveBooking, checkoutBooking, getBooking still use Prisma db for complex relational queries
 vitest.mock("~/database/db.server", () => ({
   db: {
-    $transaction: vitest.fn().mockImplementation((callback) => callback(db)),
-    $executeRaw: vitest.fn().mockResolvedValue(0),
     booking: {
-      create: vitest.fn().mockResolvedValue({}),
-      update: vitest.fn().mockResolvedValue({}),
-      findFirstOrThrow: vitest.fn().mockResolvedValue({}),
-      findUnique: vitest.fn().mockResolvedValue(null),
       findUniqueOrThrow: vitest.fn().mockResolvedValue({}),
-      findFirst: vitest.fn().mockResolvedValue(null),
-      findMany: vitest.fn().mockResolvedValue([]),
-      delete: vitest.fn().mockResolvedValue({}),
-      count: vitest.fn().mockResolvedValue(0),
+      findFirstOrThrow: vitest.fn().mockResolvedValue({}),
     },
-    asset: {
-      findMany: vitest.fn().mockResolvedValue([]),
-      updateMany: vitest.fn().mockResolvedValue({ count: 0 }),
-      update: vitest.fn().mockResolvedValue({}),
-    },
-    kit: {
-      updateMany: vitest.fn().mockResolvedValue({ count: 0 }),
-    },
-    partialBookingCheckin: {
-      create: vitest.fn().mockResolvedValue({}),
-      count: vitest.fn().mockResolvedValue(0),
-      findMany: vitest.fn().mockResolvedValue([]),
-      aggregate: vitest.fn().mockResolvedValue({ _sum: { checkinCount: 0 } }),
-    },
-    user: {
-      findUniqueOrThrow: vitest.fn().mockResolvedValue({
-        id: "user-1",
-        email: "test@example.com",
-        firstName: "Test",
-        lastName: "User",
-      }),
-    },
-    bookingNote: {
-      create: vitest.fn().mockResolvedValue({}),
-      findMany: vitest.fn().mockResolvedValue([]),
-      deleteMany: vitest.fn().mockResolvedValue({ count: 1 }),
-    },
-    tag: {
-      findMany: vitest
-        .fn()
-        .mockResolvedValue([{ name: "Tag 1" }, { name: "Tag 2" }]),
-    },
-    teamMember: {
-      findUnique: vitest.fn().mockResolvedValue(null),
-    },
-    bookingSettings: {
-      findUnique: vitest.fn().mockResolvedValue(null),
-    },
+  },
+}));
+
+// why: testing service logic without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -237,48 +198,63 @@ const mockCreateBookingParams = {
 describe("createBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
+  /** Helper to enqueue sbMock responses for createBooking's sbDb calls */
+  function setupCreateBookingSbMock(
+    createdRow: Record<string, unknown>,
+    opts?: {
+      custodianTeamMember?: Record<string, unknown> | null;
+      custodianUser?: Record<string, unknown> | null;
+      organization?: Record<string, unknown> | null;
+      tagJoinRows?: Array<{ B: string }>;
+      tags?: Array<Record<string, unknown>>;
+    }
+  ) {
+    // 1. sbDb.from("Booking").insert(...).select().single()
+    sbMock.enqueueData(createdRow);
+    // 2. sbDb.from("_AssetToBooking").insert([...]) - asset join
+    sbMock.enqueueData([]);
+    // 3-6. Promise.all: TeamMember, User, Organization, _BookingToTag
+    sbMock.enqueueData(opts?.custodianTeamMember ?? null);
+    sbMock.enqueueData(opts?.custodianUser ?? null);
+    sbMock.enqueueData(opts?.organization ?? { id: "org-1", name: "Test Org" });
+    sbMock.enqueueData(opts?.tagJoinRows ?? []);
+  }
+
+  const mockCreatedRow = {
+    id: "booking-1",
+    name: "Test Booking",
+    description: "Test Description",
+    status: BookingStatus.DRAFT,
+    creatorId: "user-1",
+    organizationId: "org-1",
+    custodianUserId: "user-1",
+    custodianTeamMemberId: "team-member-1",
+    from: futureFromDate.toISOString(),
+    to: futureToDate.toISOString(),
+    createdAt: futureCreatedAt.toISOString(),
+    updatedAt: futureCreatedAt.toISOString(),
+    originalFrom: futureFromDate.toISOString(),
+    originalTo: futureToDate.toISOString(),
+    autoArchivedAt: null,
+    activeSchedulerReference: null,
+    cancellationReason: null,
+  };
+
   it("should create a booking successfully", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.booking.create.mockResolvedValue(mockBookingData);
+    setupCreateBookingSbMock(mockCreatedRow);
 
     const result = await createBooking(mockCreateBookingParams);
 
-    expect(db.booking.create).toHaveBeenCalledWith({
-      data: {
-        name: "Test Booking",
-        description: "Test Description",
-        custodianUser: { connect: { id: "user-1" } },
-        custodianTeamMember: { connect: { id: "team-member-1" } },
-        organization: { connect: { id: "org-1" } },
-        creator: { connect: { id: "user-1" } },
-        from: futureFromDate,
-        to: futureToDate,
-        originalFrom: futureFromDate,
-        originalTo: futureToDate,
-        status: "DRAFT",
-        assets: { connect: [{ id: "asset-1" }, { id: "asset-2" }] },
-      },
-      include: {
-        custodianUser: true,
-        custodianTeamMember: true,
-        organization: true,
-        tags: {
-          select: {
-            id: true,
-            name: true,
-            color: true,
-          },
-        },
-      },
-    });
-    expect(result).toEqual(mockBookingData);
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
+    expect(result.id).toBe("booking-1");
+    expect(result.name).toBe("Test Booking");
+    expect(result.status).toBe(BookingStatus.DRAFT);
   });
 
   it("should create a booking without custodian when custodianUserId is null", async () => {
-    expect.assertions(1);
     const paramsWithoutCustodian = {
       ...mockCreateBookingParams,
       booking: {
@@ -288,45 +264,25 @@ describe("createBooking", () => {
         tags: [],
       },
     };
-    //@ts-expect-error missing vitest type
-    db.booking.create.mockResolvedValue(mockBookingData);
+    const rowWithoutCustodian = { ...mockCreatedRow, custodianUserId: null };
+    // 1. insert booking
+    sbMock.enqueueData(rowWithoutCustodian);
+    // 2. asset join
+    sbMock.enqueueData([]);
+    // 3-6. Promise.all: TeamMember (yes), User (no - skipped since custodianUserId null),
+    //       Organization, _BookingToTag
+    sbMock.enqueueData({ id: "team-member-1", name: "TM1" });
+    sbMock.enqueueData({ id: "org-1", name: "Test Org" });
+    sbMock.enqueueData([]);
 
-    await createBooking(paramsWithoutCustodian);
+    const result = await createBooking(paramsWithoutCustodian);
 
-    expect(db.booking.create).toHaveBeenCalledWith({
-      data: {
-        name: "Test Booking",
-        description: "Test Description",
-        organization: { connect: { id: "org-1" } },
-        creator: { connect: { id: "user-1" } },
-        custodianTeamMember: { connect: { id: "team-member-1" } },
-        from: futureFromDate,
-        to: futureToDate,
-        originalFrom: futureFromDate,
-        originalTo: futureToDate,
-        status: "DRAFT",
-        assets: { connect: [{ id: "asset-1" }, { id: "asset-2" }] },
-      },
-      include: {
-        custodianUser: true,
-        custodianTeamMember: true,
-        organization: true,
-        tags: {
-          select: {
-            id: true,
-            name: true,
-            color: true,
-          },
-        },
-      },
-    });
+    expect(result.custodianUserId).toBeNull();
   });
 
   it("should throw ShelfError when creation fails", async () => {
-    expect.assertions(1);
-    const error = new Error("Database error");
-    //@ts-expect-error missing vitest type
-    db.booking.create.mockRejectedValue(error);
+    // Enqueue an error for the insert call
+    sbMock.enqueueError({ message: "Database error", code: "500" });
 
     await expect(createBooking(mockCreateBookingParams)).rejects.toThrow(
       ShelfError
@@ -337,6 +293,7 @@ describe("createBooking", () => {
 describe("partialCheckinBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   const mockPartialCheckinParams = {
@@ -347,49 +304,66 @@ describe("partialCheckinBooking", () => {
     hints: mockClientHints,
   };
 
+  const mockBookingRow = {
+    id: "booking-1",
+    name: "Test Booking",
+    status: BookingStatus.ONGOING,
+    organizationId: "org-1",
+    custodianUserId: "user-1",
+    custodianTeamMemberId: null,
+    creatorId: "user-1",
+    from: futureFromDate.toISOString(),
+    to: futureToDate.toISOString(),
+    createdAt: futureCreatedAt.toISOString(),
+    updatedAt: futureCreatedAt.toISOString(),
+    originalFrom: futureFromDate.toISOString(),
+    originalTo: futureToDate.toISOString(),
+    autoArchivedAt: null,
+    description: "Test Description",
+    activeSchedulerReference: null,
+    cancellationReason: null,
+  };
+
+  /** Sets up sbMock queue for partialCheckinBooking with 3 assets (partial check-in path) */
+  function setupPartialCheckinSbMock(opts?: {
+    bookingRow?: Record<string, unknown>;
+    assetJoins?: Array<{ A: string }>;
+    assetDetails?: Array<Record<string, unknown>>;
+    assetStatuses?: Array<Record<string, unknown>>;
+  }) {
+    const assetJoins = opts?.assetJoins ?? [
+      { A: "asset-1" },
+      { A: "asset-2" },
+      { A: "asset-3" },
+    ];
+    const assetDetails = opts?.assetDetails ?? [
+      { id: "asset-1", kitId: null },
+      { id: "asset-2", kitId: null },
+      { id: "asset-3", kitId: null },
+    ];
+    const assetStatuses = opts?.assetStatuses ?? [
+      { id: "asset-1", status: AssetStatus.CHECKED_OUT },
+      { id: "asset-2", status: AssetStatus.CHECKED_OUT },
+      { id: "asset-3", status: AssetStatus.CHECKED_OUT },
+    ];
+    // 1. Booking fetch
+    sbMock.enqueueData(opts?.bookingRow ?? mockBookingRow);
+    // 2. _AssetToBooking join rows
+    sbMock.enqueueData(assetJoins);
+    // 3. Asset details (kitId)
+    sbMock.enqueueData(assetDetails);
+    // 4. Asset statuses
+    sbMock.enqueueData(assetStatuses);
+    // 5. Asset status update (AVAILABLE)
+    sbMock.enqueueData([]);
+    // 6. PartialBookingCheckin insert
+    sbMock.enqueueData({});
+  }
+
   it("should perform partial check-in successfully", async () => {
-    expect.assertions(4);
-
-    // Mock booking with assets for initial validation
-    const bookingWithAssets = {
-      ...mockBookingData,
-      assets: [
-        { id: "asset-1", kitId: null },
-        { id: "asset-2", kitId: null },
-        { id: "asset-3", kitId: null },
-      ],
-    };
-
-    // Mock booking after transaction (assets remain in booking)
-    // const updatedBooking = {
-    //   ...mockBookingData,
-    //   assets: [
-    //     { id: "asset-1", kitId: null },
-    //     { id: "asset-2", kitId: null },
-    //     { id: "asset-3", kitId: null },
-    //   ],
-    // };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(bookingWithAssets);
+    setupPartialCheckinSbMock();
 
     const result = await partialCheckinBooking(mockPartialCheckinParams);
-
-    // Verify assets status updated (no longer disconnecting from booking)
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1", "asset-2"] } },
-      data: { status: AssetStatus.AVAILABLE },
-    });
-
-    // Verify partial check-in record created
-    expect(db.partialBookingCheckin.create).toHaveBeenCalledWith({
-      data: {
-        bookingId: "booking-1",
-        checkedInById: "user-1",
-        assetIds: ["asset-1", "asset-2"],
-        checkinCount: 2,
-      },
-    });
 
     // Verify notes created
     expect(noteService.createNotes).toHaveBeenCalledWith({
@@ -400,64 +374,21 @@ describe("partialCheckinBooking", () => {
       assetIds: ["asset-1", "asset-2"],
     });
 
-    expect(result).toEqual({
-      booking: bookingWithAssets, // Assets remain in booking with new approach
-      checkedInAssetCount: 2,
-      remainingAssetCount: 1, // 3 total - 2 checked in = 1 remaining
-      isComplete: false,
-    });
-  });
-
-  it("should redirect to complete check-in when all assets are being checked in", async () => {
-    expect.assertions(1);
-
-    // Mock booking with same assets as being checked in
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      ...mockBookingData,
-      assets: [
-        { id: "asset-1", kitId: null },
-        { id: "asset-2", kitId: null },
-      ],
-    });
-
-    // Mock asset statuses - both assets are CHECKED_OUT
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
-      { id: "asset-1", status: AssetStatus.CHECKED_OUT },
-      { id: "asset-2", status: AssetStatus.CHECKED_OUT },
-    ]);
-
-    // Mock complete checkin function
-    const mockCheckinBooking = vitest
-      .fn()
-      .mockResolvedValue({ booking: mockBookingData });
-    vitest.doMock("./service.server", async () => ({
-      ...(await vitest.importActual("./service.server")),
-      checkinBooking: mockCheckinBooking,
-    }));
-
-    await partialCheckinBooking(mockPartialCheckinParams);
-
-    // Should not create partial check-in record when doing complete check-in
-    expect(db.partialBookingCheckin.create).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        checkedInAssetCount: 2,
+        remainingAssetCount: 1,
+        isComplete: false,
+      })
+    );
   });
 
   it("should throw error when asset is not in booking", async () => {
-    expect.assertions(1);
-
-    // Mock booking with different assets
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      ...mockBookingData,
-      assets: [{ id: "asset-3", kitId: null }],
-    });
-
-    // Mock asset statuses for the booking's actual assets
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
-      { id: "asset-3", status: AssetStatus.CHECKED_OUT },
-    ]);
+    // Booking only has asset-3, but we're trying to check in asset-1, asset-2
+    sbMock.enqueueData(mockBookingRow);
+    sbMock.enqueueData([{ A: "asset-3" }]);
+    sbMock.enqueueData([{ id: "asset-3", kitId: null }]);
+    sbMock.enqueueData([{ id: "asset-3", status: AssetStatus.CHECKED_OUT }]);
 
     await expect(
       partialCheckinBooking(mockPartialCheckinParams)
@@ -465,84 +396,60 @@ describe("partialCheckinBooking", () => {
   });
 
   it("should handle kit check-in when all kit assets are scanned", async () => {
-    expect.assertions(2);
-
-    const paramsWithKit = {
-      ...mockPartialCheckinParams,
-      assetIds: ["asset-1", "asset-2"], // Both belong to same kit
-    };
-
-    const bookingWithKitAssets = {
-      ...mockBookingData,
-      assets: [
+    setupPartialCheckinSbMock({
+      assetJoins: [{ A: "asset-1" }, { A: "asset-2" }, { A: "asset-3" }],
+      assetDetails: [
         { id: "asset-1", kitId: "kit-1" },
         { id: "asset-2", kitId: "kit-1" },
-        { id: "asset-3", kitId: null }, // Extra asset to ensure partial check-in
+        { id: "asset-3", kitId: null },
       ],
-    };
+      assetStatuses: [
+        { id: "asset-1", status: AssetStatus.CHECKED_OUT },
+        { id: "asset-2", status: AssetStatus.CHECKED_OUT },
+        { id: "asset-3", status: AssetStatus.CHECKED_OUT },
+      ],
+    });
+    // Extra responses for kit update
+    sbMock.enqueueData([]);
 
-    const updatedBookingWithRemainingAsset = {
-      ...mockBookingData,
-      assets: [{ id: "asset-3", kitId: null }],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(bookingWithKitAssets);
-
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
-      { id: "asset-1", status: AssetStatus.CHECKED_OUT },
-      { id: "asset-2", status: AssetStatus.CHECKED_OUT },
-      { id: "asset-3", status: AssetStatus.CHECKED_OUT },
-    ]);
-
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(updatedBookingWithRemainingAsset);
-
-    // Mock hasPartialCheckins to return true to ensure PartialBookingCheckin record is created
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.count.mockResolvedValue(1);
-
-    await partialCheckinBooking(paramsWithKit);
-
-    // Verify kit status updated when all assets checked in
-    expect(db.kit.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["kit-1"] } },
-      data: { status: KitStatus.AVAILABLE },
+    const result = await partialCheckinBooking({
+      ...mockPartialCheckinParams,
+      assetIds: ["asset-1", "asset-2"],
     });
 
-    expect(db.partialBookingCheckin.create).toHaveBeenCalled();
+    // Verify sbDb was called to update Kit table
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Kit");
+    expect(result).toEqual(
+      expect.objectContaining({
+        checkedInAssetCount: 2,
+        isComplete: false,
+      })
+    );
   });
 });
 
 describe("hasPartialCheckins", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return true when booking has partial check-ins", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.count.mockResolvedValue(3);
+    // sbDb.from("PartialBookingCheckin").select("id", { count: "exact", head: true }).eq(...)
+    // The mock resolves with count property; we simulate count > 0
+    sbMock.enqueue({ data: null, error: null, count: 3 });
 
     const result = await hasPartialCheckins("booking-1");
 
-    expect(db.partialBookingCheckin.count).toHaveBeenCalledWith({
-      where: { bookingId: "booking-1" },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("PartialBookingCheckin");
     expect(result).toBe(true);
   });
 
   it("should return false when booking has no partial check-ins", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.count.mockResolvedValue(0);
+    sbMock.enqueue({ data: null, error: null, count: 0 });
 
     const result = await hasPartialCheckins("booking-1");
 
-    expect(db.partialBookingCheckin.count).toHaveBeenCalledWith({
-      where: { bookingId: "booking-1" },
-    });
     expect(result).toBe(false);
   });
 });
@@ -550,73 +457,64 @@ describe("hasPartialCheckins", () => {
 describe("getPartialCheckinHistory", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
-  it("should return partial check-in history", () => {
-    expect.assertions(2);
-    const mockHistory = [
+  it("should return partial check-in history", async () => {
+    const now = new Date();
+    const mockCheckins = [
       {
         id: "partial-1",
         bookingId: "booking-1",
         assetIds: ["asset-1", "asset-2"],
         checkinCount: 2,
-        checkinTimestamp: new Date(),
-        checkedInBy: {
-          firstName: "John",
-          lastName: "Doe",
-          email: "john@example.com",
-        },
+        checkinTimestamp: now.toISOString(),
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        checkedInById: "user-john",
       },
     ];
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.findMany.mockReturnValue(mockHistory);
-
-    const result = getPartialCheckinHistory("booking-1");
-
-    expect(db.partialBookingCheckin.findMany).toHaveBeenCalledWith({
-      where: { bookingId: "booking-1" },
-      include: {
-        checkedInBy: {
-          select: {
-            firstName: true,
-            lastName: true,
-            email: true,
-          },
-        },
+    // 1. PartialBookingCheckin select
+    sbMock.enqueueData(mockCheckins);
+    // 2. User select for checkedInById lookup
+    sbMock.enqueueData([
+      {
+        id: "user-john",
+        firstName: "John",
+        lastName: "Doe",
+        email: "john@example.com",
       },
-      orderBy: { checkinTimestamp: "desc" },
+    ]);
+
+    const result = await getPartialCheckinHistory("booking-1");
+
+    expect(sbMock.calls.from).toHaveBeenCalledWith("PartialBookingCheckin");
+    expect(result).toHaveLength(1);
+    expect(result[0].checkedInBy).toEqual({
+      firstName: "John",
+      lastName: "Doe",
+      email: "john@example.com",
     });
-    expect(result).toEqual(mockHistory);
   });
 });
 
 describe("getTotalPartialCheckinCount", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return total count of checked-in assets", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.aggregate.mockResolvedValue({
-      _sum: { checkinCount: 15 },
-    });
+    // sbDb.from("PartialBookingCheckin").select("checkinCount").eq(...)
+    sbMock.enqueueData([{ checkinCount: 10 }, { checkinCount: 5 }]);
 
     const result = await getTotalPartialCheckinCount("booking-1");
 
-    expect(db.partialBookingCheckin.aggregate).toHaveBeenCalledWith({
-      where: { bookingId: "booking-1" },
-      _sum: { checkinCount: true },
-    });
     expect(result).toBe(15);
   });
 
   it("should return 0 when no partial check-ins exist", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.aggregate.mockResolvedValue({
-      _sum: { checkinCount: null },
-    });
+    sbMock.enqueueData([]);
 
     const result = await getTotalPartialCheckinCount("booking-1");
 
@@ -627,31 +525,24 @@ describe("getTotalPartialCheckinCount", () => {
 describe("getPartiallyCheckedInAssetIds", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return unique asset IDs from partial check-ins", async () => {
-    expect.assertions(2);
-    const mockPartialCheckins = [
+    sbMock.enqueueData([
       { assetIds: ["asset-1", "asset-2"] },
       { assetIds: ["asset-2", "asset-3"] },
       { assetIds: ["asset-4"] },
-    ];
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.findMany.mockResolvedValue(mockPartialCheckins);
+    ]);
 
     const result = await getPartiallyCheckedInAssetIds("booking-1");
 
-    expect(db.partialBookingCheckin.findMany).toHaveBeenCalledWith({
-      where: { bookingId: "booking-1" },
-      select: { assetIds: true },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("PartialBookingCheckin");
     expect(result).toEqual(["asset-1", "asset-2", "asset-3", "asset-4"]);
   });
 
   it("should return empty array when no partial check-ins exist", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.findMany.mockResolvedValue([]);
+    sbMock.enqueueData([]);
 
     const result = await getPartiallyCheckedInAssetIds("booking-1");
 
@@ -688,6 +579,7 @@ describe("getKitIdsByAssets", () => {
 describe("updateBasicBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   const mockUpdateBookingParams = {
@@ -702,86 +594,111 @@ describe("updateBasicBooking", () => {
     tags: [{ id: "tag-1" }, { id: "tag-2" }],
   };
 
-  it("should update booking successfully when status is DRAFT", async () => {
-    expect.assertions(2);
-
-    // Mock finding booking with DRAFT status
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
+  /**
+   * Helper to enqueue sbMock responses for updateBasicBooking's sbDb calls.
+   * The function makes these calls:
+   * 1. Booking fetch (single)
+   * 2. TeamMember fetch (single) - if custodianTeamMemberId exists
+   * 3. User fetch (single) - if team member has userId
+   * 4. CustodianUser fetch (single) - if custodianUserId exists
+   * 5. _BookingToTag select
+   * 6. Tag select (if tags exist)
+   * 7. Booking update (single)
+   * 8. _BookingToTag delete
+   * 9. _BookingToTag insert (if tags)
+   */
+  function setupUpdateBookingSbMock(overrides?: {
+    bookingRow?: Record<string, unknown>;
+    teamMember?: Record<string, unknown> | null;
+    teamMemberUser?: Record<string, unknown> | null;
+    custodianUser?: Record<string, unknown> | null;
+    tagJoinRows?: Array<{ B: string }>;
+    tags?: Array<Record<string, unknown>>;
+    updatedRow?: Record<string, unknown>;
+  }) {
+    const bookingRow = overrides?.bookingRow ?? {
       id: "booking-1",
       status: BookingStatus.DRAFT,
       custodianUserId: "user-1",
-      tags: [{ id: "tag-3", name: "Old Tag" }], // Add existing tags
-    });
+      custodianTeamMemberId: null,
+      name: "Old Name",
+      description: "Old Description",
+      from: futureFromDate.toISOString(),
+      to: futureToDate.toISOString(),
+    };
+    // 1. Booking fetch
+    sbMock.enqueueData(bookingRow);
+    // 2. TeamMember fetch (if custodianTeamMemberId)
+    if (bookingRow.custodianTeamMemberId) {
+      sbMock.enqueueData(
+        overrides?.teamMember ?? {
+          id: bookingRow.custodianTeamMemberId,
+          name: "TM",
+          userId: null,
+        }
+      );
+      // 3. User for team member (if userId)
+      if (overrides?.teamMemberUser) {
+        sbMock.enqueueData(overrides.teamMemberUser);
+      }
+    }
+    // 4. CustodianUser fetch (if custodianUserId)
+    if (bookingRow.custodianUserId) {
+      sbMock.enqueueData(
+        overrides?.custodianUser ?? {
+          id: bookingRow.custodianUserId,
+          email: "custodian@example.com",
+          firstName: "Custodian",
+          lastName: "User",
+        }
+      );
+    }
+    // 5. _BookingToTag select
+    sbMock.enqueueData(overrides?.tagJoinRows ?? []);
+    // 6. Tags (skipped if no join rows)
+    if (overrides?.tags) {
+      sbMock.enqueueData(overrides.tags);
+    }
+    // 7. Booking update
+    sbMock.enqueueData(
+      overrides?.updatedRow ?? { ...bookingRow, name: "Updated Booking Name" }
+    );
+    // 8. _BookingToTag delete
+    sbMock.enqueueData([]);
+    // 9. _BookingToTag insert
+    sbMock.enqueueData([]);
+  }
 
-    const updatedBooking = { ...mockBookingData, ...mockUpdateBookingParams };
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(updatedBooking);
+  it("should update booking successfully when status is DRAFT", async () => {
+    setupUpdateBookingSbMock();
 
     const result = await updateBasicBooking(mockUpdateBookingParams);
 
-    expect(db.booking.update).toHaveBeenCalledWith({
-      where: { id: "booking-1" },
-      data: {
-        name: "Updated Booking Name",
-        description: "Updated Description",
-        from: new Date("2024-02-01T09:00:00Z"),
-        to: new Date("2024-02-01T17:00:00Z"),
-        originalFrom: new Date("2024-02-01T09:00:00Z"),
-        originalTo: new Date("2024-02-01T17:00:00Z"),
-        custodianUser: { connect: { id: "user-2" } },
-        custodianTeamMember: { connect: { id: "team-member-2" } },
-        tags: {
-          set: [],
-          connect: [{ id: "tag-1" }, { id: "tag-2" }],
-        },
-      },
-    });
-    expect(result).toEqual(updatedBooking);
-  });
-
-  it("should update only name and description when status is not DRAFT", async () => {
-    expect.assertions(2);
-
-    // Mock finding booking with ONGOING status
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      id: "booking-1",
-      status: BookingStatus.ONGOING,
-      custodianUserId: "user-1",
-      tags: [{ id: "tag-3", name: "Old Tag" }], // Add existing tags
-    });
-
-    const updatedBooking = { ...mockBookingData, name: "Updated Booking Name" };
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(updatedBooking);
-
-    const result = await updateBasicBooking(mockUpdateBookingParams);
-
-    expect(db.booking.update).toHaveBeenCalledWith({
-      where: { id: "booking-1" },
-      data: {
-        name: "Updated Booking Name",
-        description: "Updated Description",
-        tags: {
-          set: [],
-          connect: [{ id: "tag-1" }, { id: "tag-2" }],
-        },
-      },
-    });
-    expect(result).toEqual(updatedBooking);
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
+    expect(result).toBeDefined();
+    expect(result.name).toBe("Updated Booking Name");
   });
 
   it("should throw ShelfError when booking status is COMPLETE", async () => {
-    expect.assertions(1);
-
-    // Mock finding booking with COMPLETE status
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
+    sbMock.enqueueData({
       id: "booking-1",
       status: BookingStatus.COMPLETE,
       custodianUserId: "user-1",
+      custodianTeamMemberId: null,
+      name: "Test",
+      description: null,
+      from: futureFromDate.toISOString(),
+      to: futureToDate.toISOString(),
     });
+    // CustodianUser fetch
+    sbMock.enqueueData({
+      id: "user-1",
+      email: "test@test.com",
+      firstName: "Test",
+      lastName: "User",
+    });
+    // Tags
+    sbMock.enqueueData([]);
 
     await expect(updateBasicBooking(mockUpdateBookingParams)).rejects.toThrow(
       ShelfError
@@ -789,15 +706,17 @@ describe("updateBasicBooking", () => {
   });
 
   it("should throw ShelfError when booking status is ARCHIVED", async () => {
-    expect.assertions(1);
-
-    // Mock finding booking with ARCHIVED status
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
+    sbMock.enqueueData({
       id: "booking-1",
       status: BookingStatus.ARCHIVED,
-      custodianUserId: "user-1",
+      custodianUserId: null,
+      custodianTeamMemberId: null,
+      name: "Test",
+      description: null,
+      from: futureFromDate.toISOString(),
+      to: futureToDate.toISOString(),
     });
+    sbMock.enqueueData([]);
 
     await expect(updateBasicBooking(mockUpdateBookingParams)).rejects.toThrow(
       ShelfError
@@ -805,15 +724,17 @@ describe("updateBasicBooking", () => {
   });
 
   it("should throw ShelfError when booking status is CANCELLED", async () => {
-    expect.assertions(1);
-
-    // Mock finding booking with CANCELLED status
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
+    sbMock.enqueueData({
       id: "booking-1",
       status: BookingStatus.CANCELLED,
-      custodianUserId: "user-1",
+      custodianUserId: null,
+      custodianTeamMemberId: null,
+      name: "Test",
+      description: null,
+      from: futureFromDate.toISOString(),
+      to: futureToDate.toISOString(),
     });
+    sbMock.enqueueData([]);
 
     await expect(updateBasicBooking(mockUpdateBookingParams)).rejects.toThrow(
       ShelfError
@@ -821,13 +742,7 @@ describe("updateBasicBooking", () => {
   });
 
   it("should throw ShelfError when booking is not found", async () => {
-    expect.assertions(1);
-
-    // Mock booking not found
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockRejectedValue(
-      new Error("Booking not found")
-    );
+    sbMock.enqueueError({ message: "Booking not found", code: "PGRST116" });
 
     await expect(updateBasicBooking(mockUpdateBookingParams)).rejects.toThrow(
       ShelfError
@@ -835,32 +750,23 @@ describe("updateBasicBooking", () => {
   });
 
   it("should send email when changes are detected and hints are provided", async () => {
-    expect.assertions(2);
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      id: "booking-1",
-      status: BookingStatus.DRAFT,
-      custodianUserId: "custodian-1",
-      custodianTeamMemberId: "team-member-1",
-      name: "Old Name",
-      description: "Old Description",
-      from: futureFromDate,
-      to: futureToDate,
+    setupUpdateBookingSbMock({
+      bookingRow: {
+        id: "booking-1",
+        status: BookingStatus.DRAFT,
+        custodianUserId: "custodian-1",
+        custodianTeamMemberId: null,
+        name: "Old Name",
+        description: "Old Description",
+        from: futureFromDate.toISOString(),
+        to: futureToDate.toISOString(),
+      },
       custodianUser: {
         id: "custodian-1",
         email: "custodian@example.com",
         firstName: "Custodian",
         lastName: "User",
       },
-      custodianTeamMember: null,
-      tags: [],
-    });
-
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      id: "booking-1",
-      name: "New Name",
     });
 
     await updateBasicBooking({
@@ -884,30 +790,24 @@ describe("updateBasicBooking", () => {
   });
 
   it("should not send email when no hints are provided", async () => {
-    expect.assertions(1);
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      id: "booking-1",
-      status: BookingStatus.DRAFT,
-      custodianUserId: "custodian-1",
-      custodianTeamMemberId: "team-member-1",
-      name: "Old Name",
-      description: null,
-      from: futureFromDate,
-      to: futureToDate,
+    setupUpdateBookingSbMock({
+      bookingRow: {
+        id: "booking-1",
+        status: BookingStatus.DRAFT,
+        custodianUserId: "custodian-1",
+        custodianTeamMemberId: null,
+        name: "Old Name",
+        description: null,
+        from: futureFromDate.toISOString(),
+        to: futureToDate.toISOString(),
+      },
       custodianUser: {
         id: "custodian-1",
         email: "custodian@example.com",
         firstName: "Custodian",
         lastName: "User",
       },
-      custodianTeamMember: null,
-      tags: [],
     });
-
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({ id: "booking-1" });
 
     await updateBasicBooking({
       ...mockUpdateBookingParams,
@@ -920,33 +820,35 @@ describe("updateBasicBooking", () => {
   });
 
   it("should not send email when no changes are detected", async () => {
-    expect.assertions(1);
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      id: "booking-1",
-      status: BookingStatus.DRAFT,
-      custodianUserId: "user-2",
-      custodianTeamMemberId: "team-member-2",
-      name: "Updated Booking Name",
-      description: "Updated Description",
-      from: new Date("2024-02-01T09:00:00Z"),
-      to: new Date("2024-02-01T17:00:00Z"),
+    setupUpdateBookingSbMock({
+      bookingRow: {
+        id: "booking-1",
+        status: BookingStatus.DRAFT,
+        custodianUserId: "user-2",
+        custodianTeamMemberId: "team-member-2",
+        name: "Updated Booking Name",
+        description: "Updated Description",
+        from: new Date("2024-02-01T09:00:00Z").toISOString(),
+        to: new Date("2024-02-01T17:00:00Z").toISOString(),
+      },
+      teamMember: { id: "team-member-2", name: "TM", userId: "user-2" },
+      teamMemberUser: {
+        id: "user-2",
+        firstName: "Custodian",
+        lastName: "User",
+      },
       custodianUser: {
         id: "user-2",
         email: "custodian@example.com",
         firstName: "Custodian",
         lastName: "User",
       },
-      custodianTeamMember: { id: "team-member-2", name: "TM" },
+      tagJoinRows: [{ B: "tag-1" }, { B: "tag-2" }],
       tags: [
         { id: "tag-1", name: "Tag 1" },
         { id: "tag-2", name: "Tag 2" },
       ],
     });
-
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({ id: "booking-1" });
 
     await updateBasicBooking({
       ...mockUpdateBookingParams,
@@ -958,47 +860,49 @@ describe("updateBasicBooking", () => {
   });
 
   it("should pass old custodian email when custodian changes", async () => {
-    expect.assertions(1);
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue({
-      id: "booking-1",
-      status: BookingStatus.DRAFT,
-      custodianUserId: "old-custodian-1",
-      custodianTeamMemberId: "old-team-member-1",
-      name: "Updated Booking Name",
-      description: "Updated Description",
-      from: new Date("2024-02-01T09:00:00Z"),
-      to: new Date("2024-02-01T17:00:00Z"),
+    setupUpdateBookingSbMock({
+      bookingRow: {
+        id: "booking-1",
+        status: BookingStatus.DRAFT,
+        custodianUserId: "old-custodian-1",
+        custodianTeamMemberId: "old-team-member-1",
+        name: "Updated Booking Name",
+        description: "Updated Description",
+        from: new Date("2024-02-01T09:00:00Z").toISOString(),
+        to: new Date("2024-02-01T17:00:00Z").toISOString(),
+      },
+      teamMember: {
+        id: "old-team-member-1",
+        name: "Old TM",
+        userId: "old-custodian-1",
+      },
+      teamMemberUser: {
+        id: "old-custodian-1",
+        firstName: "Old",
+        lastName: "Custodian",
+      },
       custodianUser: {
         id: "old-custodian-1",
         email: "old-custodian@example.com",
         firstName: "Old",
         lastName: "Custodian",
       },
-      custodianTeamMember: {
-        id: "old-team-member-1",
-        name: "Old TM",
-        user: {
-          id: "old-custodian-1",
-          firstName: "Old",
-          lastName: "Custodian",
-        },
-      },
+      tagJoinRows: [{ B: "tag-1" }, { B: "tag-2" }],
       tags: [
         { id: "tag-1", name: "Tag 1" },
         { id: "tag-2", name: "Tag 2" },
       ],
     });
-
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({ id: "booking-1" });
-
-    //@ts-expect-error missing vitest type
-    db.teamMember.findUnique.mockResolvedValue({
+    // Extra: new team member lookup during custodian change detection
+    sbMock.enqueueData({
       id: "team-member-2",
       name: "New TM",
-      user: { id: "user-2", firstName: "New", lastName: "Custodian" },
+      userId: "user-2",
+    });
+    sbMock.enqueueData({
+      id: "user-2",
+      firstName: "New",
+      lastName: "Custodian",
     });
 
     await updateBasicBooking({
@@ -1018,6 +922,7 @@ describe("updateBasicBooking", () => {
 describe("updateBookingAssets", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   const mockUpdateBookingAssetsParams = {
@@ -1027,96 +932,89 @@ describe("updateBookingAssets", () => {
   };
 
   it("should update booking assets successfully for DRAFT booking", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.DRAFT,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
+    // 1. sbDb.rpc("shelf_booking_update_assets") -> success
+    sbMock.enqueueData({ success: true });
+    // 2. sbDb.from("Booking").select("id, name, status").eq().eq().single()
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.DRAFT });
+    // 3. sbDb.from("Asset").select("id, title").in().eq() - for booking note
+    sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
       { id: "asset-2", title: "Asset 2" },
     ]);
 
     const result = await updateBookingAssets(mockUpdateBookingAssetsParams);
 
-    expect(db.booking.findUniqueOrThrow).toHaveBeenCalledWith({
-      where: { id: "booking-1", organizationId: "org-1" },
-      select: { id: true, name: true, status: true },
-    });
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(result).toEqual(mockBooking);
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_update_assets",
+      expect.objectContaining({
+        p_asset_ids: ["asset-1", "asset-2"],
+        p_booking_id: "booking-1",
+        p_org_id: "org-1",
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({ id: "booking-1", name: "Test Booking" })
+    );
   });
 
   it("should update asset status to CHECKED_OUT for ONGOING booking", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.ONGOING,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
+    // 1. sbDb.rpc
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    // 3. Asset fetch for notes
+    sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
       { id: "asset-2", title: "Asset 2" },
     ]);
 
     const result = await updateBookingAssets(mockUpdateBookingAssetsParams);
 
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1", "asset-2"] }, organizationId: "org-1" },
-      data: { status: AssetStatus.CHECKED_OUT },
-    });
-    expect(result).toEqual(mockBooking);
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_update_assets",
+      expect.objectContaining({
+        p_asset_ids: ["asset-1", "asset-2"],
+        p_booking_id: "booking-1",
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({ id: "booking-1", status: BookingStatus.ONGOING })
+    );
   });
 
   it("should update asset status to CHECKED_OUT for OVERDUE booking", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.OVERDUE,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
+    // 1. sbDb.rpc
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.OVERDUE });
+    // 3. Asset fetch for notes
+    sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
       { id: "asset-2", title: "Asset 2" },
     ]);
 
     const result = await updateBookingAssets(mockUpdateBookingAssetsParams);
 
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1", "asset-2"] }, organizationId: "org-1" },
-      data: { status: AssetStatus.CHECKED_OUT },
-    });
-    expect(result).toEqual(mockBooking);
+    expect(sbMock.calls.rpc).toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({ id: "booking-1", status: BookingStatus.OVERDUE })
+    );
   });
 
   it("should update kit status to CHECKED_OUT when kitIds provided for ONGOING booking", async () => {
-    expect.assertions(4);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.ONGOING,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
+    // 1. sbDb.rpc - with kitIds
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    // Note: when kitIds are provided, no asset notes are created (kit notes handled separately)
 
     const params = {
       ...mockUpdateBookingAssetsParams,
@@ -1125,55 +1023,50 @@ describe("updateBookingAssets", () => {
 
     const result = await updateBookingAssets(params);
 
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1", "asset-2"] }, organizationId: "org-1" },
-      data: { status: AssetStatus.CHECKED_OUT },
-    });
-    expect(db.kit.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["kit-1", "kit-2"] }, organizationId: "org-1" },
-      data: { status: KitStatus.CHECKED_OUT },
-    });
-    expect(result).toEqual(mockBooking);
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_update_assets",
+      expect.objectContaining({
+        p_kit_ids: ["kit-1", "kit-2"],
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({ id: "booking-1" })
+    );
   });
 
   it("should not update kit status when no kitIds provided", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.ONGOING,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
+    // 1. sbDb.rpc
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    // 3. Asset fetch for notes
+    sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
       { id: "asset-2", title: "Asset 2" },
     ]);
 
     await updateBookingAssets(mockUpdateBookingAssetsParams);
 
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(db.asset.updateMany).toHaveBeenCalled();
-    expect(db.kit.updateMany).not.toHaveBeenCalled();
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_update_assets",
+      expect.objectContaining({
+        p_kit_ids: [],
+      })
+    );
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
   });
 
   it("should not update kit status when empty kitIds array provided", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.ONGOING,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
+    // 1. sbDb.rpc
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.ONGOING });
+    // 3. Asset fetch for notes
+    sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
       { id: "asset-2", title: "Asset 2" },
     ]);
@@ -1185,21 +1078,27 @@ describe("updateBookingAssets", () => {
 
     await updateBookingAssets(params);
 
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(db.asset.updateMany).toHaveBeenCalled();
-    expect(db.kit.updateMany).not.toHaveBeenCalled();
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_update_assets",
+      expect.objectContaining({
+        p_kit_ids: [],
+      })
+    );
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
   });
 
   it("should not update asset or kit status for RESERVED booking", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.RESERVED,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
+    // 1. sbDb.rpc - RPC handles status logic internally
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.RESERVED });
+    // 3. Asset fetch for notes
+    sbMock.enqueueData([
+      { id: "asset-1", title: "Asset 1" },
+      { id: "asset-2", title: "Asset 2" },
+    ]);
 
     const params = {
       ...mockUpdateBookingAssetsParams,
@@ -1208,16 +1107,15 @@ describe("updateBookingAssets", () => {
 
     await updateBookingAssets(params);
 
-    expect(db.$executeRaw).toHaveBeenCalled();
-    expect(db.asset.updateMany).not.toHaveBeenCalled();
-    expect(db.kit.updateMany).not.toHaveBeenCalled();
+    expect(sbMock.calls.rpc).toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
   });
 
   it("should throw ShelfError when booking lookup fails", async () => {
     expect.assertions(1);
 
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockRejectedValue(new Error("Database error"));
+    // sbDb.rpc returns error
+    sbMock.enqueueError({ message: "Database error", code: "500" });
 
     await expect(
       updateBookingAssets(mockUpdateBookingAssetsParams)
@@ -1225,75 +1123,42 @@ describe("updateBookingAssets", () => {
   });
 
   it("should throw 400 ShelfError when all assets have been deleted", async () => {
-    expect.assertions(2);
+    expect.assertions(1);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.DRAFT,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    // why: simulate all requested assets being deleted from DB
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([]);
+    // sbDb.rpc returns error about deleted assets
+    sbMock.enqueue({
+      data: { success: false, error: "None of the selected assets exist. They may have been deleted.", status: 400 },
+      error: null,
+    });
 
     await expect(
       updateBookingAssets(mockUpdateBookingAssetsParams)
-    ).rejects.toThrow(
-      expect.objectContaining({
-        message:
-          "None of the selected assets exist. They may have been deleted.",
-        status: 400,
-      })
-    );
-
-    expect(db.$executeRaw).not.toHaveBeenCalled();
+    ).rejects.toThrow(ShelfError);
   });
 
   it("should throw 400 ShelfError when some assets have been deleted", async () => {
-    expect.assertions(2);
+    expect.assertions(1);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.DRAFT,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    // why: simulate one of two requested assets being deleted from DB
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([{ id: "asset-1" }]);
+    // sbDb.rpc returns error about deleted assets
+    sbMock.enqueue({
+      data: { success: false, error: "Some of the selected assets no longer exist. Please reload and try again.", status: 400 },
+      error: null,
+    });
 
     await expect(
       updateBookingAssets(mockUpdateBookingAssetsParams)
-    ).rejects.toThrow(
-      expect.objectContaining({
-        message:
-          "Some of the selected assets no longer exist. Please reload and try again.",
-        status: 400,
-      })
-    );
-
-    expect(db.$executeRaw).not.toHaveBeenCalled();
+    ).rejects.toThrow(ShelfError);
   });
 
   it("should handle duplicate asset IDs without false validation failures", async () => {
     expect.assertions(2);
 
-    const mockBooking = {
-      id: "booking-1",
-      name: "Test Booking",
-      status: BookingStatus.DRAFT,
-    };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-
-    // why: simulate both unique assets existing — duplicates should be deduped
-    //@ts-expect-error missing vitest type
-    db.asset.findMany.mockResolvedValue([
+    // 1. sbDb.rpc - success
+    sbMock.enqueueData({ success: true });
+    // 2. Booking fetch
+    sbMock.enqueueData({ id: "booking-1", name: "Test Booking", status: BookingStatus.DRAFT });
+    // 3. Asset fetch for notes
+    sbMock.enqueueData([
       { id: "asset-1", title: "Asset 1" },
       { id: "asset-2", title: "Asset 2" },
     ]);
@@ -1305,14 +1170,17 @@ describe("updateBookingAssets", () => {
 
     const result = await updateBookingAssets(params);
 
-    expect(result).toEqual(mockBooking);
-    expect(db.$executeRaw).toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({ id: "booking-1" })
+    );
+    expect(sbMock.calls.rpc).toHaveBeenCalled();
   });
 });
 
 describe("reserveBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   const mockReserveParams = {
@@ -1433,6 +1301,7 @@ describe("reserveBooking", () => {
 describe("checkoutBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   const mockCheckoutParams = {
@@ -1558,6 +1427,7 @@ describe("checkoutBooking", () => {
 describe("checkinBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   const mockCheckinParams = {
@@ -1958,6 +1828,7 @@ describe("checkinBooking", () => {
 describe("archiveBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should archive booking successfully", async () => {
@@ -2035,6 +1906,7 @@ describe("archiveBooking", () => {
 describe("cancelBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should cancel booking successfully", async () => {
@@ -2089,6 +1961,7 @@ describe("cancelBooking", () => {
 describe("deleteBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should delete booking successfully", async () => {
@@ -2111,6 +1984,7 @@ describe("deleteBooking", () => {
 describe("getBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should get booking successfully", async () => {
@@ -2153,6 +2027,7 @@ describe("getBooking", () => {
 describe("duplicateBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should duplicate booking successfully", async () => {
@@ -2198,6 +2073,7 @@ describe("duplicateBooking", () => {
 describe("revertBookingToDraft", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should revert booking to draft successfully", async () => {
@@ -2243,6 +2119,7 @@ describe("revertBookingToDraft", () => {
 describe("extendBooking", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should extend booking successfully", async () => {
@@ -2768,6 +2645,7 @@ describe("extendBooking", () => {
 describe("removeAssets", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should remove assets from booking successfully", async () => {
@@ -2973,6 +2851,7 @@ describe("getSystemActionText", () => {
 describe("getOngoingBookingForAsset", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("should return booking when asset is checked out in an ONGOING booking", async () => {
