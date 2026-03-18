@@ -1,11 +1,10 @@
-import { KitStatus } from "@prisma/client";
 import {
   data,
   type ActionFunctionArgs,
   type LoaderFunctionArgs,
 } from "react-router";
 import { BulkAddToKitSchema } from "~/components/assets/bulk-add-to-kit-dialog";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { updateKitAssets } from "~/modules/kit/service.server";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
 import { makeShelfError } from "~/utils/error";
@@ -30,18 +29,13 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const kits = await db.kit.findMany({
-      where: {
-        organizationId,
-        status: { not: KitStatus.CHECKED_OUT },
-      },
-      select: {
-        id: true,
-        name: true,
-      },
-    });
+    const { data: kits } = await sbDb
+      .from("Kit")
+      .select("id, name")
+      .eq("organizationId", organizationId)
+      .neq("status", "CHECKED_OUT");
 
-    return data(payload({ kits }));
+    return data(payload({ kits: kits || [] }));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });

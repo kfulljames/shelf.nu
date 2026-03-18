@@ -2,7 +2,11 @@ import type { Prisma } from "@prisma/client";
 import { data } from "react-router";
 import type { LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
+// KEEP AS PRISMA: db.asset.findFirst and db.qr.findUniqueOrThrow use dynamic
+// Prisma include objects (assetExtraInclude / kitExtraInclude) that cannot be
+// expressed with Supabase's select string syntax.
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import {
   payload,
@@ -121,31 +125,53 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
       let auditNotesCount = 0;
       let auditImagesCount = 0;
       if (auditSessionId && asset.id) {
-        const auditAsset = await db.auditAsset.findFirst({
-          where: {
-            auditSessionId,
-            assetId: asset.id,
-          },
-          select: { id: true },
-        });
+        const { data: auditAsset, error: auditAssetError } = await sbDb
+          .from("AuditAsset")
+          .select("id")
+          .eq("auditSessionId", auditSessionId)
+          .eq("assetId", asset.id)
+          .maybeSingle();
+
+        if (auditAssetError) {
+          throw new ShelfError({
+            cause: auditAssetError,
+            message: "Failed to fetch audit asset",
+            label: "Scan",
+          });
+        }
+
         auditAssetId = auditAsset?.id;
         if (auditAssetId) {
-          const [notesCount, imagesCount] = await Promise.all([
-            db.auditNote.count({
-              where: {
-                auditSessionId,
-                auditAssetId,
-              },
-            }),
-            db.auditImage.count({
-              where: {
-                auditSessionId,
-                auditAssetId,
-              },
-            }),
+          const [notesResult, imagesResult] = await Promise.all([
+            sbDb
+              .from("AuditNote")
+              .select("*", { count: "exact", head: true })
+              .eq("auditSessionId", auditSessionId)
+              .eq("auditAssetId", auditAssetId),
+            sbDb
+              .from("AuditImage")
+              .select("*", { count: "exact", head: true })
+              .eq("auditSessionId", auditSessionId)
+              .eq("auditAssetId", auditAssetId),
           ]);
-          auditNotesCount = notesCount;
-          auditImagesCount = imagesCount;
+
+          if (notesResult.error) {
+            throw new ShelfError({
+              cause: notesResult.error,
+              message: "Failed to count audit notes",
+              label: "Scan",
+            });
+          }
+          if (imagesResult.error) {
+            throw new ShelfError({
+              cause: imagesResult.error,
+              message: "Failed to count audit images",
+              label: "Scan",
+            });
+          }
+
+          auditNotesCount = notesResult.count ?? 0;
+          auditImagesCount = imagesResult.count ?? 0;
         }
       }
 
@@ -201,31 +227,53 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     let auditNotesCount = 0;
     let auditImagesCount = 0;
     if (auditSessionId && qr.asset?.id) {
-      const auditAsset = await db.auditAsset.findFirst({
-        where: {
-          auditSessionId,
-          assetId: qr.asset.id,
-        },
-        select: { id: true },
-      });
+      const { data: auditAsset, error: auditAssetError } = await sbDb
+        .from("AuditAsset")
+        .select("id")
+        .eq("auditSessionId", auditSessionId)
+        .eq("assetId", qr.asset.id)
+        .maybeSingle();
+
+      if (auditAssetError) {
+        throw new ShelfError({
+          cause: auditAssetError,
+          message: "Failed to fetch audit asset",
+          label: "QR",
+        });
+      }
+
       auditAssetId = auditAsset?.id;
       if (auditAssetId) {
-        const [notesCount, imagesCount] = await Promise.all([
-          db.auditNote.count({
-            where: {
-              auditSessionId,
-              auditAssetId,
-            },
-          }),
-          db.auditImage.count({
-            where: {
-              auditSessionId,
-              auditAssetId,
-            },
-          }),
+        const [notesResult, imagesResult] = await Promise.all([
+          sbDb
+            .from("AuditNote")
+            .select("*", { count: "exact", head: true })
+            .eq("auditSessionId", auditSessionId)
+            .eq("auditAssetId", auditAssetId),
+          sbDb
+            .from("AuditImage")
+            .select("*", { count: "exact", head: true })
+            .eq("auditSessionId", auditSessionId)
+            .eq("auditAssetId", auditAssetId),
         ]);
-        auditNotesCount = notesCount;
-        auditImagesCount = imagesCount;
+
+        if (notesResult.error) {
+          throw new ShelfError({
+            cause: notesResult.error,
+            message: "Failed to count audit notes",
+            label: "QR",
+          });
+        }
+        if (imagesResult.error) {
+          throw new ShelfError({
+            cause: imagesResult.error,
+            message: "Failed to count audit images",
+            label: "QR",
+          });
+        }
+
+        auditNotesCount = notesResult.count ?? 0;
+        auditImagesCount = imagesResult.count ?? 0;
       }
     }
 

@@ -1,6 +1,6 @@
 import type { User } from "@prisma/client";
 
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 
 /**
  * Basic user name type for notes
@@ -19,10 +19,18 @@ export function createLoadUserForNotes(userId: User["id"]) {
 
   return async (): Promise<BasicUserName> => {
     if (!cachedUser) {
-      cachedUser = (await db.user.findFirst({
-        where: { id: userId },
-        select: { firstName: true, lastName: true },
-      })) ?? { firstName: null, lastName: null };
+      const { data: user } = await sbDb
+        .from("User")
+        .select("firstName, lastName")
+        .eq("id", userId)
+        .maybeSingle();
+
+      cachedUser = user
+        ? {
+            firstName: user.firstName as string | null,
+            lastName: user.lastName as string | null,
+          }
+        : { firstName: null, lastName: null };
     }
 
     return cachedUser;

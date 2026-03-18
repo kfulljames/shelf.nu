@@ -3,8 +3,9 @@ import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getAssets } from "~/modules/asset/service.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import { isPersonalOrg } from "~/utils/organization";
 import {
@@ -64,87 +65,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
     const searchTerms = terms.length > 0 ? terms : [query];
 
-    // Helper function to create search conditions for text fields
-    const createTextSearchConditions = (term: string, fields: string[]) =>
-      fields.map((field) => ({
-        [field]: { contains: term, mode: Prisma.QueryMode.insensitive },
-      }));
-
-    // Kit search conditions
-    const kitSearchConditions: Prisma.KitWhereInput[] = searchTerms.map(
-      (term) => ({
-        OR: [
-          ...createTextSearchConditions(term, ["name", "description"]),
-          { id: { contains: term, mode: Prisma.QueryMode.insensitive } },
-        ],
-      })
-    );
-
-    // Booking search conditions
-    const bookingSearchConditions: Prisma.BookingWhereInput[] = searchTerms.map(
-      (term) => ({
-        OR: [
-          ...createTextSearchConditions(term, ["name", "description"]),
-          { id: { contains: term, mode: Prisma.QueryMode.insensitive } },
-        ],
-      })
-    );
-
-    // Location search conditions
-    const locationSearchConditions: Prisma.LocationWhereInput[] =
-      searchTerms.map((term) => ({
-        OR: [
-          ...createTextSearchConditions(term, [
-            "name",
-            "description",
-            "address",
-          ]),
-          { id: { contains: term, mode: Prisma.QueryMode.insensitive } },
-        ],
-      }));
-
-    // Team member search conditions
-    const teamMemberSearchConditions: Prisma.TeamMemberWhereInput[] =
-      searchTerms.map((term) => ({
-        OR: [
-          { name: { contains: term, mode: Prisma.QueryMode.insensitive } },
-          { id: { contains: term, mode: Prisma.QueryMode.insensitive } },
-          {
-            user: {
-              OR: [
-                {
-                  firstName: {
-                    contains: term,
-                    mode: Prisma.QueryMode.insensitive,
-                  },
-                },
-                {
-                  lastName: {
-                    contains: term,
-                    mode: Prisma.QueryMode.insensitive,
-                  },
-                },
-                {
-                  email: {
-                    contains: term,
-                    mode: Prisma.QueryMode.insensitive,
-                  },
-                },
-              ],
-            },
-          },
-        ],
-      }));
-
-    // Audit search conditions
-    const auditSearchConditions: Prisma.AuditSessionWhereInput[] =
-      searchTerms.map((term) => ({
-        OR: [
-          ...createTextSearchConditions(term, ["name", "description"]),
-          { id: { contains: term, mode: Prisma.QueryMode.insensitive } },
-        ],
-      }));
-
     // Check if this is a personal workspace - they don't have bookings or team members
     const isPersonalWorkspace = isPersonalOrg(currentOrganization);
 
@@ -158,75 +78,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       !isPersonalWorkspace && ["OWNER", "ADMIN"].includes(role);
     const hasAuditPermission = true;
 
-    // Prepare where clauses for other entities
-
-    const kitWhere: Prisma.KitWhereInput = {
-      organizationId,
-      ...(kitSearchConditions.length ? { OR: kitSearchConditions } : {}),
-    };
-
-    const bookingWhere: Prisma.BookingWhereInput = {
-      organizationId,
-      ...(bookingSearchConditions.length
-        ? { OR: bookingSearchConditions }
-        : {}),
-      // BASE and SELF_SERVICE users can only see their own bookings unless org settings allow otherwise
-      ...(canSeeAllBookings ? {} : { custodianUserId: userId }),
-    };
-
-    const locationWhere: Prisma.LocationWhereInput = {
-      organizationId,
-      ...(locationSearchConditions.length
-        ? { OR: locationSearchConditions }
-        : {}),
-    };
-
-    const teamMemberWhere: Prisma.TeamMemberWhereInput = {
-      organizationId,
-      deletedAt: null,
-      ...(teamMemberSearchConditions.length
-        ? { OR: teamMemberSearchConditions }
-        : {}),
-      // BASE and SELF_SERVICE users can only see team members they have custody access to
-      ...(canSeeAllCustody
-        ? {}
-        : {
-            OR: [
-              // Team members they have assets in custody from
-              {
-                custodies: {
-                  some: {
-                    custodian: { userId },
-                  },
-                },
-              },
-              // Team members they have kits in custody from
-              {
-                kitCustodies: {
-                  some: {
-                    custodian: { userId },
-                  },
-                },
-              },
-              // Their own team member record
-              { userId },
-            ],
-          }),
-    };
-
-    const auditWhere: Prisma.AuditSessionWhereInput = {
-      organizationId,
-      ...(auditSearchConditions.length ? { OR: auditSearchConditions } : {}),
-      ...(isSelfServiceOrBase && userId
-        ? {
-            assignments: {
-              some: {
-                userId,
-              },
-            },
-          }
-        : {}),
-    };
+    // Build Supabase OR filter strings for multi-term ilike search
+    const buildIlikeOr = (fields: string[], terms: string[]): string =>
+      terms
+        .flatMap((term) => fields.map((field) => `${field}.ilike.%${term}%`))
+        .join(",");
 
     // Execute parallel searches
     const [assetResults, audits, kits, bookings, locations, teamMembers] =
@@ -247,76 +103,303 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
 
         // Audits (permission-gated)
+        // KEEP AS PRISMA: uses nested `some` filter on `assignments` relation
         hasAuditPermission
-          ? db.auditSession.findMany({
-              where: auditWhere,
-              take: 6,
-              orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-              select: {
-                id: true,
-                name: true,
-                description: true,
-                status: true,
-                dueDate: true,
-              },
-            })
-          : Promise.resolve([]),
+          ? (async () => {
+              const auditSearchConditions: Prisma.AuditSessionWhereInput[] =
+                searchTerms.map((term) => ({
+                  OR: [
+                    {
+                      name: {
+                        contains: term,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      description: {
+                        contains: term,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      id: {
+                        contains: term,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  ],
+                }));
 
-        // Kits (permission-gated)
-        hasKitPermission
-          ? db.kit.findMany({
-              where: kitWhere,
-              take: 6,
-              orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-              include: {
-                _count: { select: { assets: true } },
-              },
-            })
-          : Promise.resolve([]),
+              const auditWhere: Prisma.AuditSessionWhereInput = {
+                organizationId,
+                ...(auditSearchConditions.length
+                  ? { OR: auditSearchConditions }
+                  : {}),
+                ...(isSelfServiceOrBase && userId
+                  ? {
+                      assignments: {
+                        some: {
+                          userId,
+                        },
+                      },
+                    }
+                  : {}),
+              };
 
-        // Bookings (permission-gated)
-        hasBookingPermission
-          ? db.booking.findMany({
-              where: bookingWhere,
-              take: 6,
-              orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-              include: {
-                custodianUser: {
-                  select: { firstName: true, lastName: true, email: true },
+              return db.auditSession.findMany({
+                where: auditWhere,
+                take: 6,
+                orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
+                select: {
+                  id: true,
+                  name: true,
+                  description: true,
+                  status: true,
+                  dueDate: true,
                 },
-                custodianTeamMember: { select: { name: true } },
-              },
-            })
+              });
+            })()
           : Promise.resolve([]),
 
-        // Locations (permission-gated)
+        // Kits (permission-gated) - Supabase
+        hasKitPermission
+          ? (async () => {
+              const kitOrFilter = buildIlikeOr(
+                ["name", "description", "id"],
+                searchTerms
+              );
+
+              const { data: kitRows, error: kitError } = await sbDb
+                .from("Kit")
+                .select("*")
+                .eq("organizationId", organizationId)
+                .or(kitOrFilter)
+                .order("updatedAt", { ascending: false })
+                .order("name", { ascending: true })
+                .limit(6);
+
+              if (kitError) {
+                throw new ShelfError({
+                  cause: kitError,
+                  message: "Failed to search kits",
+                  label: "Kit",
+                });
+              }
+
+              // _count: query asset counts separately
+              const kitIds = (kitRows ?? []).map((k) => k.id);
+              let kitAssetCounts: Record<string, number> = {};
+
+              if (kitIds.length > 0) {
+                const { data: countRows, error: countError } = await sbDb
+                  .from("Asset")
+                  .select("kitId", { count: "exact", head: false })
+                  .in("kitId", kitIds);
+
+                if (!countError && countRows) {
+                  kitAssetCounts = countRows.reduce(
+                    (acc, row) => {
+                      if (row.kitId) {
+                        acc[row.kitId] = (acc[row.kitId] || 0) + 1;
+                      }
+                      return acc;
+                    },
+                    {} as Record<string, number>
+                  );
+                }
+              }
+
+              return (kitRows ?? []).map((kit) => ({
+                ...kit,
+                _count: { assets: kitAssetCounts[kit.id] || 0 },
+              }));
+            })()
+          : Promise.resolve([]),
+
+        // Bookings (permission-gated) - Supabase
+        hasBookingPermission
+          ? (async () => {
+              const bookingOrFilter = buildIlikeOr(
+                ["name", "description", "id"],
+                searchTerms
+              );
+
+              let bookingQuery = sbDb
+                .from("Booking")
+                .select(
+                  "*, custodianUser:User!custodianUserId(firstName, lastName, email), custodianTeamMember:TeamMember!custodianTeamMemberId(name)"
+                )
+                .eq("organizationId", organizationId)
+                .or(bookingOrFilter);
+
+              // BASE and SELF_SERVICE users can only see their own bookings unless org settings allow otherwise
+              if (!canSeeAllBookings) {
+                bookingQuery = bookingQuery.eq("custodianUserId", userId);
+              }
+
+              const { data: bookingRows, error: bookingError } =
+                await bookingQuery
+                  .order("updatedAt", { ascending: false })
+                  .order("name", { ascending: true })
+                  .limit(6);
+
+              if (bookingError) {
+                throw new ShelfError({
+                  cause: bookingError,
+                  message: "Failed to search bookings",
+                  label: "Booking",
+                });
+              }
+
+              return bookingRows ?? [];
+            })()
+          : Promise.resolve([]),
+
+        // Locations (permission-gated) - Supabase
         hasLocationPermission
-          ? db.location.findMany({
-              where: locationWhere,
-              take: 6,
-              orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-              include: {
-                _count: { select: { assets: true } },
-              },
-            })
+          ? (async () => {
+              const locationOrFilter = buildIlikeOr(
+                ["name", "description", "address", "id"],
+                searchTerms
+              );
+
+              const { data: locationRows, error: locationError } = await sbDb
+                .from("Location")
+                .select("*")
+                .eq("organizationId", organizationId)
+                .or(locationOrFilter)
+                .order("updatedAt", { ascending: false })
+                .order("name", { ascending: true })
+                .limit(6);
+
+              if (locationError) {
+                throw new ShelfError({
+                  cause: locationError,
+                  message: "Failed to search locations",
+                  label: "Location",
+                });
+              }
+
+              // _count: query asset counts separately
+              const locationIds = (locationRows ?? []).map((l) => l.id);
+              let locationAssetCounts: Record<string, number> = {};
+
+              if (locationIds.length > 0) {
+                const { data: countRows, error: countError } = await sbDb
+                  .from("Asset")
+                  .select("locationId")
+                  .in("locationId", locationIds);
+
+                if (!countError && countRows) {
+                  locationAssetCounts = countRows.reduce(
+                    (acc, row) => {
+                      if (row.locationId) {
+                        acc[row.locationId] = (acc[row.locationId] || 0) + 1;
+                      }
+                      return acc;
+                    },
+                    {} as Record<string, number>
+                  );
+                }
+              }
+
+              return (locationRows ?? []).map((loc) => ({
+                ...loc,
+                _count: { assets: locationAssetCounts[loc.id] || 0 },
+              }));
+            })()
           : Promise.resolve([]),
 
         // Team members (permission-gated)
+        // KEEP AS PRISMA: uses nested `some` on `custodies`/`kitCustodies` relations
+        // and nested `user` relation search with `contains`
         hasTeamMemberPermission
-          ? db.teamMember.findMany({
-              where: teamMemberWhere,
-              take: 8,
-              orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-              include: {
-                user: {
-                  select: {
-                    firstName: true,
-                    lastName: true,
-                    email: true,
+          ? (async () => {
+              const createTextSearchConditions = (
+                term: string,
+                fields: string[]
+              ) =>
+                fields.map((field) => ({
+                  [field]: {
+                    contains: term,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                }));
+
+              const teamMemberSearchConditions: Prisma.TeamMemberWhereInput[] =
+                searchTerms.map((term) => ({
+                  OR: [
+                    {
+                      name: {
+                        contains: term,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      id: {
+                        contains: term,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      user: {
+                        OR: [
+                          ...createTextSearchConditions(term, [
+                            "firstName",
+                            "lastName",
+                            "email",
+                          ]),
+                        ],
+                      },
+                    },
+                  ],
+                }));
+
+              const teamMemberWhere: Prisma.TeamMemberWhereInput = {
+                organizationId,
+                deletedAt: null,
+                ...(teamMemberSearchConditions.length
+                  ? { OR: teamMemberSearchConditions }
+                  : {}),
+                // BASE and SELF_SERVICE users can only see team members they have custody access to
+                ...(canSeeAllCustody
+                  ? {}
+                  : {
+                      OR: [
+                        {
+                          custodies: {
+                            some: {
+                              custodian: { userId },
+                            },
+                          },
+                        },
+                        {
+                          kitCustodies: {
+                            some: {
+                              custodian: { userId },
+                            },
+                          },
+                        },
+                        { userId },
+                      ],
+                    }),
+              };
+
+              return db.teamMember.findMany({
+                where: teamMemberWhere,
+                take: 8,
+                orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
+                include: {
+                  user: {
+                    select: {
+                      firstName: true,
+                      lastName: true,
+                      email: true,
+                    },
                   },
                 },
-              },
-            })
+              });
+            })()
           : Promise.resolve([]),
       ]);
 
@@ -355,7 +438,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           name: audit.name,
           description: audit.description || null,
           status: audit.status,
-          dueDate: audit.dueDate?.toISOString() || null,
+          dueDate: audit.dueDate ? new Date(audit.dueDate).toISOString() : null,
         })),
         kits: kits.map((kit) => ({
           id: kit.id,
@@ -364,7 +447,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           status: kit.status,
           assetCount: kit._count?.assets || 0,
         })),
-        bookings: bookings.map((booking) => ({
+        bookings: bookings.map((booking: any) => ({
           id: booking.id,
           name: booking.name,
           description: booking.description || null,
@@ -372,8 +455,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           custodianName: booking.custodianUser
             ? `${booking.custodianUser.firstName} ${booking.custodianUser.lastName}`.trim()
             : booking.custodianTeamMember?.name || null,
-          from: booking.from?.toISOString() || null,
-          to: booking.to?.toISOString() || null,
+          from: booking.from ? new Date(booking.from).toISOString() : null,
+          to: booking.to ? new Date(booking.to).toISOString() : null,
         })),
         locations: locations.map((location) => ({
           id: location.id,

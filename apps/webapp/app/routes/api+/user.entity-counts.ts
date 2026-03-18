@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError } from "~/utils/error";
 import { error, getParams, payload } from "~/utils/http.server";
 import {
@@ -30,44 +30,73 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     );
 
     const [
-      assets,
-      categories,
-      tags,
-      locations,
-      customFields,
-      bookings,
-      kits,
-      assetReminders,
-      images,
+      assetResult,
+      categoryResult,
+      tagResult,
+      locationResult,
+      customFieldResult,
+      bookingResult,
+      kitResult,
+      assetReminderResult,
+      imageResult,
     ] = await Promise.all([
-      db.asset.count({
-        where: { userId: targetUserId, organizationId },
-      }),
-      db.category.count({
-        where: { userId: targetUserId, organizationId },
-      }),
-      db.tag.count({
-        where: { userId: targetUserId, organizationId },
-      }),
-      db.location.count({
-        where: { userId: targetUserId, organizationId },
-      }),
-      db.customField.count({
-        where: { userId: targetUserId, organizationId, deletedAt: null },
-      }),
-      db.booking.count({
-        where: { creatorId: targetUserId, organizationId },
-      }),
-      db.kit.count({
-        where: { createdById: targetUserId, organizationId },
-      }),
-      db.assetReminder.count({
-        where: { createdById: targetUserId, organizationId },
-      }),
-      db.image.count({
-        where: { userId: targetUserId, ownerOrgId: organizationId },
-      }),
+      sbDb
+        .from("Asset")
+        .select("*", { count: "exact", head: true })
+        .eq("userId", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("Category")
+        .select("*", { count: "exact", head: true })
+        .eq("userId", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("Tag")
+        .select("*", { count: "exact", head: true })
+        .eq("userId", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("Location")
+        .select("*", { count: "exact", head: true })
+        .eq("userId", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("CustomField")
+        .select("*", { count: "exact", head: true })
+        .eq("userId", targetUserId)
+        .eq("organizationId", organizationId)
+        .is("deletedAt", null),
+      sbDb
+        .from("Booking")
+        .select("*", { count: "exact", head: true })
+        .eq("creatorId", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("Kit")
+        .select("*", { count: "exact", head: true })
+        .eq("createdById", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("AssetReminder")
+        .select("*", { count: "exact", head: true })
+        .eq("createdById", targetUserId)
+        .eq("organizationId", organizationId),
+      sbDb
+        .from("Image")
+        .select("*", { count: "exact", head: true })
+        .eq("userId", targetUserId)
+        .eq("ownerOrgId", organizationId),
     ]);
+
+    const assets = assetResult.count ?? 0;
+    const categories = categoryResult.count ?? 0;
+    const tags = tagResult.count ?? 0;
+    const locations = locationResult.count ?? 0;
+    const customFields = customFieldResult.count ?? 0;
+    const bookings = bookingResult.count ?? 0;
+    const kits = kitResult.count ?? 0;
+    const assetReminders = assetReminderResult.count ?? 0;
+    const images = imageResult.count ?? 0;
 
     const total =
       assets +

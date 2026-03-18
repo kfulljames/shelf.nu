@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { data } from "react-router";
 import type { LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getBarcodeByValue } from "~/modules/barcode/service.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import {
@@ -147,31 +147,53 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     let auditNotesCount = 0;
     let auditImagesCount = 0;
     if (auditSessionId && barcode.asset?.id) {
-      const auditAsset = await db.auditAsset.findFirst({
-        where: {
-          auditSessionId,
-          assetId: barcode.asset.id,
-        },
-        select: { id: true },
-      });
+      const { data: auditAsset, error: auditAssetError } = await sbDb
+        .from("AuditAsset")
+        .select("id")
+        .eq("auditSessionId", auditSessionId)
+        .eq("assetId", barcode.asset.id)
+        .maybeSingle();
+
+      if (auditAssetError) {
+        throw new ShelfError({
+          cause: auditAssetError,
+          message: "Failed to fetch audit asset",
+          label: "Barcode",
+        });
+      }
+
       auditAssetId = auditAsset?.id;
       if (auditAssetId) {
-        const [notesCount, imagesCount] = await Promise.all([
-          db.auditNote.count({
-            where: {
-              auditSessionId,
-              auditAssetId,
-            },
-          }),
-          db.auditImage.count({
-            where: {
-              auditSessionId,
-              auditAssetId,
-            },
-          }),
+        const [notesResult, imagesResult] = await Promise.all([
+          sbDb
+            .from("AuditNote")
+            .select("*", { count: "exact", head: true })
+            .eq("auditSessionId", auditSessionId)
+            .eq("auditAssetId", auditAssetId),
+          sbDb
+            .from("AuditImage")
+            .select("*", { count: "exact", head: true })
+            .eq("auditSessionId", auditSessionId)
+            .eq("auditAssetId", auditAssetId),
         ]);
-        auditNotesCount = notesCount;
-        auditImagesCount = imagesCount;
+
+        if (notesResult.error) {
+          throw new ShelfError({
+            cause: notesResult.error,
+            message: "Failed to count audit notes",
+            label: "Barcode",
+          });
+        }
+        if (imagesResult.error) {
+          throw new ShelfError({
+            cause: imagesResult.error,
+            message: "Failed to count audit images",
+            label: "Barcode",
+          });
+        }
+
+        auditNotesCount = notesResult.count ?? 0;
+        auditImagesCount = imagesResult.count ?? 0;
       }
     }
 

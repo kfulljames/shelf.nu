@@ -2,7 +2,7 @@ import type { Organization, User } from "@prisma/client";
 import Stripe from "stripe";
 import type { PriceWithProduct } from "~/components/subscription/prices";
 import { config } from "~/config/shelf.config";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getOrganizationByUserId } from "~/modules/organization/service.server";
 import {
   getOrganizationTierLimit,
@@ -328,11 +328,19 @@ export const createStripeCustomer = async ({
         },
       });
 
-      await db.user.update({
-        where: { id: userId },
-        data: { customerId },
-        select: { id: true },
-      });
+      const { error: updateError } = await sbDb
+        .from("User")
+        .update({ customerId })
+        .eq("id", userId);
+
+      if (updateError) {
+        throw new ShelfError({
+          cause: updateError,
+          message: "Failed to update user with Stripe customer ID",
+          additionalData: { userId, customerId },
+          label,
+        });
+      }
 
       return customerId;
     }
@@ -866,12 +874,13 @@ export async function getUserActiveSubscription(
   try {
     if (!stripe || !premiumIsEnabled) return null;
 
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: { customerId: true },
-    });
+    const { data: user, error: userError } = await sbDb
+      .from("User")
+      .select("customerId")
+      .eq("id", userId)
+      .single();
 
-    if (!user?.customerId) return null;
+    if (userError || !user?.customerId) return null;
 
     const customer = (await getStripeCustomer(
       user.customerId
@@ -900,12 +909,13 @@ export async function getUserActiveSubscriptions(
   try {
     if (!stripe || !premiumIsEnabled) return [];
 
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: { customerId: true },
-    });
+    const { data: user, error: userError } = await sbDb
+      .from("User")
+      .select("customerId")
+      .eq("id", userId)
+      .single();
 
-    if (!user?.customerId) return [];
+    if (userError || !user?.customerId) return [];
 
     const subscriptions = await getCustomerSubscriptionsWithProducts(
       user.customerId
@@ -944,10 +954,20 @@ export async function getOwnerSubscriptionInfo(
       };
     }
 
-    const user = await db.user.findUnique({
-      where: { id: ownerId },
-      select: { customerId: true, tierId: true },
-    });
+    const { data: user, error: userError } = await sbDb
+      .from("User")
+      .select("customerId, tierId")
+      .eq("id", ownerId)
+      .single();
+
+    if (userError) {
+      throw new ShelfError({
+        cause: userError,
+        message: "Failed to fetch user for subscription info",
+        additionalData: { ownerId },
+        label,
+      });
+    }
 
     if (!user?.customerId) {
       return {

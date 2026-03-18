@@ -1,8 +1,7 @@
-import type { Prisma } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
-import { db } from "~/database/db.server";
-import { makeShelfError } from "~/utils/error";
+import { sbDb } from "~/database/supabase.server";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import {
   PermissionAction,
@@ -10,21 +9,22 @@ import {
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
 
-const TEAM_MEMBER_INCLUDE = {
+export type AuditTeamMember = {
+  id: string;
+  name: string;
+  userId: string | null;
+  organizationId: string;
+  deletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
   user: {
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      profilePicture: true,
-    },
-  },
-} satisfies Prisma.TeamMemberInclude;
-
-export type AuditTeamMember = Prisma.TeamMemberGetPayload<{
-  include: typeof TEAM_MEMBER_INCLUDE;
-}>;
+    id: string;
+    email: string;
+    firstName: string | null;
+    lastName: string | null;
+    profilePicture: string | null;
+  } | null;
+};
 
 /**
  * API endpoint to fetch team members for audit assignment.
@@ -43,22 +43,25 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     });
 
     // Fetch team members who have user accounts (exclude NRMs)
-    const teamMembers = await db.teamMember.findMany({
-      where: {
-        deletedAt: null,
-        organizationId,
-        user: { isNot: null }, // Only users, no NRMs
-      },
-      orderBy: [
-        // Users first
-        { user: { firstName: "asc" } },
-        // Then by name for any edge cases
-        { name: "asc" },
-      ],
-      include: TEAM_MEMBER_INCLUDE,
-    });
+    // Using !inner join filters out rows where user is null (equivalent to Prisma's `isNot: null`)
+    const { data: teamMembers, error: tmError } = await sbDb
+      .from("TeamMember")
+      .select(
+        "*, user:User!inner(id, email, firstName, lastName, profilePicture)"
+      )
+      .eq("organizationId", organizationId)
+      .is("deletedAt", null)
+      .order("name", { ascending: true });
 
-    return data(payload({ teamMembers }));
+    if (tmError) {
+      throw new ShelfError({
+        cause: tmError,
+        message: "Failed to fetch team members for audit assignment",
+        label: "Audit",
+      });
+    }
+
+    return data(payload({ teamMembers: teamMembers ?? [] }));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });

@@ -2,7 +2,6 @@ import type {
   Asset,
   Note,
   Organization,
-  Prisma,
   Tag,
   TeamMember,
 } from "@prisma/client";
@@ -16,7 +15,7 @@ import chardet from "chardet";
 import { CsvError, parse } from "csv-parse";
 import { format } from "date-fns";
 import iconv from "iconv-lite";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   fetchAssetsForExport,
   getAdvancedPaginatedAndFilterableAssets,
@@ -35,7 +34,6 @@ import {
   parseColumnName,
 } from "~/modules/asset-index-settings/helpers";
 import type { AssetIndexSettingsRow } from "~/modules/asset-index-settings/service.server";
-import { BOOKING_COMMON_INCLUDE } from "~/modules/booking/constants";
 import {
   getBookings,
   getBookingsFilterData,
@@ -655,18 +653,38 @@ export async function exportBookingsFromIndexToCsv({
       });
       bookings = bookingsData.bookings;
     } else {
-      bookings = await db.booking.findMany({
-        where: { id: { in: bookingsIds }, organizationId },
-        include: {
-          ...BOOKING_COMMON_INCLUDE,
-          assets: {
-            select: {
-              title: true,
-            },
-          },
-          tags: { select: { name: true } },
-        },
-      });
+      const { data: bookingsData, error: bookingsError } = await sbDb
+        .from("Booking")
+        .select(
+          `id, name, status, from, to, originalFrom, originalTo, description,
+          custodianTeamMemberId, custodianUserId, organizationId,
+          custodianTeamMember:TeamMember!custodianTeamMemberId(id, name, userId, user:User(firstName, lastName, email, profilePicture)),
+          custodianUser:User!custodianUserId(firstName, lastName, email, profilePicture),
+          assets:Asset(title),
+          tags:Tag(name)`
+        )
+        .in("id", bookingsIds)
+        .eq("organizationId", organizationId);
+
+      if (bookingsError) {
+        throw new ShelfError({
+          cause: bookingsError,
+          message: "Failed to fetch bookings for CSV export",
+          label: "Booking",
+        });
+      }
+
+      bookings = (bookingsData ?? []).map((b: any) => ({
+        ...b,
+        from: b.from ? new Date(b.from) : null,
+        to: b.to ? new Date(b.to) : null,
+        originalFrom: b.originalFrom ? new Date(b.originalFrom) : null,
+        originalTo: b.originalTo ? new Date(b.originalTo) : null,
+        custodianTeamMember: b.custodianTeamMember ?? null,
+        custodianUser: b.custodianUser ?? null,
+        assets: b.assets ?? [],
+        tags: b.tags ?? [],
+      }));
     }
 
     // Pass both assets and columns to the build function
@@ -724,77 +742,6 @@ const notesToCsv = (notes: ActivityNote[], formatter: Intl.DateTimeFormat) => {
   return [ACTIVITY_HEADER, ...rows].join("\n");
 };
 
-type ActivityNoteRecord = {
-  user: {
-    firstName: string | null;
-    lastName: string | null;
-  } | null;
-  content: string | null;
-  createdAt: Date;
-  type: string;
-};
-
-type NoteFetcher<Where> = (args: {
-  where: Where;
-  include: {
-    user: {
-      select: {
-        firstName: true;
-        lastName: true;
-      };
-    };
-  };
-  orderBy: {
-    createdAt: "desc";
-  };
-}) => Promise<ActivityNoteRecord[]>;
-
-type ExportNotesToCsvArgs<Where> = {
-  request: Request;
-  where: Where;
-  findMany: NoteFetcher<Where>;
-};
-
-async function exportNotesToCsv<Where>({
-  request,
-  where,
-  findMany,
-}: ExportNotesToCsvArgs<Where>) {
-  const formatter = getDateTimeFormat(request, {
-    dateStyle: "short",
-    timeStyle: "short",
-  });
-
-  const notes = await findMany({
-    where,
-    include: {
-      user: {
-        select: {
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
-    orderBy: {
-      createdAt: "desc",
-    },
-  });
-
-  const activityNotes = notes.map<ActivityNote>((note) => ({
-    content: note.content ?? "",
-    createdAt: note.createdAt,
-    type: note.type as ActivityNote["type"],
-    user: note.user
-      ? {
-          firstName: note.user.firstName,
-          lastName: note.user.lastName,
-        }
-      : null,
-  }));
-
-  return notesToCsv(activityNotes, formatter);
-}
-
 export async function exportAssetNotesToCsv({
   request,
   assetId,
@@ -804,14 +751,36 @@ export async function exportAssetNotesToCsv({
   assetId: string;
   organizationId: string;
 }) {
-  return exportNotesToCsv<Prisma.NoteWhereInput>({
-    request,
-    where: {
-      assetId,
-      asset: { organizationId },
-    },
-    findMany: (args) => db.note.findMany(args) as Promise<ActivityNoteRecord[]>,
+  const formatter = getDateTimeFormat(request, {
+    dateStyle: "short",
+    timeStyle: "short",
   });
+
+  const { data: notes, error } = await sbDb
+    .from("Note")
+    .select("content, createdAt, type, user:User!userId(firstName, lastName)")
+    .eq("assetId", assetId)
+    .eq("Asset.organizationId", organizationId)
+    .order("createdAt", { ascending: false });
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to fetch asset notes for CSV export",
+      label: "CSV",
+    });
+  }
+
+  const activityNotes = (notes ?? []).map<ActivityNote>((note: any) => ({
+    content: note.content ?? "",
+    createdAt: new Date(note.createdAt),
+    type: note.type as ActivityNote["type"],
+    user: note.user
+      ? { firstName: note.user.firstName, lastName: note.user.lastName }
+      : null,
+  }));
+
+  return notesToCsv(activityNotes, formatter);
 }
 
 export async function exportBookingNotesToCsv({
@@ -823,15 +792,36 @@ export async function exportBookingNotesToCsv({
   bookingId: string;
   organizationId: string;
 }) {
-  return exportNotesToCsv<Prisma.BookingNoteWhereInput>({
-    request,
-    where: {
-      bookingId,
-      booking: { organizationId },
-    },
-    findMany: (args) =>
-      db.bookingNote.findMany(args) as Promise<ActivityNoteRecord[]>,
+  const formatter = getDateTimeFormat(request, {
+    dateStyle: "short",
+    timeStyle: "short",
   });
+
+  const { data: notes, error } = await sbDb
+    .from("BookingNote")
+    .select("content, createdAt, type, user:User!userId(firstName, lastName)")
+    .eq("bookingId", bookingId)
+    .eq("Booking.organizationId", organizationId)
+    .order("createdAt", { ascending: false });
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to fetch booking notes for CSV export",
+      label: "CSV",
+    });
+  }
+
+  const activityNotes = (notes ?? []).map<ActivityNote>((note: any) => ({
+    content: note.content ?? "",
+    createdAt: new Date(note.createdAt),
+    type: note.type as ActivityNote["type"],
+    user: note.user
+      ? { firstName: note.user.firstName, lastName: note.user.lastName }
+      : null,
+  }));
+
+  return notesToCsv(activityNotes, formatter);
 }
 
 export async function exportAuditNotesToCsv({
@@ -843,15 +833,36 @@ export async function exportAuditNotesToCsv({
   auditId: string;
   organizationId: string;
 }) {
-  return exportNotesToCsv<Prisma.AuditNoteWhereInput>({
-    request,
-    where: {
-      auditSessionId: auditId,
-      auditSession: { organizationId },
-    },
-    findMany: (args) =>
-      db.auditNote.findMany(args) as Promise<ActivityNoteRecord[]>,
+  const formatter = getDateTimeFormat(request, {
+    dateStyle: "short",
+    timeStyle: "short",
   });
+
+  const { data: notes, error } = await sbDb
+    .from("AuditNote")
+    .select("content, createdAt, type, user:User!userId(firstName, lastName)")
+    .eq("auditSessionId", auditId)
+    .eq("AuditSession.organizationId", organizationId)
+    .order("createdAt", { ascending: false });
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to fetch audit notes for CSV export",
+      label: "CSV",
+    });
+  }
+
+  const activityNotes = (notes ?? []).map<ActivityNote>((note: any) => ({
+    content: note.content ?? "",
+    createdAt: new Date(note.createdAt),
+    type: note.type as ActivityNote["type"],
+    user: note.user
+      ? { firstName: note.user.firstName, lastName: note.user.lastName }
+      : null,
+  }));
+
+  return notesToCsv(activityNotes, formatter);
 }
 
 export async function exportLocationNotesToCsv({
@@ -863,15 +874,36 @@ export async function exportLocationNotesToCsv({
   locationId: string;
   organizationId: string;
 }) {
-  return exportNotesToCsv<Prisma.LocationNoteWhereInput>({
-    request,
-    where: {
-      locationId,
-      location: { organizationId },
-    },
-    findMany: (args) =>
-      db.locationNote.findMany(args) as Promise<ActivityNoteRecord[]>,
+  const formatter = getDateTimeFormat(request, {
+    dateStyle: "short",
+    timeStyle: "short",
   });
+
+  const { data: notes, error } = await sbDb
+    .from("LocationNote")
+    .select("content, createdAt, type, user:User!userId(firstName, lastName)")
+    .eq("locationId", locationId)
+    .eq("Location.organizationId", organizationId)
+    .order("createdAt", { ascending: false });
+
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to fetch location notes for CSV export",
+      label: "CSV",
+    });
+  }
+
+  const activityNotes = (notes ?? []).map<ActivityNote>((note: any) => ({
+    content: note.content ?? "",
+    createdAt: new Date(note.createdAt),
+    type: note.type as ActivityNote["type"],
+    user: note.user
+      ? { firstName: note.user.firstName, lastName: note.user.lastName }
+      : null,
+  }));
+
+  return notesToCsv(activityNotes, formatter);
 }
 
 /** Define some types to use for normalizing bookings across the different fetches */
@@ -1037,14 +1069,50 @@ export async function exportNRMsToCsv({
   organizationId: Organization["id"];
 }) {
   try {
-    const where: Prisma.TeamMemberWhereInput = nrmIds.includes(ALL_SELECTED_KEY)
-      ? { organizationId }
-      : { id: { in: nrmIds }, organizationId };
+    const takeAll = nrmIds.includes(ALL_SELECTED_KEY);
 
-    const teamMembers = await db.teamMember.findMany({
-      where,
-      include: { _count: { select: { custodies: true } } },
-    });
+    let query = sbDb
+      .from("TeamMember")
+      .select("id, name")
+      .eq("organizationId", organizationId);
+
+    if (!takeAll) {
+      query = query.in("id", nrmIds);
+    }
+
+    const { data: teamMembersData, error: tmError } = await query;
+
+    if (tmError) {
+      throw new ShelfError({
+        cause: tmError,
+        message: "Failed to fetch team members for CSV export",
+        label: "Team Member",
+      });
+    }
+
+    // Count custodies separately for each team member
+    const teamMembers = await Promise.all(
+      (teamMembersData ?? []).map(async (tm: any) => {
+        const { count, error: countError } = await sbDb
+          .from("Custody")
+          .select("*", { count: "exact", head: true })
+          .eq("teamMemberId", tm.id);
+
+        if (countError) {
+          throw new ShelfError({
+            cause: countError,
+            message: "Failed to count custodies for team member",
+            label: "Team Member",
+          });
+        }
+
+        return {
+          id: tm.id as string,
+          name: tm.name as string,
+          custodyCount: count ?? 0,
+        };
+      })
+    );
 
     return buildCsvExportDataFromTeamMembers({ teamMembers });
   } catch (cause) {
@@ -1062,9 +1130,7 @@ export async function exportNRMsToCsv({
 export function buildCsvExportDataFromTeamMembers({
   teamMembers,
 }: {
-  teamMembers: Prisma.TeamMemberGetPayload<{
-    include: { _count: { select: { custodies: true } } };
-  }>[];
+  teamMembers: { id: string; name: string; custodyCount: number }[];
 }) {
   try {
     const headers = {
@@ -1089,7 +1155,7 @@ export function buildCsvExportDataFromTeamMembers({
             break;
 
           case "custodies":
-            value = teamMember._count.custodies.toString();
+            value = teamMember.custodyCount.toString();
             break;
 
           default:

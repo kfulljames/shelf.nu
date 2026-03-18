@@ -5,7 +5,7 @@ import { BulkAssignKitCustodySchema } from "~/components/kits/bulk-assign-custod
 import { BulkDeleteKitsSchema } from "~/components/kits/bulk-delete-dialog";
 import { KitBulkLocationUpdateSchema } from "~/components/kits/bulk-location-update-dialog";
 import { BulkReleaseKitCustodySchema } from "~/components/kits/bulk-release-custody-dialog";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { CurrentSearchParamsSchema } from "~/modules/asset/utils.server";
 import {
   bulkAssignKitCustody,
@@ -139,13 +139,23 @@ export async function action({ request, context }: ActionFunctionArgs) {
         const { kitIds } = parseData(formData, BulkReleaseKitCustodySchema);
 
         if (isSelfService) {
-          const custodies = await db.kitCustody.findMany({
-            where: { kitId: { in: kitIds } },
-            select: { custodian: { select: { id: true, userId: true } } },
-          });
+          const { data: custodies, error: custodyError } = await sbDb
+            .from("KitCustody")
+            .select("custodian:TeamMember!custodianTeamMemberId(id, userId)")
+            .in("kitId", kitIds);
+
+          if (custodyError) {
+            throw new ShelfError({
+              cause: custodyError,
+              message: "Failed to fetch kit custodies",
+              label: "Kit",
+            });
+          }
 
           if (
-            custodies.some((custody) => custody.custodian.userId !== userId)
+            (custodies ?? []).some(
+              (custody: any) => custody.custodian?.userId !== userId
+            )
           ) {
             throw new ShelfError({
               cause: null,

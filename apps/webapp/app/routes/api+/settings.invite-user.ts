@@ -1,6 +1,6 @@
 import { data, type ActionFunctionArgs } from "react-router";
 import { InviteUserFormSchema } from "~/components/settings/invite-user-dialog";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { createInvite } from "~/modules/invite/service.server";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
@@ -34,33 +34,36 @@ export async function action({ context, request }: ActionFunctionArgs) {
     let teamMemberName = email.split("@")[0];
 
     if (teamMemberId) {
-      const teamMember = await db.teamMember
-        .findUnique({
-          where: { deletedAt: null, id: teamMemberId, organizationId },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "Failed to get team member",
-            additionalData: { teamMemberId, userId },
-            label: "Team",
-          });
+      const { data: teamMember, error: tmError } = await sbDb
+        .from("TeamMember")
+        .select("*")
+        .eq("id", teamMemberId)
+        .eq("organizationId", organizationId)
+        .is("deletedAt", null)
+        .single();
+
+      if (tmError) {
+        throw new ShelfError({
+          cause: tmError,
+          message: "Failed to get team member",
+          additionalData: { teamMemberId, userId },
+          label: "Team",
         });
+      }
 
       if (teamMember) {
         teamMemberName = teamMember.name;
       }
     }
 
-    const existingInvites = await db.invite.findMany({
-      where: {
-        status: "PENDING",
-        inviteeEmail: email,
-        organizationId,
-      },
-    });
+    const { data: existingInvites } = await sbDb
+      .from("Invite")
+      .select("*")
+      .eq("status", "PENDING")
+      .eq("inviteeEmail", email)
+      .eq("organizationId", organizationId);
 
-    if (existingInvites.length) {
+    if (existingInvites && existingInvites.length) {
       throw new ShelfError({
         cause: null,
         message:

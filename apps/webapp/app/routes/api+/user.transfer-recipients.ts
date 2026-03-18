@@ -1,8 +1,7 @@
-import { OrganizationRoles } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError } from "~/utils/error";
 import { error, getParams } from "~/utils/http.server";
 import {
@@ -31,33 +30,19 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     );
 
     /** Fetch OWNER and ADMIN users in this org, excluding the target user */
-    const userOrgs = await db.userOrganization.findMany({
-      where: {
-        organizationId,
-        userId: { not: excludeUserId },
-        roles: {
-          hasSome: [OrganizationRoles.OWNER, OrganizationRoles.ADMIN],
-        },
-      },
-      select: {
-        roles: true,
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-          },
-        },
-      },
-    });
+    const { data: userOrgs } = await sbDb
+      .from("UserOrganization")
+      .select("roles, User(id, firstName, lastName, email)")
+      .eq("organizationId", organizationId)
+      .neq("userId", excludeUserId)
+      .overlaps("roles", ["OWNER", "ADMIN"]);
 
     return data(
-      userOrgs.map((uo) => ({
-        id: uo.user.id,
-        name: `${uo.user.firstName ?? ""} ${uo.user.lastName ?? ""}`.trim(),
-        email: uo.user.email,
-        isOwner: uo.roles.includes(OrganizationRoles.OWNER),
+      (userOrgs || []).map((uo: any) => ({
+        id: uo.User.id,
+        name: `${uo.User.firstName ?? ""} ${uo.User.lastName ?? ""}`.trim(),
+        email: uo.User.email,
+        isOwner: (uo.roles as string[]).includes("OWNER"),
       }))
     );
   } catch (cause) {

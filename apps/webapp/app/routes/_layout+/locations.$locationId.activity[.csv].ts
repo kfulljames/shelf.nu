@@ -1,8 +1,8 @@
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { exportLocationNotesToCsv } from "~/utils/csv.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { buildContentDisposition, error, getParams } from "~/utils/http.server";
 import {
   PermissionAction,
@@ -37,10 +37,24 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     });
 
-    const location = await db.location.findFirstOrThrow({
-      where: { id: locationId, organizationId },
-      select: { name: true },
-    });
+    const { data: location, error: locationError } = await sbDb
+      .from("Location")
+      .select("name")
+      .eq("id", locationId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (locationError) {
+      throw new ShelfError({
+        cause: locationError,
+        title: "Location not found",
+        message:
+          "The location you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { userId, locationId },
+        status: 404,
+        label: "Location",
+      });
+    }
 
     const csv = await exportLocationNotesToCsv({
       request,

@@ -1,8 +1,8 @@
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { exportBookingNotesToCsv } from "~/utils/csv.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { buildContentDisposition, error, getParams } from "~/utils/http.server";
 import {
   PermissionAction,
@@ -33,10 +33,24 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     });
 
-    const booking = await db.booking.findFirstOrThrow({
-      where: { id: bookingId, organizationId },
-      select: { name: true },
-    });
+    const { data: booking, error: bookingError } = await sbDb
+      .from("Booking")
+      .select("name")
+      .eq("id", bookingId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (bookingError) {
+      throw new ShelfError({
+        cause: bookingError,
+        title: "Booking not found",
+        message:
+          "The booking you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { userId, bookingId },
+        status: 404,
+        label: "Booking",
+      });
+    }
 
     const csv = await exportBookingNotesToCsv({
       request,

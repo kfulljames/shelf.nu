@@ -1,7 +1,7 @@
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 import { extractStoragePath } from "~/components/assets/asset-image/utils";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { ShelfError } from "~/utils/error";
 import { payload, parseData } from "~/utils/http.server";
@@ -37,16 +37,22 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     }));
 
-    // Use findUnique with organization scoping to prevent cross-tenant access
-    const asset = await db.asset.findUnique({
-      where: { id: assetId, organizationId },
-      select: {
-        id: true,
-        mainImage: true,
-        thumbnailImage: true,
-        organizationId: true,
-      },
-    });
+    // Use Supabase with organization scoping to prevent cross-tenant access
+    const { data: asset, error: assetError } = await sbDb
+      .from("Asset")
+      .select("id, mainImage, thumbnailImage, organizationId")
+      .eq("id", assetId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+
+    if (assetError) {
+      throw new ShelfError({
+        cause: assetError,
+        message: `Failed to fetch asset for thumbnail generation: ${assetId}`,
+        additionalData: { assetId, userId },
+        label: "Assets",
+      });
+    }
 
     // If asset doesn't exist, return early with error information
     if (!asset) {
@@ -82,17 +88,25 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           });
 
           // Update with the fresh URL
-          const updatedAsset = await db.asset.update({
-            where: { id: assetId, organizationId },
-            data: {
+          const { data: updatedAsset, error: updateError } = await sbDb
+            .from("Asset")
+            .update({
               thumbnailImage: refreshedThumbnailUrl,
-              mainImageExpiration: oneDayFromNow(),
-            },
-            select: {
-              id: true,
-              thumbnailImage: true,
-            },
-          });
+              mainImageExpiration: oneDayFromNow().toISOString(),
+            })
+            .eq("id", assetId)
+            .eq("organizationId", organizationId)
+            .select("id, thumbnailImage")
+            .single();
+
+          if (updateError) {
+            throw new ShelfError({
+              cause: updateError,
+              message: `Failed to update thumbnail URL for asset ${assetId}`,
+              additionalData: { assetId, userId },
+              label: "Assets",
+            });
+          }
 
           return data(payload({ asset: updatedAsset }));
         } catch (error) {
@@ -207,10 +221,21 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     });
 
     // Double-check the asset still exists before updating (in case it was deleted during processing)
-    const existsCheck = await db.asset.findUnique({
-      where: { id: assetId, organizationId },
-      select: { id: true },
-    });
+    const { data: existsCheck, error: existsError } = await sbDb
+      .from("Asset")
+      .select("id")
+      .eq("id", assetId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+
+    if (existsError) {
+      throw new ShelfError({
+        cause: existsError,
+        message: `Failed to check asset existence: ${assetId}`,
+        additionalData: { assetId, userId },
+        label: "Assets",
+      });
+    }
 
     if (!existsCheck) {
       Logger.error(
@@ -231,17 +256,25 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // Update the asset record with both the thumbnail and a fresh expiration
-    const updatedAsset = await db.asset.update({
-      where: { id: assetId, organizationId },
-      data: {
+    const { data: updatedAsset, error: finalUpdateError } = await sbDb
+      .from("Asset")
+      .update({
         thumbnailImage: thumbnailSignedUrl,
-        mainImageExpiration: oneDayFromNow(),
-      },
-      select: {
-        id: true,
-        thumbnailImage: true,
-      },
-    });
+        mainImageExpiration: oneDayFromNow().toISOString(),
+      })
+      .eq("id", assetId)
+      .eq("organizationId", organizationId)
+      .select("id, thumbnailImage")
+      .single();
+
+    if (finalUpdateError) {
+      throw new ShelfError({
+        cause: finalUpdateError,
+        message: `Failed to update asset thumbnail: ${assetId}`,
+        additionalData: { assetId, userId },
+        label: "Assets",
+      });
+    }
 
     return data(payload({ asset: updatedAsset }));
   } catch (cause) {
@@ -249,16 +282,15 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     try {
       const assetId = url.searchParams.get("assetId");
       if (assetId && organizationId) {
-        const asset = await db.asset.findUnique({
-          where: { id: assetId, organizationId },
-          select: {
-            id: true,
-            thumbnailImage: true,
-          },
-        });
+        const { data: fallbackAsset } = await sbDb
+          .from("Asset")
+          .select("id, thumbnailImage")
+          .eq("id", assetId)
+          .eq("organizationId", organizationId)
+          .maybeSingle();
 
-        if (asset) {
-          return data(payload({ asset }));
+        if (fallbackAsset) {
+          return data(payload({ asset: fallbackAsset }));
         }
       }
     } catch {

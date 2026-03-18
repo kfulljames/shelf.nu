@@ -1,8 +1,7 @@
-import { Prisma } from "@prisma/client";
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 import { extractStoragePath } from "~/components/assets/asset-image/utils";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { ShelfError } from "~/utils/error";
 import { payload, parseData } from "~/utils/http.server";
@@ -208,15 +207,21 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     });
 
     // Get asset details with organization scoping to prevent cross-tenant access
-    // Use findUnique instead of findUniqueOrThrow to handle deleted assets gracefully
-    const asset = await db.asset.findUnique({
-      where: { id: assetId, organizationId },
-      select: {
-        id: true,
-        mainImage: true,
-        thumbnailImage: true,
-      },
-    });
+    const { data: asset, error: assetError } = await sbDb
+      .from("Asset")
+      .select("id, mainImage, thumbnailImage")
+      .eq("id", assetId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+
+    if (assetError) {
+      throw new ShelfError({
+        cause: assetError,
+        message: `Failed to fetch asset for image refresh: ${assetId}`,
+        additionalData: { assetId, userId },
+        label: "Assets",
+      });
+    }
 
     // If asset doesn't exist (was deleted), return gracefully without error
     // This is an expected scenario when asset is deleted while page is still open
@@ -317,33 +322,33 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // Update the asset with new signed URLs and expiration date
-    // Wrap in try-catch to handle race condition where asset is deleted between read and update
-    try {
-      const updatedAsset = await db.asset.update({
-        where: { id: assetId, organizationId },
-        data: {
-          mainImage: newMainImageUrl,
-          thumbnailImage: thumbnailUrl,
-          mainImageExpiration: oneDayFromNow(),
-        },
-        select: {
-          id: true,
-          mainImage: true,
-          thumbnailImage: true,
-        },
-      });
+    const { data: updatedAsset, error: updateError } = await sbDb
+      .from("Asset")
+      .update({
+        mainImage: newMainImageUrl,
+        thumbnailImage: thumbnailUrl,
+        mainImageExpiration: oneDayFromNow().toISOString(),
+      })
+      .eq("id", assetId)
+      .eq("organizationId", organizationId)
+      .select("id, mainImage, thumbnailImage")
+      .maybeSingle();
 
-      return data(payload({ asset: updatedAsset }));
-    } catch (updateError) {
-      // Asset was deleted between the initial read and this update — not a bug
-      if (
-        updateError instanceof Prisma.PrismaClientKnownRequestError &&
-        updateError.code === "P2025"
-      ) {
-        return data(payload({ asset: null }));
-      }
-      throw updateError;
+    // If update returns no data, asset was deleted between read and update — not a bug
+    if (updateError) {
+      throw new ShelfError({
+        cause: updateError,
+        message: `Failed to update asset image: ${assetId}`,
+        additionalData: { assetId, userId },
+        label: "Assets",
+      });
     }
+
+    if (!updatedAsset) {
+      return data(payload({ asset: null }));
+    }
+
+    return data(payload({ asset: updatedAsset }));
   } catch (cause) {
     // Log the error for debugging
     Logger.error(

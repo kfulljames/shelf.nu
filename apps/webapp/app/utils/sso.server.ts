@@ -1,6 +1,7 @@
 import type { Organization, SsoDetails } from "@prisma/client";
 import type { AuthSession } from "@server/session";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   deleteAuthAccount,
   getAuthUserById,
@@ -63,7 +64,7 @@ export async function resolveUserAndOrgForSsoCallback({
   };
 }) {
   try {
-    // First check if user exists
+    // KEPT AS PRISMA: complex nested select with userOrganizations.organization.ssoDetails
     const user = await db.user.findUnique({
       where: {
         email: authSession.email,
@@ -143,8 +144,9 @@ interface DomainCheckResult {
  */
 export async function getConfiguredSSODomains(): Promise<SSODomainConfig[]> {
   try {
+    // KEPT AS PRISMA: $queryRaw on auth schema
     const domains = await db.$queryRaw<SSODomainConfig[]>`
-      SELECT 
+      SELECT
         id::text,
         sso_provider_id::text as "ssoProviderId",
         domain
@@ -172,7 +174,7 @@ export async function checkDomainSSOStatus(
   try {
     const domain = email.split("@")[1]?.toLowerCase();
 
-    // Check all SSO providers configured for this domain
+    // KEPT AS PRISMA: $queryRaw on auth schema
     const ssoConfigs = await db.$queryRaw<{ ssoProviderId: string }[]>`
       SELECT sso_provider_id::text as "ssoProviderId"
       FROM auth.sso_domains
@@ -191,18 +193,21 @@ export async function checkDomainSSOStatus(
     const ssoProviderIds = ssoConfigs.map((config) => config.ssoProviderId);
 
     // Find organization where this domain is included in their comma-separated domains
-    const linkedOrg = await db.organization.findFirst({
-      where: {
-        ssoDetails: {
-          domain: {
-            contains: domain,
-          },
-        },
-      },
-      include: {
-        ssoDetails: true,
-      },
-    });
+    const { data: linkedOrgData } = await sbDb
+      .from("Organization")
+      .select("*, ssoDetails:SsoDetails(*)")
+      .ilike("SsoDetails.domain", `%${domain}%`)
+      .limit(1)
+      .maybeSingle();
+
+    const linkedOrg = linkedOrgData
+      ? ({
+          ...linkedOrgData,
+          createdAt: new Date(linkedOrgData.createdAt as string),
+          updatedAt: new Date(linkedOrgData.updatedAt as string),
+          ssoDetails: (linkedOrgData as any).ssoDetails ?? null,
+        } as Organization & { ssoDetails: SsoDetails | null })
+      : null;
 
     // If we found an org, verify the domain is actually in their list
     const isValidDomain = linkedOrg?.ssoDetails
@@ -232,10 +237,20 @@ export async function checkDomainSSOStatus(
  */
 export async function doesSSOUserExist(email: string): Promise<boolean> {
   try {
-    const user = await db.user.findUnique({
-      where: { email: email.toLowerCase() },
-      select: { sso: true },
-    });
+    const { data: user, error } = await sbDb
+      .from("User")
+      .select("sso")
+      .eq("email", email.toLowerCase())
+      .maybeSingle();
+
+    if (error) {
+      throw new ShelfError({
+        cause: error,
+        message: "Failed to query user SSO status",
+        additionalData: { email },
+        label: "SSO",
+      });
+    }
 
     return user?.sso || false;
   } catch (cause) {
