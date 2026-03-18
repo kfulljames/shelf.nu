@@ -195,7 +195,15 @@ export async function getLocation(
         };
 
     const [location, totalAssetsWithinLocation] = await Promise.all([
-      /** Get the items */
+      /**
+       * Get the items.
+       * KEPT AS PRISMA: `locationInclude` is a dynamic Prisma.LocationInclude
+       * built from an optional `include` parameter that varies per caller
+       * (assets with nested category/tags/custody, kits, notes, etc.).
+       * It also uses `_count` in the parent include and pagination (skip/take)
+       * on nested assets. Replicating this in Supabase would require
+       * rewriting every caller and losing the dynamic include pattern.
+       */
       db.location.findFirstOrThrow({
         where: {
           OR: [
@@ -393,45 +401,94 @@ export async function getLocations(params: {
     const skip = page > 1 ? (page - 1) * perPage : 0;
     const take = perPage >= 1 ? perPage : 8; // min 1 and max 25 per page
 
-    /** Default value of where. Takes the items belonging to current user */
-    const where: Prisma.LocationWhereInput = { organizationId };
+    /**
+     * Supabase select with nested relation counts to match the
+     * Prisma LOCATION_LIST_INCLUDE shape:
+     *   _count: { kits, assets, children }
+     *   parent: { id, name, parentId, _count: { children } }
+     *   image: { updatedAt }
+     *
+     * PostgREST returns counts as `[{ count: N }]` arrays — we
+     * transform them into the `_count` shape below.
+     */
+    const selectFields = [
+      "*",
+      "Kit(count)",
+      "Asset(count)",
+      "children:Location!Location_parentId_fkey(count)",
+      "parent:Location!parentId(id, name, parentId, children:Location!Location_parentId_fkey(count))",
+      "image:Image(updatedAt)",
+    ].join(", ");
 
-    /** If the search string exists, add it to the where object */
+    let listQuery = sbDb
+      .from("Location")
+      .select(selectFields, { count: "exact" })
+      .eq("organizationId", organizationId)
+      .order("updatedAt", { ascending: false })
+      .range(skip, skip + take - 1);
+
     if (search) {
-      where.name = {
-        contains: search,
-        mode: "insensitive",
-      };
+      listQuery = listQuery.ilike("name", `%${search}%`);
     }
 
-    const [locations, totalLocations] = await Promise.all([
-      /** Get the items */
-      db.location.findMany({
-        skip,
-        take,
-        where,
-        orderBy: { updatedAt: "desc" },
-        include: LOCATION_LIST_INCLUDE,
-      }),
+    const { data, count: totalLocations, error } = await listQuery;
 
-      /** Count them */
-      (async () => {
-        let countQuery = sbDb
-          .from("Location")
-          .select("*", { count: "exact", head: true })
-          .eq("organizationId", organizationId);
+    if (error) throw error;
 
-        if (search) {
-          countQuery = countQuery.ilike("name", `%${search}%`);
-        }
+    // Transform rows to match the Prisma shape expected by consumers
+    const locations = (data ?? []).map((row) => {
+      const {
+        Kit: kitCount,
+        Asset: assetCount,
+        children,
+        parent: rawParent,
+        image: rawImage,
+        ...rest
+      } = row as unknown as Record<string, unknown> & {
+        Kit: { count: number }[];
+        Asset: { count: number }[];
+        children: { count: number }[];
+        parent: {
+          id: string;
+          name: string;
+          parentId: string | null;
+          children: { count: number }[];
+        } | null;
+        image: { updatedAt: string }[] | null;
+      };
 
-        const { count, error } = await countQuery;
-        if (error) throw error;
-        return count ?? 0;
-      })(),
-    ]);
+      const parent = rawParent
+        ? {
+            id: rawParent.id,
+            name: rawParent.name,
+            parentId: rawParent.parentId,
+            _count: {
+              children: rawParent.children?.[0]?.count ?? 0,
+            },
+          }
+        : null;
 
-    return { locations, totalLocations };
+      const imageRow =
+        Array.isArray(rawImage) && rawImage.length > 0
+          ? { updatedAt: new Date(rawImage[0].updatedAt) }
+          : null;
+
+      return {
+        ...rest,
+        _count: {
+          kits: kitCount?.[0]?.count ?? 0,
+          assets: assetCount?.[0]?.count ?? 0,
+          children: children?.[0]?.count ?? 0,
+        },
+        parent,
+        image: imageRow,
+        // Cast date strings to Date objects for downstream compatibility
+        createdAt: new Date(rest.createdAt as unknown as string),
+        updatedAt: new Date(rest.updatedAt as unknown as string),
+      };
+    });
+
+    return { locations, totalLocations: totalLocations ?? 0 };
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -1270,6 +1327,13 @@ export async function getLocationKits(
       };
     }
 
+    /**
+     * KEPT AS PRISMA: `kitWhere` uses complex nested OR conditions that
+     * PostgREST cannot express — specifically `assets.some.bookings.some`
+     * (multi-level existence checks through relations) and
+     * `custody.custodian.userId` (nested relation filtering). These
+     * require Prisma's join-based query engine.
+     */
     const [kits, totalKits] = await Promise.all([
       db.kit.findMany({
         where: kitWhere,
@@ -1578,6 +1642,12 @@ export async function updateLocationAssets({
         currentSearchParams: searchParams.toString(),
       });
 
+      /**
+       * KEPT AS PRISMA: `assetsWhere` comes from `getAssetsWhereInput()`
+       * which returns a `Prisma.AssetWhereInput` with complex nested OR
+       * conditions (tags some/none, bookings, custody relations).
+       * Converting this requires rewriting the shared utility.
+       */
       const allAssets = await db.asset.findMany({
         where: assetsWhere,
         select: { id: true },
@@ -1821,6 +1891,11 @@ export async function updateLocationKits({
         currentSearchParams: searchParams.toString(),
       });
 
+      /**
+       * KEPT AS PRISMA: `kitWhere` comes from `getKitsWhereInput()`
+       * which returns a `Prisma.KitWhereInput`. Converting requires
+       * rewriting the shared utility.
+       */
       const allKits = await db.kit.findMany({
         where: kitWhere,
         select: { id: true },

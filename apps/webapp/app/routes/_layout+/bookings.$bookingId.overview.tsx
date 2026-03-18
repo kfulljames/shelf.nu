@@ -649,7 +649,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         content: `${actor} deleted booking ${deletedBookingLink}.`,
         type: "UPDATE",
         userId: userId,
-        assetIds: deletedBooking.assets.map((a) => a.id),
+        assetIds: deletedBooking.assets.map((a: { id: string }) => a.id),
       });
 
       sendNotification({
@@ -816,7 +816,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           content: `${actor} checked out asset with ${bookingLink}.`,
           type: "UPDATE",
           userId: user.id,
-          assetIds: booking.assets.map((a) => a.id),
+          assetIds: booking.assets.map((a: { id: string }) => a.id),
         });
 
         sendNotification({
@@ -887,7 +887,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           content: `${actor} checked in asset with ${bookingLink}.`,
           type: "UPDATE",
           userId: user.id,
-          assetIds: booking.assets.map((a) => a.id),
+          assetIds: booking.assets.map((a: { id: string }) => a.id),
         });
 
         sendNotification({
@@ -1001,7 +1001,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           }`,
           type: "UPDATE",
           userId,
-          assetIds: cancelledBooking.assets.map((a) => a.id),
+          assetIds: cancelledBooking.assets.map((a: { id: string }) => a.id),
         });
 
         sendNotification({

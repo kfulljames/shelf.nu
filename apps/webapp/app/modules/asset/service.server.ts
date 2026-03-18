@@ -190,10 +190,68 @@ async function fetchAssetBeforeUpdate({
     return null;
   }
 
-  return db.asset.findUnique({
-    where: { id, organizationId },
-    select: ASSET_BEFORE_UPDATE_SELECT,
-  });
+  // Split into sequential queries to avoid deep nesting
+  const { data: asset, error: assetError } = await sbDb
+    .from("Asset")
+    .select("title, description, categoryId, value")
+    .eq("id", id)
+    .eq("organizationId", organizationId)
+    .maybeSingle();
+
+  if (assetError) throw assetError;
+  if (!asset) return null;
+
+  // Fetch category, organization, and tags in parallel
+  const [categoryResult, orgResult, tagsResult] = await Promise.all([
+    asset.categoryId
+      ? sbDb
+          .from("Category")
+          .select("id, name, color")
+          .eq("id", asset.categoryId)
+          .maybeSingle()
+          .then(({ data, error }) => {
+            if (error) throw error;
+            return data;
+          })
+      : Promise.resolve(null),
+    sbDb
+      .from("Organization")
+      .select("currency")
+      .eq(
+        "id",
+        // We need the organizationId from the asset's org
+        organizationId
+      )
+      .single()
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data;
+      }),
+    sbDb
+      .from("_AssetToTag")
+      .select("B")
+      .eq("A", id)
+      .then(async ({ data: joinRows, error: joinError }) => {
+        if (joinError) throw joinError;
+        if (!joinRows || joinRows.length === 0) return [];
+        const tagIds = joinRows.map((r) => r.B);
+        const { data: tags, error: tagError } = await sbDb
+          .from("Tag")
+          .select("id, name")
+          .in("id", tagIds);
+        if (tagError) throw tagError;
+        return tags ?? [];
+      }),
+  ]);
+
+  return {
+    title: asset.title,
+    description: asset.description,
+    category: categoryResult,
+    valuation: asset.value,
+    organization: orgResult!,
+    tags: tagsResult,
+  };
 }
 
 /**
@@ -236,17 +294,22 @@ async function setKitCustodyAfterAssetImport({
     const teamMember = teamMembers[custodianName];
 
     if (kit && teamMember) {
-      await db.kit.update({
-        where: { id: kit.id },
-        data: {
-          status: KitStatus.IN_CUSTODY,
-          custody: {
-            create: {
-              custodian: { connect: { id: teamMember.id } },
-            },
-          },
-        },
-      });
+      // Update kit status and create custody in parallel
+      const [, custodyResult] = await Promise.all([
+        sbDb
+          .from("Kit")
+          .update({ status: KitStatus.IN_CUSTODY })
+          .eq("id", kit.id)
+          .then(({ error }) => {
+            if (error) throw error;
+          }),
+        sbDb
+          .from("KitCustody")
+          .insert({ kitId: kit.id, custodianId: teamMember.id })
+          .then(({ error }) => {
+            if (error) throw error;
+          }),
+      ]);
     }
   }
 }
@@ -284,32 +347,69 @@ async function validateKitCustodyConflicts({
     ...new Set(conflictCandidates.map((asset) => asset.kit)),
   ].filter(Boolean) as string[];
 
-  // Fetch existing kits and their custody status in one query
-  const existingKits = await db.kit.findMany({
-    where: {
-      name: { in: kitNames },
-      organizationId,
-    },
-    select: {
-      id: true,
-      name: true,
-      custody: {
-        select: {
-          id: true,
-          custodian: {
-            select: {
-              name: true,
-            },
-          },
-        },
-      },
-      assets: {
-        select: {
-          id: true,
-        },
-      },
-    },
-  });
+  // Fetch existing kits and their custody status using split queries
+  const { data: kitRows, error: kitError } = await sbDb
+    .from("Kit")
+    .select("id, name")
+    .in("name", kitNames)
+    .eq("organizationId", organizationId);
+
+  if (kitError) throw kitError;
+
+  const kitIds = (kitRows ?? []).map((k) => k.id);
+
+  // Fetch custody (with custodian name) and asset counts in parallel
+  const [custodyRows, assetCountRows] = await Promise.all([
+    sbDb
+      .from("KitCustody")
+      .select("id, kitId, custodianId")
+      .in("kitId", kitIds)
+      .then(async ({ data: custodies, error: custodyErr }) => {
+        if (custodyErr) throw custodyErr;
+        if (!custodies || custodies.length === 0) return [];
+        const custodianIds = custodies.map((c) => c.custodianId);
+        const { data: members, error: memErr } = await sbDb
+          .from("TeamMember")
+          .select("id, name")
+          .in("id", custodianIds);
+        if (memErr) throw memErr;
+        const memberMap = new Map((members ?? []).map((m) => [m.id, m]));
+        return custodies.map((c) => ({
+          ...c,
+          custodian: memberMap.get(c.custodianId) ?? { name: "" },
+        }));
+      }),
+    sbDb
+      .from("Asset")
+      .select("id, kitId")
+      .in("kitId", kitIds)
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
+  ]);
+
+  // Build a map of kitId -> asset count
+  const assetCountByKit = new Map<string, number>();
+  for (const row of assetCountRows) {
+    if (row.kitId) {
+      assetCountByKit.set(row.kitId, (assetCountByKit.get(row.kitId) ?? 0) + 1);
+    }
+  }
+
+  // Build custody map by kitId
+  const custodyByKit = new Map(custodyRows.map((c) => [c.kitId, c]));
+
+  // Assemble existingKits in the same shape expected downstream
+  const existingKits = (kitRows ?? []).map((kit) => ({
+    id: kit.id,
+    name: kit.name,
+    custody: custodyByKit.get(kit.id) ?? null,
+    assets: Array.from(
+      { length: assetCountByKit.get(kit.id) ?? 0 },
+      (_, i) => ({ id: String(i) })
+    ),
+  }));
 
   // Find conflicts: existing kits without custody that would receive assets with custody
   const conflicts: Array<{
@@ -2355,26 +2455,203 @@ export async function fetchAssetsForExport({
   organizationId: Organization["id"];
 }) {
   try {
-    return await db.asset.findMany({
-      where: {
-        organizationId,
-      },
-      include: {
-        category: true,
-        location: true,
-        notes: true,
-        custody: {
-          include: {
-            custodian: true,
-          },
-        },
-        tags: true,
-        customFields: {
-          include: {
-            customField: true,
-          },
-        },
-      },
+    // 1. Fetch base assets
+    const { data: assets, error: assetsError } = await sbDb
+      .from("Asset")
+      .select("*")
+      .eq("organizationId", organizationId);
+
+    if (assetsError) throw assetsError;
+    if (!assets || assets.length === 0) return [];
+
+    const assetIds = assets.map((a) => a.id);
+    const categoryIds = assets
+      .map((a) => a.categoryId)
+      .filter(Boolean) as string[];
+    const locationIds = assets
+      .map((a) => a.locationId)
+      .filter(Boolean) as string[];
+
+    // 2. Fetch all related data in parallel
+    const [categories, locations, notes, custodies, tagJoinRows, cfValues] =
+      await Promise.all([
+        categoryIds.length > 0
+          ? sbDb
+              .from("Category")
+              .select("*")
+              .in("id", categoryIds)
+              .then(({ data, error }) => {
+                if (error) throw error;
+                return data ?? [];
+              })
+          : Promise.resolve([]),
+        locationIds.length > 0
+          ? sbDb
+              .from("Location")
+              .select("*")
+              .in("id", locationIds)
+              .then(({ data, error }) => {
+                if (error) throw error;
+                return data ?? [];
+              })
+          : Promise.resolve([]),
+        sbDb
+          .from("Note")
+          .select("*")
+          .in("assetId", assetIds)
+          .then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          }),
+        sbDb
+          .from("Custody")
+          .select("*")
+          .in("assetId", assetIds)
+          .then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          }),
+        sbDb
+          .from("_AssetToTag")
+          .select("A, B")
+          .in("A", assetIds)
+          .then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          }),
+        sbDb
+          .from("AssetCustomFieldValue")
+          .select("*")
+          .in("assetId", assetIds)
+          .then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          }),
+      ]);
+
+    // 3. Fetch custodians (TeamMember), tags, and customField defs
+    const custodianIds = custodies.map((c) => c.teamMemberId);
+    const tagIds = [...new Set(tagJoinRows.map((r) => r.B))];
+    const cfIds = [...new Set(cfValues.map((v) => v.customFieldId))];
+
+    const [custodians, tags, customFieldDefs] = await Promise.all([
+      custodianIds.length > 0
+        ? sbDb
+            .from("TeamMember")
+            .select("*")
+            .in("id", custodianIds)
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data ?? [];
+            })
+        : Promise.resolve([]),
+      tagIds.length > 0
+        ? sbDb
+            .from("Tag")
+            .select("*")
+            .in("id", tagIds)
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data ?? [];
+            })
+        : Promise.resolve([]),
+      cfIds.length > 0
+        ? sbDb
+            .from("CustomField")
+            .select("*")
+            .in("id", cfIds)
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data ?? [];
+            })
+        : Promise.resolve([]),
+    ]);
+
+    // 4. Build lookup maps
+    const categoryMap = new Map(categories.map((c) => [c.id, c]));
+    const locationMap = new Map(locations.map((l) => [l.id, l]));
+    const custodianMap = new Map(custodians.map((tm) => [tm.id, tm]));
+    const tagMap = new Map(tags.map((t) => [t.id, t]));
+    const cfDefMap = new Map(customFieldDefs.map((cf) => [cf.id, cf]));
+
+    // Group by assetId
+    const notesByAsset = new Map<string, typeof notes>();
+    for (const n of notes) {
+      if (n.assetId) {
+        const arr = notesByAsset.get(n.assetId) ?? [];
+        arr.push(n);
+        notesByAsset.set(n.assetId, arr);
+      }
+    }
+
+    const custodyByAsset = new Map<string, (typeof custodies)[0]>();
+    for (const c of custodies) {
+      if (c.assetId) custodyByAsset.set(c.assetId, c);
+    }
+
+    const tagsByAsset = new Map<string, typeof tags>();
+    for (const row of tagJoinRows) {
+      const tag = tagMap.get(row.B);
+      if (tag) {
+        const arr = tagsByAsset.get(row.A) ?? [];
+        arr.push(tag);
+        tagsByAsset.set(row.A, arr);
+      }
+    }
+
+    const cfByAsset = new Map<
+      string,
+      Array<(typeof cfValues)[0] & { customField: (typeof customFieldDefs)[0] }>
+    >();
+    for (const v of cfValues) {
+      if (v.assetId) {
+        const def = cfDefMap.get(v.customFieldId);
+        if (def) {
+          const arr = cfByAsset.get(v.assetId) ?? [];
+          arr.push({ ...v, customField: def });
+          cfByAsset.set(v.assetId, arr);
+        }
+      }
+    }
+
+    // 5. Assemble results — cast Supabase date strings to Date objects
+    // Map DB column "value" back to Prisma field name "valuation"
+    return assets.map((asset) => {
+      const custody = custodyByAsset.get(asset.id);
+      const custodian = custody
+        ? custodianMap.get(custody.teamMemberId) ?? null
+        : null;
+      // Destructure to rename `value` -> `valuation` for downstream compat
+      const { value: valuation, ...restAsset } = asset;
+      return {
+        ...restAsset,
+        valuation,
+        createdAt: new Date(asset.createdAt),
+        updatedAt: new Date(asset.updatedAt),
+        mainImageExpiration: asset.mainImageExpiration
+          ? new Date(asset.mainImageExpiration)
+          : null,
+        category: asset.categoryId
+          ? categoryMap.get(asset.categoryId) ?? null
+          : null,
+        location: asset.locationId
+          ? locationMap.get(asset.locationId) ?? null
+          : null,
+        notes: (notesByAsset.get(asset.id) ?? []).map((n) => ({
+          ...n,
+          createdAt: new Date(n.createdAt),
+          updatedAt: new Date(n.updatedAt),
+        })),
+        custody: custody
+          ? {
+              ...custody,
+              createdAt: new Date(custody.createdAt),
+              custodian,
+            }
+          : null,
+        tags: tagsByAsset.get(asset.id) ?? [],
+        customFields: cfByAsset.get(asset.id) ?? [],
+      };
     });
   } catch (cause) {
     throw new ShelfError({
@@ -3090,34 +3367,95 @@ export async function updateAssetsWithBookingCustodians<T extends Asset>(
     if (checkedOutAssetsIds.length > 0) {
       /** We query again the assets that are checked-out so we can get the user via the booking*/
 
-      const assetsWithCustodians = await db.asset.findMany({
-        where: {
-          id: {
-            in: checkedOutAssetsIds,
+      // Split: fetch bookings for checked-out assets, then custodian details
+      // 1. Get booking-asset join rows via _AssetToBooking
+      const { data: bookingJoinRows, error: joinErr } = await sbDb
+        .from("_AssetToBooking")
+        .select("A, B")
+        .in("A", checkedOutAssetsIds);
+
+      if (joinErr) throw joinErr;
+
+      const bookingIds = [...new Set((bookingJoinRows ?? []).map((r) => r.B))];
+
+      // 2. Fetch bookings with ONGOING/OVERDUE status
+      const { data: bookings, error: bookingsErr } =
+        bookingIds.length > 0
+          ? await sbDb
+              .from("Booking")
+              .select("id, custodianTeamMemberId, custodianUserId")
+              .in("id", bookingIds)
+              .in("status", ["ONGOING", "OVERDUE"])
+          : { data: [] as any[], error: null };
+
+      if (bookingsErr) throw bookingsErr;
+
+      // 3. Fetch custodian users and team members in parallel
+      const userIds = (bookings ?? [])
+        .map((b: any) => b.custodianUserId)
+        .filter(Boolean) as string[];
+      const tmIds = (bookings ?? [])
+        .map((b: any) => b.custodianTeamMemberId)
+        .filter(Boolean) as string[];
+
+      const [custodianUsers, custodianTeamMembers] = await Promise.all([
+        userIds.length > 0
+          ? sbDb
+              .from("User")
+              .select("id, firstName, lastName, profilePicture")
+              .in("id", userIds)
+              .then(({ data, error }) => {
+                if (error) throw error;
+                return data ?? [];
+              })
+          : Promise.resolve([]),
+        tmIds.length > 0
+          ? sbDb
+              .from("TeamMember")
+              .select("*")
+              .in("id", tmIds)
+              .then(({ data, error }) => {
+                if (error) throw error;
+                return data ?? [];
+              })
+          : Promise.resolve([]),
+      ]);
+
+      const userMap = new Map(custodianUsers.map((u) => [u.id, u]));
+      const tmMap = new Map(custodianTeamMembers.map((tm) => [tm.id, tm]));
+
+      // Build booking map: bookingId -> booking with resolved relations
+      const bookingMap = new Map(
+        (bookings ?? []).map((b: any) => [
+          b.id,
+          {
+            id: b.id,
+            custodianUser: b.custodianUserId
+              ? userMap.get(b.custodianUserId) ?? null
+              : null,
+            custodianTeamMember: b.custodianTeamMemberId
+              ? tmMap.get(b.custodianTeamMemberId) ?? null
+              : null,
           },
-        },
-        select: {
-          id: true,
-          bookings: {
-            where: {
-              status: {
-                in: ["ONGOING", "OVERDUE"],
-              },
-            },
-            select: {
-              id: true,
-              custodianTeamMember: true,
-              custodianUser: {
-                select: {
-                  firstName: true,
-                  lastName: true,
-                  profilePicture: true,
-                },
-              },
-            },
-          },
-        },
-      });
+        ])
+      );
+
+      // Build assetId -> bookings array
+      const bookingsByAsset = new Map<string, any[]>();
+      for (const row of bookingJoinRows ?? []) {
+        const booking = bookingMap.get(row.B);
+        if (booking) {
+          const arr = bookingsByAsset.get(row.A) ?? [];
+          arr.push(booking);
+          bookingsByAsset.set(row.A, arr);
+        }
+      }
+
+      // Assemble in the same shape the downstream code expects
+      const assetsWithCustodians = checkedOutAssetsIds.map((assetId) => ({
+        id: assetId,
+        bookings: bookingsByAsset.get(assetId) ?? [],
+      }));
 
       /**
        * We take the first booking of the array and extract the user from it and add it to the asset
@@ -3479,20 +3817,17 @@ export async function bulkCheckInAssets({
     /**
      * In order to make notes for the assets we have to make this query to get info about assets
      */
-    const [assets, user] = await Promise.all([
-      db.asset.findMany({
-        where: {
-          id: { in: resolvedIds },
-          organizationId,
-        },
-        select: {
-          id: true,
-          title: true,
-          custody: {
-            select: { id: true, custodian: { include: { user: true } } },
-          },
-        },
-      }),
+    // Split: fetch assets, custodies, custodians, users in sequence
+    const [assetRows, user] = await Promise.all([
+      sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", resolvedIds)
+        .eq("organizationId", organizationId)
+        .then(({ data, error }) => {
+          if (error) throw error;
+          return data ?? [];
+        }),
       getUserByID(userId, {
         select: {
           id: true,
@@ -3501,6 +3836,58 @@ export async function bulkCheckInAssets({
         } satisfies Prisma.UserSelect,
       }),
     ]);
+
+    const assetIdsForCustody = assetRows.map((a) => a.id);
+
+    // Fetch custodies for these assets
+    const { data: custodyRows, error: custodyErr } = await sbDb
+      .from("Custody")
+      .select("id, assetId, teamMemberId")
+      .in("assetId", assetIdsForCustody);
+
+    if (custodyErr) throw custodyErr;
+
+    // Fetch team members (custodians) with their user relations
+    const tmIds = (custodyRows ?? []).map((c) => c.teamMemberId);
+    const { data: teamMembers, error: tmErr } =
+      tmIds.length > 0
+        ? await sbDb.from("TeamMember").select("*").in("id", tmIds)
+        : { data: [] as any[], error: null };
+
+    if (tmErr) throw tmErr;
+
+    const tmUserIds = (teamMembers ?? [])
+      .map((tm: any) => tm.userId)
+      .filter(Boolean) as string[];
+    const { data: tmUsers, error: tmUserErr } =
+      tmUserIds.length > 0
+        ? await sbDb.from("User").select("*").in("id", tmUserIds)
+        : { data: [] as any[], error: null };
+
+    if (tmUserErr) throw tmUserErr;
+
+    const userMap = new Map((tmUsers ?? []).map((u: any) => [u.id, u]));
+    const tmMap = new Map(
+      (teamMembers ?? []).map((tm: any) => [
+        tm.id,
+        { ...tm, user: tm.userId ? userMap.get(tm.userId) ?? null : null },
+      ])
+    );
+    const custodyByAsset = new Map(
+      (custodyRows ?? []).map((c) => [
+        c.assetId,
+        {
+          id: c.id,
+          custodian: tmMap.get(c.teamMemberId) ?? null,
+        },
+      ])
+    );
+
+    // Assemble assets with custody in the shape expected downstream
+    const assets = assetRows.map((a) => ({
+      ...a,
+      custody: custodyByAsset.get(a.id) ?? null,
+    }));
 
     const hasAssetsWithoutCustody = assets.some((asset) => !asset.custody);
 
@@ -3591,19 +3978,17 @@ export async function bulkUpdateAssetLocation({
     });
 
     /** We have to create notes for all the assets so we have make this query */
-    const [assets, user] = await Promise.all([
-      db.asset.findMany({
-        where: {
-          id: { in: resolvedIds },
-          organizationId,
-        },
-        select: {
-          id: true,
-          title: true,
-          location: true,
-          kit: { select: { id: true, name: true } },
-        },
-      }),
+    // Split: fetch assets with locationId/kitId, then resolve location and kit details
+    const [assetRows, user] = await Promise.all([
+      sbDb
+        .from("Asset")
+        .select("id, title, locationId, kitId")
+        .in("id", resolvedIds)
+        .eq("organizationId", organizationId)
+        .then(({ data, error }) => {
+          if (error) throw error;
+          return data ?? [];
+        }),
       getUserByID(userId, {
         select: {
           id: true,
@@ -3612,6 +3997,47 @@ export async function bulkUpdateAssetLocation({
         } satisfies Prisma.UserSelect,
       }),
     ]);
+
+    // Resolve locations and kits in parallel
+    const locIds = assetRows
+      .map((a) => a.locationId)
+      .filter(Boolean) as string[];
+    const kitIdsToResolve = assetRows
+      .map((a) => a.kitId)
+      .filter(Boolean) as string[];
+
+    const [locationRows, kitRows] = await Promise.all([
+      locIds.length > 0
+        ? sbDb
+            .from("Location")
+            .select("*")
+            .in("id", locIds)
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data ?? [];
+            })
+        : Promise.resolve([]),
+      kitIdsToResolve.length > 0
+        ? sbDb
+            .from("Kit")
+            .select("id, name")
+            .in("id", kitIdsToResolve)
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data ?? [];
+            })
+        : Promise.resolve([]),
+    ]);
+
+    const locMap = new Map(locationRows.map((l) => [l.id, l]));
+    const kitMap = new Map(kitRows.map((k) => [k.id, k]));
+
+    const assets = assetRows.map((a) => ({
+      id: a.id,
+      title: a.title,
+      location: a.locationId ? locMap.get(a.locationId) ?? null : null,
+      kit: a.kitId ? kitMap.get(a.kitId) ?? null : null,
+    }));
 
     // Check if any assets belong to kits and prevent bulk location updates
     const assetsInKits = assets.filter((asset) => asset.kit);

@@ -103,6 +103,113 @@ import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Booking";
 
+/**
+ * Helper: Re-fetch a booking with data equivalent to BOOKING_INCLUDE_FOR_EMAIL
+ * (custodianTeamMember, custodianUser, organization.owner.email, _count.assets)
+ * and optionally all assets.
+ */
+async function fetchBookingWithEmailIncludes(
+  bookingId: string,
+  opts?: { includeAssets?: boolean }
+) {
+  const { data: row, error: fetchErr } = await sbDb
+    .from("Booking")
+    .select("*")
+    .eq("id", bookingId)
+    .single();
+  if (fetchErr || !row) {
+    throw new ShelfError({
+      cause: fetchErr,
+      message: "Failed to re-fetch booking.",
+      label,
+    });
+  }
+
+  // Fetch related data in parallel
+  const [tmResult, cuResult, orgResult, assetCountResult, assetsResult] =
+    await Promise.all([
+      row.custodianTeamMemberId
+        ? sbDb
+            .from("TeamMember")
+            .select("*")
+            .eq("id", row.custodianTeamMemberId)
+            .single()
+        : Promise.resolve({ data: null, error: null }),
+      row.custodianUserId
+        ? sbDb.from("User").select("*").eq("id", row.custodianUserId).single()
+        : Promise.resolve({ data: null, error: null }),
+      sbDb
+        .from("Organization")
+        .select("*")
+        .eq("id", row.organizationId)
+        .single(),
+      sbDb
+        .from("_AssetToBooking")
+        .select("A", { count: "exact", head: true })
+        .eq("B", bookingId),
+      opts?.includeAssets
+        ? sbDb.from("_AssetToBooking").select("A").eq("B", bookingId)
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
+  // Fetch organization owner email
+  let ownerEmail: string | null = null;
+  if (orgResult.data) {
+    const { data: ownerRow } = await sbDb
+      .from("User")
+      .select("email")
+      .eq("id", (orgResult.data as any).userId)
+      .single();
+    ownerEmail = ownerRow?.email ?? null;
+  }
+
+  // Fetch full asset rows if requested
+  let assets: Array<Pick<Asset, "id"> & Record<string, unknown>> = [];
+  if (opts?.includeAssets && assetsResult.data) {
+    const assetIds = assetsResult.data.map((r) => r.A);
+    if (assetIds.length > 0) {
+      const { data: assetRows } = await sbDb
+        .from("Asset")
+        .select("*")
+        .in("id", assetIds);
+      assets = (assetRows ?? []).map((a) => ({
+        ...a,
+        createdAt: new Date(a.createdAt),
+        updatedAt: new Date(a.updatedAt),
+      })) as any;
+    }
+  }
+
+  const organization = orgResult.data
+    ? {
+        ...orgResult.data,
+        createdAt: new Date((orgResult.data as any).createdAt),
+        updatedAt: new Date((orgResult.data as any).updatedAt),
+        owner: { email: ownerEmail ?? "" },
+      }
+    : null;
+
+  const result = {
+    ...row,
+    from: row.from ? new Date(row.from) : null,
+    to: row.to ? new Date(row.to) : null,
+    createdAt: new Date(row.createdAt),
+    updatedAt: new Date(row.updatedAt),
+    originalFrom: row.originalFrom ? new Date(row.originalFrom) : null,
+    originalTo: row.originalTo ? new Date(row.originalTo) : null,
+    autoArchivedAt: row.autoArchivedAt ? new Date(row.autoArchivedAt) : null,
+    status: row.status as BookingStatus,
+    custodianTeamMember: tmResult.data ?? null,
+    custodianUser: cuResult.data ?? null,
+    organization,
+    _count: { assets: assetCountResult.count ?? 0 },
+    assets,
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return result as any;
+}
+
 async function cancelScheduler(
   booking: Pick<Booking, "id" | "activeSchedulerReference">
 ) {
@@ -410,10 +517,119 @@ export async function createBooking({
       };
     }
 
-    return await db.booking.create({
-      data: dataToCreate,
-      include: { ...BOOKING_COMMON_INCLUDE, organization: true },
-    });
+    // Insert booking via Supabase
+    const { data: createdRow, error: createError } = await sbDb
+      .from("Booking")
+      .insert({
+        name: booking.name,
+        from: booking.from?.toISOString() ?? null,
+        to: booking.to?.toISOString() ?? null,
+        description: booking.description,
+        status: BookingStatus.DRAFT,
+        creatorId: booking.creatorId,
+        organizationId: booking.organizationId,
+        originalFrom: booking.from?.toISOString() ?? null,
+        originalTo: booking.to?.toISOString() ?? null,
+        custodianTeamMemberId: booking.custodianTeamMemberId,
+        custodianUserId: booking.custodianUserId || null,
+      })
+      .select()
+      .single();
+    if (createError || !createdRow) {
+      throw new ShelfError({
+        cause: createError,
+        message: "Failed to create booking.",
+        label,
+      });
+    }
+
+    // Connect assets via join table
+    if (assetIds.length > 0) {
+      const { error: assetJoinError } = await sbDb
+        .from("_AssetToBooking")
+        .insert(assetIds.map((assetId) => ({ A: assetId, B: createdRow.id })));
+      if (assetJoinError) {
+        throw new ShelfError({
+          cause: assetJoinError,
+          message: "Failed to connect assets to booking.",
+          label,
+        });
+      }
+    }
+
+    // Connect tags via join table
+    if (booking.tags.length > 0) {
+      const { error: tagJoinError } = await sbDb
+        .from("_BookingToTag")
+        .insert(booking.tags.map((tag) => ({ A: createdRow.id, B: tag.id })));
+      if (tagJoinError) {
+        throw new ShelfError({
+          cause: tagJoinError,
+          message: "Failed to connect tags to booking.",
+          label,
+        });
+      }
+    }
+
+    // Fetch related data to match BOOKING_COMMON_INCLUDE + organization
+    const [
+      custodianTeamMemberResult,
+      custodianUserResult,
+      orgResult,
+      tagsResult,
+    ] = await Promise.all([
+      createdRow.custodianTeamMemberId
+        ? sbDb
+            .from("TeamMember")
+            .select("*")
+            .eq("id", createdRow.custodianTeamMemberId)
+            .single()
+        : Promise.resolve({ data: null, error: null }),
+      createdRow.custodianUserId
+        ? sbDb
+            .from("User")
+            .select("*")
+            .eq("id", createdRow.custodianUserId)
+            .single()
+        : Promise.resolve({ data: null, error: null }),
+      sbDb
+        .from("Organization")
+        .select("*")
+        .eq("id", createdRow.organizationId)
+        .single(),
+      sbDb.from("_BookingToTag").select("B").eq("A", createdRow.id),
+    ]);
+
+    let tags: Array<{ id: string; name: string; color: string | null }> = [];
+    if (tagsResult.data && tagsResult.data.length > 0) {
+      const tagIds = tagsResult.data.map((r) => r.B);
+      const { data: tagRows } = await sbDb
+        .from("Tag")
+        .select("id, name, color")
+        .in("id", tagIds);
+      tags = tagRows ?? [];
+    }
+
+    return {
+      ...createdRow,
+      from: createdRow.from ? new Date(createdRow.from) : null,
+      to: createdRow.to ? new Date(createdRow.to) : null,
+      createdAt: new Date(createdRow.createdAt),
+      updatedAt: new Date(createdRow.updatedAt),
+      originalFrom: createdRow.originalFrom
+        ? new Date(createdRow.originalFrom)
+        : null,
+      originalTo: createdRow.originalTo
+        ? new Date(createdRow.originalTo)
+        : null,
+      autoArchivedAt: createdRow.autoArchivedAt
+        ? new Date(createdRow.autoArchivedAt)
+        : null,
+      custodianTeamMember: custodianTeamMemberResult.data ?? null,
+      custodianUser: custodianUserResult.data ?? null,
+      organization: orgResult.data ?? null,
+      tags,
+    } as any;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -462,68 +678,110 @@ export async function updateBasicBooking({
     hints?: ClientHint;
   }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: {
-          id: true,
-          status: true,
-          custodianUserId: true,
-          custodianTeamMemberId: true,
-          name: true,
-          description: true,
-          from: true,
-          to: true,
-          custodianTeamMember: {
-            select: {
-              id: true,
-              name: true,
-              user: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                },
-              },
-            },
-          },
-          custodianUser: {
-            select: {
-              id: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          tags: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          status: 404,
-          message:
-            "Could not find booking or the booking exists in another workspace.",
-          label,
-        });
+    // Fetch booking via Supabase
+    const { data: bookingRow, error: bookingFetchErr } = await sbDb
+      .from("Booking")
+      .select(
+        "id, status, custodianUserId, custodianTeamMemberId, name, description, from, to"
+      )
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingFetchErr || !bookingRow) {
+      throw new ShelfError({
+        cause: bookingFetchErr,
+        status: 404,
+        message:
+          "Could not find booking or the booking exists in another workspace.",
+        label,
       });
+    }
+
+    // Fetch custodianTeamMember with nested user
+    let ubCustodianTm: {
+      id: string;
+      name: string;
+      user: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+      } | null;
+    } | null = null;
+    if (bookingRow.custodianTeamMemberId) {
+      const { data: tmRow } = await sbDb
+        .from("TeamMember")
+        .select("id, name, userId")
+        .eq("id", bookingRow.custodianTeamMemberId)
+        .single();
+      if (tmRow) {
+        let tmUser: {
+          id: string;
+          firstName: string | null;
+          lastName: string | null;
+        } | null = null;
+        if (tmRow.userId) {
+          const { data: uRow } = await sbDb
+            .from("User")
+            .select("id, firstName, lastName")
+            .eq("id", tmRow.userId)
+            .single();
+          tmUser = uRow;
+        }
+        ubCustodianTm = { id: tmRow.id, name: tmRow.name, user: tmUser };
+      }
+    }
+
+    // Fetch custodianUser
+    let ubCustodianUser: {
+      id: string;
+      email: string;
+      firstName: string | null;
+      lastName: string | null;
+    } | null = null;
+    if (bookingRow.custodianUserId) {
+      const { data: cuRow } = await sbDb
+        .from("User")
+        .select("id, email, firstName, lastName")
+        .eq("id", bookingRow.custodianUserId)
+        .single();
+      ubCustodianUser = cuRow;
+    }
+
+    // Fetch tags
+    const { data: ubTagJoinRows } = await sbDb
+      .from("_BookingToTag")
+      .select("B")
+      .eq("A", bookingRow.id);
+    let ubBookingTags: Array<{ id: string; name: string }> = [];
+    if (ubTagJoinRows && ubTagJoinRows.length > 0) {
+      const { data: tagRows } = await sbDb
+        .from("Tag")
+        .select("id, name")
+        .in(
+          "id",
+          ubTagJoinRows.map((r) => r.B)
+        );
+      ubBookingTags = tagRows ?? [];
+    }
+
+    const booking = {
+      ...bookingRow,
+      from: bookingRow.from ? new Date(bookingRow.from) : null,
+      to: bookingRow.to ? new Date(bookingRow.to) : null,
+      status: bookingRow.status as BookingStatus,
+      custodianTeamMember: ubCustodianTm,
+      custodianUser: ubCustodianUser,
+      tags: ubBookingTags,
+    };
 
     // Capture old custodian email before the update
     // (for custodian change scenarios)
     const oldCustodianEmail = booking.custodianUser?.email;
 
-    const dataToUpdate: Prisma.BookingUpdateInput = {
+    // Build flat update object for Supabase
+    const sbUpdateData: Record<string, unknown> = {
       name,
       description,
-      tags: {
-        set: [],
-        connect: tags,
-      },
     };
 
     /** Booking update is not allowed for these type of status */
@@ -546,16 +804,13 @@ export async function updateBasicBooking({
      * Changing of booking dates and custodian is only allowed for DRAFT status
      */
     if (booking.status === BookingStatus.DRAFT) {
-      dataToUpdate.from = from;
-      dataToUpdate.to = to;
-
-      // Also update the original dates to new ones
       if (from) {
-        dataToUpdate.originalFrom = from;
+        sbUpdateData.from = from.toISOString();
+        sbUpdateData.originalFrom = from.toISOString();
       }
-
       if (to) {
-        dataToUpdate.originalTo = to;
+        sbUpdateData.to = to.toISOString();
+        sbUpdateData.originalTo = to.toISOString();
       }
 
       /**
@@ -564,26 +819,20 @@ export async function updateBasicBooking({
        * However, just in case we need to check it. If its not passed, we need to throw an error to prevent silent failure and corrupted data
        */
       if (custodianTeamMemberId) {
-        dataToUpdate.custodianTeamMember = {
-          connect: { id: custodianTeamMemberId },
-        };
+        sbUpdateData.custodianTeamMemberId = custodianTeamMemberId;
 
         /**
-         * If a userId is passed, meaning the team member is connected to a user, we connct to it.
-         * This will override the value if there were any previous custodians`
+         * If a userId is passed, meaning the team member is connected to a user, we connect to it.
+         * This will override the value if there were any previous custodians
          */
         if (custodianUserId) {
-          dataToUpdate.custodianUser = {
-            connect: { id: custodianUserId },
-          };
+          sbUpdateData.custodianUserId = custodianUserId;
         } else if (booking.custodianUserId) {
           /**
            * If previous booking custodian had a user, we need to remove it
            * because we are now connecting to an NRM. If we dont do this the teamMemberID and the userId will be connected to different entities
            */
-          dataToUpdate.custodianUser = {
-            disconnect: true,
-          };
+          sbUpdateData.custodianUserId = null;
         }
       } else {
         throw new ShelfError({
@@ -596,10 +845,53 @@ export async function updateBasicBooking({
       }
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: dataToUpdate,
-    });
+    // Update booking flat fields via Supabase
+    const { data: updatedRow, error: updateErr } = await sbDb
+      .from("Booking")
+      .update(sbUpdateData)
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateErr || !updatedRow) {
+      throw new ShelfError({
+        cause: updateErr,
+        message: "Failed to update booking.",
+        label,
+      });
+    }
+
+    // Update tags: clear existing, then re-connect
+    await sbDb.from("_BookingToTag").delete().eq("A", booking.id);
+    if (tags.length > 0) {
+      const { error: tagConnErr } = await sbDb
+        .from("_BookingToTag")
+        .insert(tags.map((tag) => ({ A: booking.id, B: tag.id })));
+      if (tagConnErr) {
+        throw new ShelfError({
+          cause: tagConnErr,
+          message: "Failed to update booking tags.",
+          label,
+        });
+      }
+    }
+
+    const updatedBooking = {
+      ...updatedRow,
+      from: updatedRow.from ? new Date(updatedRow.from) : null,
+      to: updatedRow.to ? new Date(updatedRow.to) : null,
+      createdAt: new Date(updatedRow.createdAt),
+      updatedAt: new Date(updatedRow.updatedAt),
+      originalFrom: updatedRow.originalFrom
+        ? new Date(updatedRow.originalFrom)
+        : null,
+      originalTo: updatedRow.originalTo
+        ? new Date(updatedRow.originalTo)
+        : null,
+      autoArchivedAt: updatedRow.autoArchivedAt
+        ? new Date(updatedRow.autoArchivedAt)
+        : null,
+      status: updatedRow.status as BookingStatus,
+    };
 
     // BOOKING ACTIVITY LOG: Create separate notes for each change
     // This approach creates individual notes for each field change with proper user attribution
@@ -880,6 +1172,9 @@ export async function reserveBooking({
     userId?: User["id"];
   }) {
   try {
+    // KEPT AS PRISMA: This query uses createBookingConflictConditions which
+    // performs deeply nested relational filtering (asset.bookings with date
+    // range overlap). Converting to Supabase would require raw SQL or an RPC.
     const bookingFound = await db.booking
       .findUniqueOrThrow({
         where: { id, organizationId },
@@ -960,21 +1255,16 @@ export async function reserveBooking({
       });
     }
 
-    const dataToUpdate: Prisma.BookingUpdateInput = {
+    // Build flat update data for Supabase
+    const reserveUpdateData: Record<string, unknown> = {
       status: BookingStatus.RESERVED,
       name,
       description,
-      tags: {
-        set: [],
-        connect: tags,
-      },
+      from: from!.toISOString(),
+      originalFrom: from!.toISOString(),
+      to: to!.toISOString(),
+      originalTo: to!.toISOString(),
     };
-
-    dataToUpdate.from = from;
-    dataToUpdate.originalFrom = from;
-
-    dataToUpdate.to = to;
-    dataToUpdate.originalTo = to;
 
     /**
      * Custodian team member should always be passed.
@@ -982,26 +1272,20 @@ export async function reserveBooking({
      * However, just in case we need to check it. If its not passed, we need to throw an error to prevent silent failure and corrupted data
      */
     if (custodianTeamMemberId) {
-      dataToUpdate.custodianTeamMember = {
-        connect: { id: custodianTeamMemberId },
-      };
+      reserveUpdateData.custodianTeamMemberId = custodianTeamMemberId;
 
       /**
-       * If a userId is passed, meaning the team member is connected to a user, we connct to it.
-       * This will override the value if there were any previous custodians`
+       * If a userId is passed, meaning the team member is connected to a user, we connect to it.
+       * This will override the value if there were any previous custodians
        */
       if (custodianUserId) {
-        dataToUpdate.custodianUser = {
-          connect: { id: custodianUserId },
-        };
+        reserveUpdateData.custodianUserId = custodianUserId;
       } else if (bookingFound.custodianUserId) {
         /**
          * If previous booking custodian had a user, we need to remove it
          * because we are now connecting to an NRM. If we dont do this the teamMemberID and the userId will be connected to different entities
          */
-        dataToUpdate.custodianUser = {
-          disconnect: true,
-        };
+        reserveUpdateData.custodianUserId = null;
       }
     } else {
       throw new ShelfError({
@@ -1013,10 +1297,53 @@ export async function reserveBooking({
       });
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: bookingFound.id },
-      data: dataToUpdate,
-    });
+    // Update booking via Supabase
+    const { data: reserveUpdatedRow, error: reserveUpdateErr } = await sbDb
+      .from("Booking")
+      .update(reserveUpdateData)
+      .eq("id", bookingFound.id)
+      .select()
+      .single();
+    if (reserveUpdateErr || !reserveUpdatedRow) {
+      throw new ShelfError({
+        cause: reserveUpdateErr,
+        message: "Failed to update booking for reservation.",
+        label,
+      });
+    }
+
+    // Update tags: clear existing, then re-connect
+    await sbDb.from("_BookingToTag").delete().eq("A", bookingFound.id);
+    if (tags.length > 0) {
+      const { error: rsvTagErr } = await sbDb
+        .from("_BookingToTag")
+        .insert(tags.map((tag) => ({ A: bookingFound.id, B: tag.id })));
+      if (rsvTagErr) {
+        throw new ShelfError({
+          cause: rsvTagErr,
+          message: "Failed to update booking tags.",
+          label,
+        });
+      }
+    }
+
+    const updatedBooking = {
+      ...reserveUpdatedRow,
+      from: reserveUpdatedRow.from ? new Date(reserveUpdatedRow.from) : null,
+      to: reserveUpdatedRow.to ? new Date(reserveUpdatedRow.to) : null,
+      createdAt: new Date(reserveUpdatedRow.createdAt),
+      updatedAt: new Date(reserveUpdatedRow.updatedAt),
+      originalFrom: reserveUpdatedRow.originalFrom
+        ? new Date(reserveUpdatedRow.originalFrom)
+        : null,
+      originalTo: reserveUpdatedRow.originalTo
+        ? new Date(reserveUpdatedRow.originalTo)
+        : null,
+      autoArchivedAt: reserveUpdatedRow.autoArchivedAt
+        ? new Date(reserveUpdatedRow.autoArchivedAt)
+        : null,
+      status: reserveUpdatedRow.status as BookingStatus,
+    };
 
     /** Calculate the time difference between the booking.to and the current time */
     const { hours } = calcTimeDifference(updatedBooking.from!, new Date());
@@ -1150,6 +1477,8 @@ export async function checkoutBooking({
   userId?: string;
 }) {
   try {
+    // KEPT AS PRISMA: Uses createBookingConflictConditions for deeply nested
+    // relational filtering (asset.bookings with date range overlap).
     const bookingFound = await db.booking
       .findUniqueOrThrow({
         where: { id, organizationId },
@@ -1273,14 +1602,11 @@ export async function checkoutBooking({
     });
     if (rpcError) throw rpcError;
 
-    /** Re-fetch updated booking with includes */
-    const updatedBooking = await db.booking.findUniqueOrThrow({
-      where: { id: bookingFound.id },
-      include: {
-        ...BOOKING_INCLUDE_FOR_EMAIL,
-        assets: true,
-      },
-    });
+    /** Re-fetch updated booking with includes via Supabase */
+    const updatedBooking = await fetchBookingWithEmailIncludes(
+      bookingFound.id,
+      { includeAssets: true }
+    );
 
     // Create status transition note
     if (userId) {
@@ -1378,36 +1704,121 @@ export async function checkinBooking({
   specificAssetIds?: string[];
 }) {
   try {
-    const bookingFound = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        include: {
-          assets: {
-            select: {
-              id: true,
-              kitId: true,
-              status: true,
-              bookings: {
-                select: { id: true, status: true },
-                where: {
-                  status: {
-                    in: [BookingStatus.ONGOING, BookingStatus.OVERDUE],
-                  },
-                },
-              },
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          status: 404,
-          label,
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    // Fetch booking via Supabase
+    const { data: ciBookingRow, error: ciBookingErr } = await sbDb
+      .from("Booking")
+      .select("*")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (ciBookingErr || !ciBookingRow) {
+      throw new ShelfError({
+        cause: ciBookingErr,
+        status: 404,
+        label,
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
+
+    // Fetch assets for this booking
+    const { data: ciAssetJoinRows, error: ciJoinErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", id);
+    if (ciJoinErr) {
+      throw new ShelfError({
+        cause: ciJoinErr,
+        label,
+        message: "Failed to fetch booking assets.",
+      });
+    }
+    const ciAssetIds = ciAssetJoinRows?.map((r) => r.A) ?? [];
+    let ciAssets: Array<{
+      id: string;
+      kitId: string | null;
+      status: string;
+      bookings: Array<{ id: string; status: string }>;
+    }> = [];
+    if (ciAssetIds.length > 0) {
+      const { data: ciAssetRows, error: ciAssetErr } = await sbDb
+        .from("Asset")
+        .select("id, kitId, status")
+        .in("id", ciAssetIds);
+      if (ciAssetErr) {
+        throw new ShelfError({
+          cause: ciAssetErr,
+          label,
+          message: "Failed to fetch asset details.",
+        });
+      }
+
+      // For each asset, find its ONGOING/OVERDUE bookings
+      const { data: allActiveBookingJoins, error: activeJoinErr } = await sbDb
+        .from("_AssetToBooking")
+        .select("A, B")
+        .in("A", ciAssetIds);
+      if (activeJoinErr) {
+        throw new ShelfError({
+          cause: activeJoinErr,
+          label,
+          message: "Failed to fetch asset booking joins.",
+        });
+      }
+
+      // Get unique booking IDs and fetch their statuses
+      const relatedBookingIds = [
+        ...new Set(allActiveBookingJoins?.map((r) => r.B) ?? []),
+      ];
+      let bookingStatusMap = new Map<string, string>();
+      if (relatedBookingIds.length > 0) {
+        const { data: bookingRows } = await sbDb
+          .from("Booking")
+          .select("id, status")
+          .in("id", relatedBookingIds)
+          .in("status", [BookingStatus.ONGOING, BookingStatus.OVERDUE]);
+        (bookingRows ?? []).forEach((b) =>
+          bookingStatusMap.set(b.id, b.status)
+        );
+      }
+
+      // Build asset -> bookings map
+      const assetBookingsMap = new Map<
+        string,
+        Array<{ id: string; status: string }>
+      >();
+      (allActiveBookingJoins ?? []).forEach((join) => {
+        const bStatus = bookingStatusMap.get(join.B);
+        if (bStatus) {
+          if (!assetBookingsMap.has(join.A)) assetBookingsMap.set(join.A, []);
+          assetBookingsMap.get(join.A)!.push({ id: join.B, status: bStatus });
+        }
+      });
+
+      ciAssets = (ciAssetRows ?? []).map((a) => ({
+        ...a,
+        bookings: assetBookingsMap.get(a.id) ?? [],
+      }));
+    }
+
+    const bookingFound = {
+      ...ciBookingRow,
+      from: ciBookingRow.from ? new Date(ciBookingRow.from) : null,
+      to: ciBookingRow.to ? new Date(ciBookingRow.to) : null,
+      createdAt: new Date(ciBookingRow.createdAt),
+      updatedAt: new Date(ciBookingRow.updatedAt),
+      originalFrom: ciBookingRow.originalFrom
+        ? new Date(ciBookingRow.originalFrom)
+        : null,
+      originalTo: ciBookingRow.originalTo
+        ? new Date(ciBookingRow.originalTo)
+        : null,
+      autoArchivedAt: ciBookingRow.autoArchivedAt
+        ? new Date(ciBookingRow.autoArchivedAt)
+        : null,
+      status: ciBookingRow.status as BookingStatus,
+      assets: ciAssets,
+    };
 
     const dataToUpdate: Prisma.BookingUpdateInput = {
       status: BookingStatus.COMPLETE,
@@ -1562,14 +1973,11 @@ export async function checkinBooking({
     });
     if (rpcError) throw rpcError;
 
-    /** Re-fetch updated booking with includes */
-    const updatedBooking = await db.booking.findUniqueOrThrow({
-      where: { id: bookingFound.id },
-      include: {
-        ...BOOKING_INCLUDE_FOR_EMAIL,
-        assets: true,
-      },
-    });
+    /** Re-fetch updated booking with includes via Supabase */
+    const updatedBooking = await fetchBookingWithEmailIncludes(
+      bookingFound.id,
+      { includeAssets: true }
+    );
 
     // Create status transition note
     if (userId) {
@@ -1627,7 +2035,7 @@ export async function checkinBooking({
         // Separate complete kits from individual assets
         const kitIds = getKitIdsByAssets(
           (updatedBooking.assets || []).filter(
-            (a) => specificAssetIds?.includes(a.id)
+            (a: Pick<Asset, "id" | "kitId">) => specificAssetIds?.includes(a.id)
           )
         );
         const completeKits: Array<{ id: string; name: string }> = [];
@@ -1806,21 +2214,54 @@ export async function partialCheckinBooking({
         lastName: true,
       } satisfies Prisma.UserSelect,
     });
-    // First, validate the booking exists and get its current assets
-    const bookingFound = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        include: { assets: { select: { id: true, kitId: true } } },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          status: 404,
-          label,
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    // First, validate the booking exists and get its current assets via Supabase
+    const { data: pcBookingRow, error: pcBookingErr } = await sbDb
+      .from("Booking")
+      .select("*")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (pcBookingErr || !pcBookingRow) {
+      throw new ShelfError({
+        cause: pcBookingErr,
+        status: 404,
+        label,
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
+    // Fetch assets via join table
+    const { data: pcAssetJoins } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", id);
+    const pcAssetIds = pcAssetJoins?.map((r) => r.A) ?? [];
+    let pcAssets: Array<{ id: string; kitId: string | null }> = [];
+    if (pcAssetIds.length > 0) {
+      const { data: pcAssetRows } = await sbDb
+        .from("Asset")
+        .select("id, kitId")
+        .in("id", pcAssetIds);
+      pcAssets = pcAssetRows ?? [];
+    }
+    const bookingFound = {
+      ...pcBookingRow,
+      from: pcBookingRow.from ? new Date(pcBookingRow.from) : null,
+      to: pcBookingRow.to ? new Date(pcBookingRow.to) : null,
+      createdAt: new Date(pcBookingRow.createdAt),
+      updatedAt: new Date(pcBookingRow.updatedAt),
+      originalFrom: pcBookingRow.originalFrom
+        ? new Date(pcBookingRow.originalFrom)
+        : null,
+      originalTo: pcBookingRow.originalTo
+        ? new Date(pcBookingRow.originalTo)
+        : null,
+      autoArchivedAt: pcBookingRow.autoArchivedAt
+        ? new Date(pcBookingRow.autoArchivedAt)
+        : null,
+      status: pcBookingRow.status as BookingStatus,
+      assets: pcAssets,
+    };
 
     // Early exit: If we're checking in all remaining CHECKED_OUT assets, do a complete check-in instead
     // First, get the current status of all assets in the booking
@@ -2042,32 +2483,32 @@ export async function partialCheckinBooking({
       itemsDescription = assetContent;
     }
 
-    // Get the updated booking to calculate remaining count
-    const updatedBookingForNote = await db.booking.findUniqueOrThrow({
-      where: { id },
-      include: {
-        assets: true,
-        custodianUser: true,
-        custodianTeamMember: true,
-        _count: { select: { assets: true } },
-      },
+    // Get the updated booking to calculate remaining count via Supabase
+    const updatedBookingForNote = await fetchBookingWithEmailIncludes(id, {
+      includeAssets: true,
     });
 
     const remainingCount =
-      updatedBookingForNote.assets.length - assetIds.length;
+      (updatedBookingForNote.assets?.length ?? 0) - assetIds.length;
     const isCompletingBooking = remainingCount === 0;
 
     if (isCompletingBooking) {
-      // Update booking status to COMPLETE
-      const completedBooking = await db.booking.update({
-        where: { id },
-        data: { status: BookingStatus.COMPLETE },
-        include: {
-          assets: true,
-          custodianUser: true,
-          custodianTeamMember: true,
-          _count: { select: { assets: true } },
-        },
+      // Update booking status to COMPLETE via Supabase
+      const { error: pcCompleteErr } = await sbDb
+        .from("Booking")
+        .update({ status: BookingStatus.COMPLETE })
+        .eq("id", id);
+      if (pcCompleteErr) {
+        throw new ShelfError({
+          cause: pcCompleteErr,
+          message: "Failed to complete booking.",
+          label,
+        });
+      }
+
+      // Re-fetch to get completed booking state
+      const completedBooking = await fetchBookingWithEmailIncludes(id, {
+        includeAssets: true,
       });
 
       // Create combined completion message
@@ -2438,13 +2879,9 @@ export async function cancelBooking({
     });
     if (rpcError) throw rpcError;
 
-    /** Re-fetch updated booking with includes */
-    const booking = await db.booking.findUniqueOrThrow({
-      where: { id: bookingFound.id },
-      include: {
-        assets: true,
-        ...BOOKING_INCLUDE_FOR_EMAIL,
-      },
+    /** Re-fetch updated booking with includes via Supabase */
+    const booking = await fetchBookingWithEmailIncludes(bookingFound.id, {
+      includeAssets: true,
     });
 
     /** Cancel any active schedulers */
@@ -2744,11 +3181,8 @@ export async function extendBooking({
       });
     }
 
-    /** Re-fetch the updated booking with includes for email */
-    const updatedBooking = await db.booking.findUniqueOrThrow({
-      where: { id: booking.id },
-      include: BOOKING_INCLUDE_FOR_EMAIL,
-    });
+    /** Re-fetch the updated booking with includes for email via Supabase */
+    const updatedBooking = await fetchBookingWithEmailIncludes(booking.id);
 
     // Add activity log for booking extension
     const user = await getUserByID(userId, {
@@ -3180,6 +3614,11 @@ export async function getBookings(params: {
       }
     }
 
+    // KEPT AS PRISMA: This query uses deeply nested relational filtering
+    // (some/none operators, case-insensitive contains across nested relations,
+    // dynamic extraInclude, 3+ levels of nested includes on assets, and
+    // complex AND/OR where clauses). Converting to Supabase would require
+    // rebuilding a query engine and is not feasible without raw SQL/RPC.
     const [bookings, bookingCount] = await Promise.all([
       db.booking.findMany({
         ...(!takeAll && {
@@ -3529,18 +3968,24 @@ export async function deleteBooking(
     );
     const hasKits = uniqueKitIds.size > 0;
 
-    const b = await db.booking.delete({
-      where: { id, organizationId },
-      include: {
-        ...BOOKING_COMMON_INCLUDE,
-        ...BOOKING_INCLUDE_FOR_EMAIL,
-        assets: {
-          select: {
-            id: true,
-          },
-        },
-      },
+    // Fetch booking with email includes before deletion
+    const b = await fetchBookingWithEmailIncludes(id, {
+      includeAssets: true,
     });
+
+    // Delete the booking via Supabase
+    const { error: deleteErr } = await sbDb
+      .from("Booking")
+      .delete()
+      .eq("id", id)
+      .eq("organizationId", organizationId);
+    if (deleteErr) {
+      throw new ShelfError({
+        cause: deleteErr,
+        message: "Failed to delete booking.",
+        label,
+      });
+    }
 
     const email = b.custodianUser?.email;
     if (email) {
@@ -3664,6 +4109,9 @@ export async function getBooking<T extends Prisma.BookingInclude | undefined>(
       (org) => org.organizationId
     );
 
+    // KEPT AS PRISMA: Uses dynamic mergedInclude with deeply nested
+    // asset includes (category, kit.category, valuation), dynamic
+    // assetsWhere with search filtering, and cross-organization OR clauses.
     const bookingFound = (await db.booking.findFirstOrThrow({
       where: {
         OR: [
@@ -3887,6 +4335,9 @@ export async function getBookingFlags(
     assetIds: Asset["id"][];
   }
 ) {
+  // KEPT AS PRISMA: Uses deeply nested asset.bookings with date range
+  // overlap conflict detection, category/custody/kit includes, and complex
+  // OR/AND where clauses. Would require raw SQL/RPC to convert.
   const assets = await db.asset.findMany({
     where: { id: { in: booking.assetIds } },
     include: {
@@ -3999,6 +4450,9 @@ export async function bulkDeleteBookings({
       ? getBookingWhereInput({ currentSearchParams, organizationId })
       : { id: { in: bookingIds }, organizationId };
 
+    // KEPT AS PRISMA: Uses dynamic Prisma where from getBookingWhereInput
+    // (supports ALL_SELECTED_KEY pattern with complex filter conditions),
+    // and nested organization.owner.email include.
     const [bookings, user] = await Promise.all([
       db.booking.findMany({
         where,
@@ -4128,6 +4582,8 @@ export async function bulkArchiveBookings({
       ? getBookingWhereInput({ currentSearchParams, organizationId })
       : { id: { in: bookingIds }, organizationId };
 
+    // KEPT AS PRISMA: Uses dynamic Prisma where from getBookingWhereInput
+    // (supports ALL_SELECTED_KEY pattern with complex filter conditions).
     const bookings = await db.booking.findMany({
       where,
       select: {
@@ -4217,6 +4673,9 @@ export async function bulkCancelBookings({
       ? getBookingWhereInput({ currentSearchParams, organizationId })
       : { id: { in: bookingIds }, organizationId };
 
+    // KEPT AS PRISMA: Uses dynamic Prisma where from getBookingWhereInput
+    // (supports ALL_SELECTED_KEY pattern with complex filter conditions),
+    // and nested organization.owner.email include.
     const [bookings, user] = await Promise.all([
       db.booking.findMany({
         where,
@@ -4886,37 +5345,91 @@ export async function duplicateBooking({
     });
     const hints = getHints(request);
 
-    const newBooking = await db.booking.create({
-      data: {
+    // Create duplicate booking via Supabase
+    const dupFromDate = DateTime.fromFormat(
+      DateTime.fromJSDate(new Date(), { zone: hints.timeZone }).toFormat(
+        DATE_TIME_FORMAT
+      ),
+      DATE_TIME_FORMAT,
+      { zone: hints.timeZone }
+    ).toJSDate();
+    const dupToDate = DateTime.fromFormat(
+      DateTime.fromJSDate(addDays(new Date(), 1), {
+        zone: hints.timeZone,
+      }).toFormat(DATE_TIME_FORMAT),
+      DATE_TIME_FORMAT,
+      { zone: hints.timeZone }
+    ).toJSDate();
+
+    const { data: dupRow, error: dupError } = await sbDb
+      .from("Booking")
+      .insert({
         name: bookingToDuplicate.name + " (Copy)",
         description: bookingToDuplicate.description,
-        from: DateTime.fromFormat(
-          DateTime.fromJSDate(new Date(), { zone: hints.timeZone }).toFormat(
-            DATE_TIME_FORMAT
-          ),
-          DATE_TIME_FORMAT,
-          { zone: hints.timeZone }
-        ).toJSDate(),
-        to: DateTime.fromFormat(
-          DateTime.fromJSDate(addDays(new Date(), 1), {
-            zone: hints.timeZone,
-          }).toFormat(DATE_TIME_FORMAT),
-          DATE_TIME_FORMAT,
-          { zone: hints.timeZone }
-        ).toJSDate(),
+        from: dupFromDate.toISOString(),
+        to: dupToDate.toISOString(),
         organizationId,
         creatorId: userId,
         status: BookingStatus.DRAFT,
         custodianTeamMemberId: bookingToDuplicate.custodianTeamMemberId,
         custodianUserId: bookingToDuplicate.custodianUserId,
-        assets: {
-          connect: bookingToDuplicate.assets.map((asset) => ({ id: asset.id })),
-        },
-        tags: {
-          connect: bookingToDuplicate.tags.map((tag) => ({ id: tag.id })),
-        },
-      },
-    });
+      })
+      .select()
+      .single();
+    if (dupError || !dupRow) {
+      throw new ShelfError({
+        cause: dupError,
+        message: "Failed to create duplicate booking.",
+        label,
+      });
+    }
+
+    // Connect assets via join table
+    if (bookingToDuplicate.assets.length > 0) {
+      const { error: dupAssetErr } = await sbDb.from("_AssetToBooking").insert(
+        bookingToDuplicate.assets.map((asset) => ({
+          A: asset.id,
+          B: dupRow.id,
+        }))
+      );
+      if (dupAssetErr) {
+        throw new ShelfError({
+          cause: dupAssetErr,
+          message: "Failed to connect assets to duplicate booking.",
+          label,
+        });
+      }
+    }
+
+    // Connect tags via join table
+    if (bookingToDuplicate.tags.length > 0) {
+      const { error: dupTagErr } = await sbDb.from("_BookingToTag").insert(
+        bookingToDuplicate.tags.map((tag) => ({
+          A: dupRow.id,
+          B: tag.id,
+        }))
+      );
+      if (dupTagErr) {
+        throw new ShelfError({
+          cause: dupTagErr,
+          message: "Failed to connect tags to duplicate booking.",
+          label,
+        });
+      }
+    }
+
+    const newBooking = {
+      ...dupRow,
+      from: dupRow.from ? new Date(dupRow.from) : null,
+      to: dupRow.to ? new Date(dupRow.to) : null,
+      createdAt: new Date(dupRow.createdAt),
+      updatedAt: new Date(dupRow.updatedAt),
+      originalFrom: dupRow.originalFrom ? new Date(dupRow.originalFrom) : null,
+      originalTo: dupRow.originalTo ? new Date(dupRow.originalTo) : null,
+      autoArchivedAt: dupRow.autoArchivedAt
+        ? new Date(dupRow.autoArchivedAt)
+        : null,
+    };
 
     return newBooking;
   } catch (cause) {
@@ -5222,16 +5735,82 @@ export async function getOngoingBookingForAsset({
   organizationId: Asset["organizationId"];
 }) {
   try {
-    const booking = await db.booking.findFirst({
-      where: {
-        status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
-        organizationId,
-        assets: { some: { id: assetId } },
-        partialCheckins: { none: { assetIds: { has: assetId } } }, // Exclude bookings where this asset has been partially checked in
-      },
-    });
+    // Find ONGOING/OVERDUE bookings that contain this asset via join table
+    const { data: assetBookingJoins, error: joinErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("B")
+      .eq("A", assetId);
+    if (joinErr) {
+      throw new ShelfError({
+        cause: joinErr,
+        label,
+        message: "Failed to fetch asset booking joins.",
+      });
+    }
+    const candidateBookingIds = assetBookingJoins?.map((r) => r.B) ?? [];
+    if (candidateBookingIds.length === 0) return null;
 
-    return booking;
+    // Filter to ONGOING/OVERDUE bookings in this organization
+    const { data: candidateBookings, error: candidateErr } = await sbDb
+      .from("Booking")
+      .select("*")
+      .in("id", candidateBookingIds)
+      .eq("organizationId", organizationId)
+      .in("status", [BookingStatus.ONGOING, BookingStatus.OVERDUE]);
+    if (candidateErr) {
+      throw new ShelfError({
+        cause: candidateErr,
+        label,
+        message: "Failed to fetch candidate bookings.",
+      });
+    }
+    if (!candidateBookings || candidateBookings.length === 0) return null;
+
+    // Exclude bookings where this asset has been partially checked in
+    const { data: partialCheckins, error: pcErr } = await sbDb
+      .from("PartialBookingCheckin")
+      .select("bookingId, assetIds")
+      .in(
+        "bookingId",
+        candidateBookings.map((b) => b.id)
+      );
+    if (pcErr) {
+      throw new ShelfError({
+        cause: pcErr,
+        label,
+        message: "Failed to fetch partial check-ins.",
+      });
+    }
+
+    const excludedBookingIds = new Set(
+      (partialCheckins ?? [])
+        .filter((pc) => pc.assetIds.includes(assetId))
+        .map((pc) => pc.bookingId)
+    );
+
+    const matchingBooking = candidateBookings.find(
+      (b) => !excludedBookingIds.has(b.id)
+    );
+
+    if (!matchingBooking) return null;
+
+    return {
+      ...matchingBooking,
+      from: matchingBooking.from ? new Date(matchingBooking.from) : null,
+      to: matchingBooking.to ? new Date(matchingBooking.to) : null,
+      createdAt: new Date(matchingBooking.createdAt),
+      updatedAt: new Date(matchingBooking.updatedAt),
+      originalFrom: matchingBooking.originalFrom
+        ? new Date(matchingBooking.originalFrom)
+        : null,
+      originalTo: matchingBooking.originalTo
+        ? new Date(matchingBooking.originalTo)
+        : null,
+      autoArchivedAt: matchingBooking.autoArchivedAt
+        ? new Date(matchingBooking.autoArchivedAt)
+        : null,
+      status: matchingBooking.status as BookingStatus,
+    } as Booking;
   } catch (cause) {
     throw new ShelfError({
       cause,
