@@ -2,7 +2,7 @@
 
 **Branch:** `claude/review-migration-plan-wYjw6`
 **Last Updated:** 2026-03-18
-**Status:** ~91% complete — remaining work tracked below
+**Status:** ~93% complete — remaining work tracked below
 
 ---
 
@@ -11,9 +11,9 @@
 | Area                         | Total `db.` calls | Converted | Remaining | % Done |
 | ---------------------------- | ----------------- | --------- | --------- | ------ |
 | **Modules** (`app/modules/`) | ~245              | ~215      | 30        | 88%    |
-| **Routes** (`app/routes/`)   | ~260              | ~233      | 27        | 90%    |
-| **Utils** (`app/utils/`)     | ~33               | ~28       | 5         | 85%    |
-| **Grand Total**              | ~538              | ~476      | ~62       | 88%    |
+| **Routes** (`app/routes/`)   | ~260              | ~248      | 12        | 95%    |
+| **Utils** (`app/utils/`)     | ~33               | ~30       | 3         | 91%    |
+| **Grand Total**              | ~538              | ~496      | ~42       | 92%    |
 
 Test files (`.test.ts`) contain 32 additional `db.` references
 (mock setups) to clean up when Prisma is fully removed.
@@ -40,6 +40,7 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 | `b6acabb` | Migrated 61 route and component files                      | 61 files  |
 | `7a56bb2` | Converted final simple Prisma calls                        | 4 files   |
 | (new)     | Dashboard aggregation RPCs + workspace counts              | 4 files   |
+| (new)     | Relation filters, \_count, array ops, role checks          | 6 files   |
 
 ### Module Services — Completed Conversions
 
@@ -85,7 +86,7 @@ Test files (`.test.ts`) contain 32 additional `db.` references
 
 ---
 
-## Outstanding Work (~18 distinct operations, 14 files)
+## Outstanding Work (~8 distinct operations, 9 files)
 
 Every remaining call is tagged with `// KEPT AS PRISMA` explaining
 the specific Prisma feature that prevents simple migration.
@@ -96,25 +97,14 @@ Migrated via RPC functions: `shelf_dashboard_asset_aggregation`,
 `shelf_dashboard_assets_by_status`, `shelf_dashboard_monthly_growth`,
 `shelf_dashboard_top_custodians`, `shelf_dashboard_location_distribution`.
 
-### 2. `_count` in Select & OrderBy (2 remaining calls)
+### 2. `_count` in Select & OrderBy — DONE
 
-| File                               | Feature                                        |
-| ---------------------------------- | ---------------------------------------------- |
-| `bookings.$bookingId.overview.tsx` | `_count: { select: { assets: true } }` on kits |
-| `bookings.$bookingId.overview.tsx` | `db.asset.count()` with nested `some`          |
+All `_count` queries migrated via RPCs or Supabase count queries.
 
-**Completed:** `home.tsx` (2 calls — top custodians + location distribution)
-and `account-details.workspace.index.tsx` (via `shelf_user_workspaces_with_counts` RPC).
+### 3. Nested `some`/`every` Relation Filters — DONE
 
-### 3. Nested `some`/`every` Relation Filters (5 calls)
-
-| File                                               | Filter                                                |
-| -------------------------------------------------- | ----------------------------------------------------- |
-| `bookings.$bookingId.overview.tsx`                 | `bookings: { some: { ... } }` with OR date conditions |
-| `bookings.overview.manage-assets.tsx`              | `bookings: { some: { id: bookingId } }`               |
-| `bookings.overview.checkin-assets.tsx`             | `bookings: { some: { id: booking.id } }`              |
-| `admin-dashboard+/org.$organizationId.members.tsx` | `userOrganizations: { some: { organizationId } }`     |
-| `utils/roles.server.ts` (x2)                       | Nested many-to-many role checks                       |
+Migrated via join table queries (`_AssetToBooking`, `_RoleToUser`,
+`UserOrganization`) and PostgREST array operators (`cs`, `eq.{}`).
 
 ### 4. Deep Nested Includes — 3+ levels (5 calls)
 
@@ -172,11 +162,11 @@ and `account-details.workspace.index.tsx` (via `shelf_user_workspaces_with_count
 **Result:** Created 6 RPC functions. Migrated `home.tsx` (5 calls)
 and `account-details.workspace.index.tsx` (1 call).
 
-### PR 2: Relation Filters → Views or RPCs
+### PR 2: Relation Filters + \_count + Array Ops — DONE
 
-**Scope:** Category 3 (5 calls)
-**Approach:** Create PostgreSQL views or RPCs for
-`some`/`every` patterns. Most are booking-asset joins.
+**Scope:** Categories 2 + 3 + partial 7 (12 calls)
+**Result:** Migrated via join table queries, PostgREST array
+operators, and split queries. 6 files updated.
 
 ### PR 3: Deep Includes → Targeted Queries
 

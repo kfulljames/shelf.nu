@@ -60,7 +60,7 @@ import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
 
 import When from "~/components/when/when";
-// KEPT AS PRISMA: booking findUniqueOrThrow with nested assets include
+// KEPT AS PRISMA: asset findMany with dynamic Prisma.AssetWhereInput from getAssetsWhereInput
 import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
@@ -275,14 +275,23 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         where: assetsWhere,
         select: { id: true },
       });
-      // KEPT AS PRISMA: nested `some` filter on bookings relation
-      const bookingAssets = await db.asset.findMany({
-        where: {
-          id: { notIn: removedAssetIds },
-          bookings: { some: { id: bookingId } },
-        },
-        select: { id: true },
-      });
+      // Get assets currently in this booking via join table, excluding removed ones
+      const { data: bookingAssetLinks, error: baErr } = await sbDb
+        .from("_AssetToBooking")
+        .select("A")
+        .eq("B", bookingId);
+
+      if (baErr) {
+        throw new ShelfError({
+          cause: baErr,
+          message: "Failed to load booking assets",
+          label: "Booking",
+        });
+      }
+
+      const bookingAssets = (bookingAssetLinks ?? [])
+        .filter((link) => !removedAssetIds.includes(link.A))
+        .map((link) => ({ id: link.A }));
 
       /**
        * New assets that needs to be added are
@@ -305,26 +314,41 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       } satisfies Prisma.UserSelect,
     });
 
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id: bookingId, organizationId },
-        select: {
-          id: true,
-          status: true,
-          /** We need to get the original assets that were part of the booking before the update so we can compare */
-          assets: {
-            select: { id: true },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label: "Booking",
-          message:
-            "Booking not found. Are you sure it exists in the current workspace.",
-        });
+    // Fetch booking with its current assets
+    const { data: bookingData, error: bookingErr } = await sbDb
+      .from("Booking")
+      .select("id, status")
+      .eq("id", bookingId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (bookingErr || !bookingData) {
+      throw new ShelfError({
+        cause: bookingErr,
+        label: "Booking",
+        message:
+          "Booking not found. Are you sure it exists in the current workspace.",
       });
+    }
+
+    // Get assets currently in this booking via join table
+    const { data: bookingAssetRows, error: baErr2 } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", bookingId);
+
+    if (baErr2) {
+      throw new ShelfError({
+        cause: baErr2,
+        label: "Booking",
+        message: "Failed to load booking assets",
+      });
+    }
+
+    const booking = {
+      ...bookingData,
+      assets: (bookingAssetRows ?? []).map((link) => ({ id: link.A })),
+    };
 
     /** Self service can only manage assets for bookings that are DRAFT */
     const cantManageAssetsAsBase =

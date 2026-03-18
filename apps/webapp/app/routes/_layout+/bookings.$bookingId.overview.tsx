@@ -1,8 +1,8 @@
 import {
   BookingStatus,
-  TagUseFor,
   OrganizationRoles,
   type Prisma,
+  type KitStatus,
 } from "@prisma/client";
 import { DateTime } from "luxon";
 import type {
@@ -27,10 +27,6 @@ import ContextualModal from "~/components/layout/contextual-modal";
 import ContextualSidebar from "~/components/layout/contextual-sidebar";
 import type { HeaderData } from "~/components/layout/header/types";
 
-// KEPT AS PRISMA: tag findMany with isEmpty/has, asset findMany with complex
-// nested bookings include, kit findMany with _count, asset count with nested some,
-// kit findUniqueOrThrow with nested assets include
-import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { sendBookingUpdatedEmail } from "~/modules/booking/email-helpers";
@@ -55,7 +51,7 @@ import { calculatePartialCheckinProgress } from "~/modules/booking/utils.server"
 import { getBookingSettingsForOrganization } from "~/modules/booking-settings/service.server";
 import { createNotes } from "~/modules/note/service.server";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
-import { TAG_WITH_COLOR_SELECT } from "~/modules/tag/constants";
+
 import { buildTagsSet } from "~/modules/tag/service.server";
 import {
   getTeamMemberForCustodianFilter,
@@ -150,16 +146,22 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
           },
         },
       }),
-      db.tag.findMany({
-        where: {
-          organizationId,
-          OR: [
-            { useFor: { isEmpty: true } },
-            { useFor: { has: TagUseFor.BOOKING } },
-          ],
-        },
-        orderBy: { name: "asc" },
-      }),
+      sbDb
+        .from("Tag")
+        .select("*")
+        .eq("organizationId", organizationId)
+        .or(`useFor.eq.{},useFor.cs.{BOOKING}`)
+        .order("name", { ascending: true })
+        .then(({ data: tags, error: tagErr }) => {
+          if (tagErr) {
+            throw new ShelfError({
+              cause: tagErr,
+              message: "Failed to load tags",
+              label: "Booking",
+            });
+          }
+          return tags ?? [];
+        }),
     ]);
     // DEPRECATED for now
     //  * if the booking is ongoing and there is no status param, we need to set it to
@@ -306,59 +308,99 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       }),
 
       /**
-       * Get detailed asset information with bookings for the paginated assets
+       * Get detailed asset information with conflicting bookings
+       * Split into two queries: asset details + conflicting bookings
        */
-      db.asset.findMany({
-        where: {
-          id: { in: assetIdsToFetch },
-        },
-        include: {
-          category: true,
-          custody: true,
-          tags: TAG_WITH_COLOR_SELECT,
-          kit: true,
-          bookings: {
-            where: {
-              ...(booking.from && booking.to
-                ? {
-                    OR: [
-                      // Rule 1: RESERVED bookings always conflict
-                      {
-                        status: "RESERVED",
-                        id: { not: booking.id }, // Exclude current booking from conflicts
-                        OR: [
-                          {
-                            from: { lte: booking.to },
-                            to: { gte: booking.from },
-                          },
-                          {
-                            from: { gte: booking.from },
-                            to: { lte: booking.to },
-                          },
-                        ],
-                      },
-                      // Rule 2: ONGOING/OVERDUE bookings (filtered by asset status in isAssetAlreadyBooked logic)
-                      {
-                        status: { in: ["ONGOING", "OVERDUE"] },
-                        id: { not: booking.id }, // Exclude current booking from conflicts
-                        OR: [
-                          {
-                            from: { lte: booking.to },
-                            to: { gte: booking.from },
-                          },
-                          {
-                            from: { gte: booking.from },
-                            to: { lte: booking.to },
-                          },
-                        ],
-                      },
-                    ],
-                  }
-                : {}),
-            },
-          },
-        },
-      }),
+      (async () => {
+        if (assetIdsToFetch.length === 0) return [];
+
+        // Fetch asset details with relations
+        const { data: assetRows, error: assetErr } = await sbDb
+          .from("Asset")
+          .select(
+            "*, category:Category(*), custody:Custody(*), tags:Tag(id, name, color), kit:Kit(*)"
+          )
+          .in("id", assetIdsToFetch);
+
+        if (assetErr) {
+          throw new ShelfError({
+            cause: assetErr,
+            message: "Failed to load asset details",
+            label: "Booking",
+          });
+        }
+
+        // Fetch conflicting bookings for these assets if dates exist
+        let conflictMap = new Map<string, unknown[]>();
+        if (booking.from && booking.to) {
+          const fromDate = new Date(booking.from).toISOString();
+          const toDate = new Date(booking.to).toISOString();
+
+          // Get booking-asset links for these assets
+          const { data: links, error: linkErr } = await sbDb
+            .from("_AssetToBooking")
+            .select("A, B")
+            .in("A", assetIdsToFetch);
+
+          if (linkErr) {
+            throw new ShelfError({
+              cause: linkErr,
+              message: "Failed to load booking links",
+              label: "Booking",
+            });
+          }
+
+          if (links && links.length > 0) {
+            const bookingIds = [...new Set(links.map((l) => l.B))].filter(
+              (bid) => bid !== booking.id
+            );
+
+            if (bookingIds.length > 0) {
+              // Fetch potentially conflicting bookings
+              const { data: conflictBookings, error: cbErr } = await sbDb
+                .from("Booking")
+                .select("*")
+                .in("id", bookingIds)
+                .or(`status.eq.RESERVED,status.eq.ONGOING,status.eq.OVERDUE`);
+
+              if (cbErr) {
+                throw new ShelfError({
+                  cause: cbErr,
+                  message: "Failed to load conflicting bookings",
+                  label: "Booking",
+                });
+              }
+
+              // Filter for date overlap in app code
+              const overlapping = (conflictBookings ?? []).filter((cb) => {
+                if (!cb.from || !cb.to) return false;
+                const cbFrom = new Date(cb.from).toISOString();
+                const cbTo = new Date(cb.to).toISOString();
+                return (
+                  (cbFrom <= toDate && cbTo >= fromDate) ||
+                  (cbFrom >= fromDate && cbTo <= toDate)
+                );
+              });
+
+              // Map conflicting bookings back to asset IDs
+              const overlappingIds = new Set(overlapping.map((b) => b.id));
+              for (const link of links) {
+                if (overlappingIds.has(link.B)) {
+                  const existing = conflictMap.get(link.A) ?? [];
+                  const cb = overlapping.find((b) => b.id === link.B);
+                  if (cb) existing.push(cb);
+                  conflictMap.set(link.A, existing);
+                }
+              }
+            }
+          }
+        }
+
+        return (assetRows ?? []).map((asset) => ({
+          ...asset,
+          bookings: conflictMap.get(asset.id) ?? [],
+        }));
+      })(),
 
       /** Calculate booking flags considering all assets */
       getBookingFlags({
@@ -369,25 +411,72 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       }),
 
       /** Get kit details for the kits in the current page */
-      db.kit.findMany({
-        where: {
-          id: {
-            in: paginatedItems
-              .filter((item) => item.type === "kit")
-              .map((item) => item.id),
-          },
-        },
-        include: {
+      (async () => {
+        const kitIds = paginatedItems
+          .filter((item) => item.type === "kit")
+          .map((item) => item.id);
+
+        if (kitIds.length === 0) return [];
+
+        const [kitResult, assetCountResult] = await Promise.all([
+          sbDb
+            .from("Kit")
+            .select("*, category:Category!categoryId(id, name, color)")
+            .in("id", kitIds),
+          sbDb.from("Asset").select("kitId").in("kitId", kitIds),
+        ]);
+
+        if (kitResult.error) {
+          throw new ShelfError({
+            cause: kitResult.error,
+            message: "Failed to load kit details",
+            label: "Booking",
+          });
+        }
+
+        if (assetCountResult.error) {
+          throw new ShelfError({
+            cause: assetCountResult.error,
+            message: "Failed to count kit assets",
+            label: "Booking",
+          });
+        }
+
+        // Build count map
+        const countMap = new Map<string, number>();
+        for (const row of assetCountResult.data ?? []) {
+          if (row.kitId) {
+            countMap.set(row.kitId, (countMap.get(row.kitId) ?? 0) + 1);
+          }
+        }
+
+        type KitWithCategory = {
+          id: string;
+          name: string;
+          description: string | null;
+          status: KitStatus;
+          image: string | null;
+          imageExpiration: string | Date | null;
+          organizationId: string;
+          createdAt: string;
+          updatedAt: string;
+          categoryId: string | null;
+          locationId: string | null;
+          createdById: string;
           category: {
-            select: {
-              id: true,
-              name: true,
-              color: true,
-            },
-          },
-          _count: { select: { assets: true } },
-        },
-      }),
+            id: string;
+            name: string;
+            color: string;
+          } | null;
+        };
+
+        return ((kitResult.data ?? []) as unknown as KitWithCategory[]).map(
+          (kit) => ({
+            ...kit,
+            _count: { assets: countMap.get(kit.id) ?? 0 },
+          })
+        );
+      })(),
     ]);
 
     // Create maps for easy lookup
@@ -429,16 +518,22 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     // For progress calculation, we need the TOTAL number of assets in the booking,
     // not the filtered count from booking.assets (which may be filtered by status)
     // So we need to get the unfiltered asset count
-    const totalBookingAssets = await db.asset.count({
-      where: {
-        bookings: {
-          some: { id: booking.id },
-        },
-      },
-    });
+    // Count assets in this booking via the join table
+    const { count: totalBookingAssets, error: countErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("*", { count: "exact", head: true })
+      .eq("B", booking.id);
+
+    if (countErr) {
+      throw new ShelfError({
+        cause: countErr,
+        message: "Failed to count booking assets",
+        label: "Booking",
+      });
+    }
 
     const partialCheckinProgress = calculatePartialCheckinProgress(
-      totalBookingAssets,
+      totalBookingAssets ?? 0,
       checkedInAssetIds,
       booking.status
     );
@@ -480,7 +575,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         /** Assets inside the booking without kits */
         assetsCount: paginationItems.filter((item) => item.type === "asset")
           .length,
-        totalAssets: totalBookingAssets,
+        totalAssets: totalBookingAssets ?? 0,
         allCategories,
         tags,
         totalTags: tags.length,
@@ -1036,14 +1131,26 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           additionalData: { userId, id, organizationId, role },
         });
 
-        const kit = await db.kit.findUniqueOrThrow({
-          where: { id: kitId, organizationId },
-          select: {
-            id: true,
-            name: true,
-            assets: { select: { id: true } },
-          },
-        });
+        const { data: kitData, error: kitErr } = await sbDb
+          .from("Kit")
+          .select("id, name, assets:Asset(id)")
+          .eq("id", kitId)
+          .eq("organizationId", organizationId)
+          .single();
+
+        if (kitErr || !kitData) {
+          throw new ShelfError({
+            cause: kitErr,
+            message: "Kit not found",
+            label: "Booking",
+          });
+        }
+
+        const kit = kitData as unknown as {
+          id: string;
+          name: string;
+          assets: { id: string }[];
+        };
 
         const b = await removeAssets({
           booking: { id, assetIds: kit.assets.map((a) => a.id) },
@@ -1155,10 +1262,24 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           });
         }
 
-        const kits = await db.kit.findMany({
-          where: { id: { in: assetOrKitIds } },
-          select: { id: true, name: true, assets: { select: { id: true } } },
-        });
+        const { data: kitsData, error: kitsErr } = await sbDb
+          .from("Kit")
+          .select("id, name, assets:Asset(id)")
+          .in("id", assetOrKitIds);
+
+        if (kitsErr) {
+          throw new ShelfError({
+            cause: kitsErr,
+            message: "Failed to load kits",
+            label: "Booking",
+          });
+        }
+
+        const kits = (kitsData ?? []) as unknown as {
+          id: string;
+          name: string;
+          assets: { id: string }[];
+        }[];
 
         // Get asset IDs that belong to the selected kits
         const kitAssetIds = kits.flatMap((kit) =>
