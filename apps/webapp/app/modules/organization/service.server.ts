@@ -58,22 +58,19 @@ export const getOrganizationByUserId = async ({
   orgType: OrganizationType;
 }) => {
   try {
-    return await db.organization.findFirstOrThrow({
-      where: {
-        owner: {
-          is: {
-            id: userId,
-          },
-        },
-        type: orgType,
-      },
-      select: {
-        id: true,
-        name: true,
-        type: true,
-        currency: true,
-      },
-    });
+    const { data, error } = await sbDb
+      .from("Organization")
+      .select("id, name, type, currency")
+      .eq("userId", userId)
+      .eq("type", orgType as Sb.OrganizationType)
+      .limit(1)
+      .single();
+
+    if (error || !data) {
+      throw error || new Error("No organization found");
+    }
+
+    return data;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -425,19 +422,101 @@ export type OrganizationFromUser = Prisma.OrganizationGetPayload<{
 
 export async function getUserOrganizations({ userId }: { userId: string }) {
   try {
-    return await db.userOrganization.findMany({
-      where: { userId },
-      select: {
-        organizationId: true,
-        roles: true,
-        organization: {
-          select: ORGANIZATION_SELECT_FIELDS,
-        },
+    // 1. Get user organizations
+    const { data: userOrgs, error: userOrgsError } = await sbDb
+      .from("UserOrganization")
+      .select("organizationId, roles")
+      .eq("userId", userId);
+
+    if (userOrgsError) throw userOrgsError;
+    if (!userOrgs || userOrgs.length === 0) return [];
+
+    // 2. Get user's lastSelectedOrganizationId
+    const { data: userData, error: userError } = await sbDb
+      .from("User")
+      .select("lastSelectedOrganizationId")
+      .eq("id", userId)
+      .single();
+
+    if (userError) throw userError;
+
+    const orgIds = userOrgs.map((uo) => uo.organizationId);
+
+    // 3. Get organizations
+    const { data: orgs, error: orgsError } = await sbDb
+      .from("Organization")
+      .select(
+        "id, type, name, imageId, userId, updatedAt, currency, enabledSso, ssoDetailsId, workspaceDisabled, selfServiceCanSeeCustody, selfServiceCanSeeBookings, baseUserCanSeeCustody, baseUserCanSeeBookings, barcodesEnabled, auditsEnabled, usedAuditTrial, hasSequentialIdsMigrated, qrIdDisplayPreference, showShelfBranding, customEmailFooter"
+      )
+      .in("id", orgIds);
+
+    if (orgsError) throw orgsError;
+
+    // 4. Get owner users for each organization
+    const ownerUserIds = [
+      ...new Set((orgs ?? []).map((o) => o.userId).filter(Boolean)),
+    ];
+    const { data: ownerUsers, error: ownersError } = await sbDb
+      .from("User")
+      .select("id, email")
+      .in("id", ownerUserIds);
+
+    if (ownersError) throw ownersError;
+
+    // 5. Get SsoDetails for organizations that have them
+    const ssoDetailIds = (orgs ?? [])
+      .map((o) => o.ssoDetailsId)
+      .filter(Boolean) as string[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let ssoDetailsMap = new Map<string, any>();
+    if (ssoDetailIds.length > 0) {
+      const { data: ssoData, error: ssoError } = await sbDb
+        .from("SsoDetails")
+        .select("*")
+        .in("id", ssoDetailIds);
+
+      if (ssoError) throw ssoError;
+      ssoDetailsMap = new Map((ssoData ?? []).map((s) => [s.id, s]));
+    }
+
+    const ownerMap = new Map(
+      (ownerUsers ?? []).map((u) => [u.id, { id: u.id, email: u.email }])
+    );
+    const orgMap = new Map(
+      (orgs ?? []).map((org) => {
+        const sso = org.ssoDetailsId
+          ? ssoDetailsMap.get(org.ssoDetailsId) ?? null
+          : null;
+        return [
+          org.id,
+          {
+            ...org,
+            updatedAt: new Date(org.updatedAt),
+            owner: ownerMap.get(org.userId) ?? { id: org.userId, email: "" },
+            ssoDetails: sso
+              ? {
+                  ...sso,
+                  createdAt: new Date(sso.createdAt),
+                  updatedAt: new Date(sso.updatedAt),
+                }
+              : null,
+          },
+        ];
+      })
+    );
+
+    // 6. Reassemble to match original return shape
+    return userOrgs
+      .filter((uo) => orgMap.has(uo.organizationId))
+      .map((uo) => ({
+        organizationId: uo.organizationId,
+        roles: uo.roles,
+        organization: orgMap.get(uo.organizationId)!,
         user: {
-          select: { lastSelectedOrganizationId: true },
+          lastSelectedOrganizationId:
+            userData?.lastSelectedOrganizationId ?? null,
         },
-      },
-    });
+      }));
   } catch (cause) {
     throw new ShelfError({
       cause,

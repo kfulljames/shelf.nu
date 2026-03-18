@@ -12,6 +12,7 @@ import type {
   Kit,
   UserOrganization,
   BarcodeType,
+  TagUseFor,
 } from "@prisma/client";
 import {
   AssetStatus,
@@ -19,7 +20,6 @@ import {
   ErrorCorrection,
   KitStatus,
   Prisma,
-  TagUseFor,
 } from "@prisma/client";
 import { LRUCache } from "lru-cache";
 import type { LoaderFunctionArgs } from "react-router";
@@ -1231,28 +1231,35 @@ export async function updateAsset({
 
     // Check if asset belongs to a kit and prevent location updates
     if (isChangingLocation) {
-      const assetWithKit = await db.asset.findUnique({
-        where: { id, organizationId },
-        select: {
-          kit: {
-            select: { id: true, name: true },
-          },
-        },
-      });
+      // Fetch asset's kitId, then fetch kit name if needed
+      const { data: assetRow } = await sbDb
+        .from("Asset")
+        .select("kitId")
+        .eq("id", id)
+        .eq("organizationId", organizationId)
+        .maybeSingle();
 
-      if (assetWithKit?.kit) {
-        throw new ShelfError({
-          cause: null,
-          message: `This asset's location is managed by its parent kit "${assetWithKit.kit.name}". Please update the kit's location instead.`,
-          additionalData: {
-            assetId: id,
-            kitId: assetWithKit.kit.id,
-            kitName: assetWithKit.kit.name,
-          },
-          label: "Assets",
-          status: 400,
-          shouldBeCaptured: false,
-        });
+      if (assetRow?.kitId) {
+        const { data: kitRow } = await sbDb
+          .from("Kit")
+          .select("id, name")
+          .eq("id", assetRow.kitId)
+          .single();
+
+        if (kitRow) {
+          throw new ShelfError({
+            cause: null,
+            message: `This asset's location is managed by its parent kit "${kitRow.name}". Please update the kit's location instead.`,
+            additionalData: {
+              assetId: id,
+              kitId: kitRow.id,
+              kitName: kitRow.name,
+            },
+            label: "Assets",
+            status: 400,
+            shouldBeCaptured: false,
+          });
+        }
       }
     }
 
@@ -1346,24 +1353,34 @@ export async function updateAsset({
 
     if (customFieldsValuesFromForm && customFieldsValuesFromForm.length > 0) {
       /** We get the current values with field information for comparison. We need this to detect changes for notes */
-      currentCustomFieldsValuesWithFields =
-        await db.assetCustomFieldValue.findMany({
-          where: {
-            assetId: id,
-          },
-          select: {
-            id: true,
-            customFieldId: true,
-            value: true,
-            customField: {
-              select: {
-                id: true,
-                name: true,
-                type: true,
-              },
-            },
-          },
-        });
+      // Split into 2 queries: fetch values, then fetch related custom fields
+      const { data: cfValues, error: cfValuesError } = await sbDb
+        .from("AssetCustomFieldValue")
+        .select("id, customFieldId, value")
+        .eq("assetId", id);
+
+      if (cfValuesError) throw cfValuesError;
+
+      const cfIds = (cfValues ?? []).map((v) => v.customFieldId);
+      const { data: cfDefs, error: cfDefsError } = await sbDb
+        .from("CustomField")
+        .select("id, name, type")
+        .in("id", cfIds);
+
+      if (cfDefsError) throw cfDefsError;
+
+      const cfDefsMap = new Map((cfDefs ?? []).map((cf) => [cf.id, cf]));
+
+      currentCustomFieldsValuesWithFields = (cfValues ?? []).map((v) => ({
+        id: v.id,
+        customFieldId: v.customFieldId,
+        value: v.value,
+        customField: cfDefsMap.get(v.customFieldId) ?? {
+          id: v.customFieldId,
+          name: "",
+          type: "" as any,
+        },
+      }));
 
       const customFieldValuesToAdd = customFieldsValuesFromForm.filter(
         (cf) => !!cf.value
@@ -1653,16 +1670,32 @@ export async function deleteAsset({
   organizationId,
 }: Pick<Asset, "id"> & { organizationId: Organization["id"] }) {
   try {
-    const deletedAsset = await db.asset.delete({
-      where: { id, organizationId },
-      select: {
-        reminders: {
-          select: { alertDateTime: true, activeSchedulerReference: true },
-        },
-      },
-    });
+    // Fetch reminders before deleting the asset
+    const { data: reminders, error: remindersError } = await sbDb
+      .from("AssetReminder")
+      .select("alertDateTime, activeSchedulerReference")
+      .eq("assetId", id);
 
-    await Promise.all(deletedAsset.reminders.map(cancelAssetReminderScheduler));
+    if (remindersError) throw remindersError;
+
+    // Delete the asset
+    const { error: deleteError } = await sbDb
+      .from("Asset")
+      .delete()
+      .eq("id", id)
+      .eq("organizationId", organizationId);
+
+    if (deleteError) throw deleteError;
+
+    // Cancel reminder schedulers
+    await Promise.all(
+      (reminders ?? []).map((r) =>
+        cancelAssetReminderScheduler({
+          alertDateTime: new Date(r.alertDateTime),
+          activeSchedulerReference: r.activeSchedulerReference,
+        })
+      )
+    );
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -2087,16 +2120,18 @@ export async function getAllEntriesForCreateAndEdit({
       }),
 
       /** Get the tags */
-      db.tag.findMany({
-        where: {
-          organizationId,
-          OR: [
-            { useFor: { isEmpty: true } },
-            ...(tagUseFor ? [{ useFor: { has: tagUseFor } }] : []),
-          ],
-        },
-        orderBy: { name: "asc" },
-      }),
+      sbDb
+        .from("Tag")
+        .select("*")
+        .eq("organizationId", organizationId)
+        .or(
+          tagUseFor ? `useFor.eq.{},useFor.cs.{${tagUseFor}}` : `useFor.eq.{}`
+        )
+        .order("name", { ascending: true })
+        .then(({ data, error }) => {
+          if (error) throw error;
+          return data ?? [];
+        }),
 
       /** Get the locations */
       getLocationsForCreateAndEdit({
@@ -2932,21 +2967,19 @@ export async function createAssetsFromBackupImport({
 
             if (!existingTag) {
               // if the tag doesn't exist, we create a new one
-              const newTag = await db.tag.create({
-                data: {
+              const { data: newTag, error: tagCreateError } = await sbDb
+                .from("Tag")
+                .insert({
                   name: tag as string,
-                  user: {
-                    connect: {
-                      id: userId,
-                    },
-                  },
-                  organization: {
-                    connect: {
-                      id: organizationId,
-                    },
-                  },
-                },
-              });
+                  userId,
+                  organizationId,
+                })
+                .select("id")
+                .single();
+
+              if (tagCreateError || !newTag) {
+                throw tagCreateError || new Error("Failed to create tag");
+              }
               tags[tag] = newTag.id;
             } else {
               // if the tag exists, we just update the id
@@ -3165,43 +3198,35 @@ export async function updateAssetQrCode({
 }) {
   // Disconnect all existing QR codes
   try {
-    // Disconnect all existing QR codes
-    await db.asset
-      .update({
-        where: { id: assetId, organizationId },
-        data: {
-          qrCodes: {
-            set: [],
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Couldn't disconnect existing codes",
-          label,
-          additionalData: { assetId, organizationId, newQrId },
-        });
-      });
+    // Disconnect all existing QR codes by setting assetId to null
+    const { error: disconnectError } = await sbDb
+      .from("Qr")
+      .update({ assetId: null })
+      .eq("assetId", assetId);
 
-    // Connect the new QR code
-    return await db.asset
-      .update({
-        where: { id: assetId, organizationId },
-        data: {
-          qrCodes: {
-            connect: { id: newQrId },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Couldn't connect the new QR code",
-          label,
-          additionalData: { assetId, organizationId, newQrId },
-        });
+    if (disconnectError) {
+      throw new ShelfError({
+        cause: disconnectError,
+        message: "Couldn't disconnect existing codes",
+        label,
+        additionalData: { assetId, organizationId, newQrId },
       });
+    }
+
+    // Connect the new QR code by setting its assetId
+    const { error: connectError } = await sbDb
+      .from("Qr")
+      .update({ assetId })
+      .eq("id", newQrId);
+
+    if (connectError) {
+      throw new ShelfError({
+        cause: connectError,
+        message: "Couldn't connect the new QR code",
+        label,
+        additionalData: { assetId, organizationId, newQrId },
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -3348,19 +3373,29 @@ export async function bulkCheckOutAssets({
           lastName: true,
         } satisfies Prisma.UserSelect,
       }),
-      db.teamMember.findUnique({
-        where: { id: custodianId },
-        select: {
-          name: true,
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-        },
-      }),
+      sbDb
+        .from("TeamMember")
+        .select("name, userId")
+        .eq("id", custodianId)
+        .single()
+        .then(async ({ data: tm, error: tmError }) => {
+          if (tmError) throw tmError;
+          let user: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+          } | null = null;
+          if (tm?.userId) {
+            const { data: u, error: uError } = await sbDb
+              .from("User")
+              .select("id, firstName, lastName")
+              .eq("id", tm.userId)
+              .single();
+            if (uError) throw uError;
+            user = u;
+          }
+          return { name: tm?.name ?? null, user };
+        }),
     ]);
 
     const assetsNotAvailable = assets.some(
@@ -3818,49 +3853,81 @@ export async function bulkAssignAssetTags({
 
     const loadUserForNotes = createLoadUserForNotes(userId);
 
-    const previousTagsByAssetId = await db.asset
-      .findMany({
-        where: {
-          id: { in: resolvedIds },
-          organizationId,
-        },
-        select: {
-          id: true,
-          tags: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      })
-      .then((assets) =>
-        assets.reduce<Map<string, TagSummary[]>>((acc, asset) => {
-          acc.set(asset.id, asset.tags);
-          return acc;
-        }, new Map())
-      );
+    // Split: fetch asset-tag join rows, then fetch tag details
+    const { data: joinRows, error: joinError } = await sbDb
+      .from("_AssetToTag")
+      .select("A, B")
+      .in("A", resolvedIds);
 
-    const updatePromises = resolvedIds.map((id) =>
-      db.asset.update({
-        where: { id, organizationId },
-        data: {
-          tags: {
-            [remove ? "disconnect" : "connect"]: tagsIds.map((tagId) => ({
-              id: tagId,
-            })),
-          },
-        },
-        include: {
-          tags: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      })
-    );
+    if (joinError) throw joinError;
+
+    const tagIdsFromJoin = [...new Set((joinRows ?? []).map((r) => r.B))];
+    const { data: tagRows, error: tagError } = await sbDb
+      .from("Tag")
+      .select("id, name")
+      .in("id", tagIdsFromJoin);
+
+    if (tagError) throw tagError;
+
+    const tagMap = new Map((tagRows ?? []).map((t) => [t.id, t]));
+
+    const previousTagsByAssetId = (joinRows ?? []).reduce<
+      Map<string, TagSummary[]>
+    >((acc, row) => {
+      const tag = tagMap.get(row.B);
+      if (tag) {
+        const existing = acc.get(row.A) ?? [];
+        existing.push({ id: tag.id, name: tag.name ?? "" });
+        acc.set(row.A, existing);
+      }
+      return acc;
+    }, new Map());
+
+    // Update _AssetToTag join table directly for each asset
+    const updatePromises = resolvedIds.map(async (assetId) => {
+      if (remove) {
+        // Delete join rows for disconnecting tags
+        const { error: delError } = await sbDb
+          .from("_AssetToTag")
+          .delete()
+          .eq("A", assetId)
+          .in("B", tagsIds);
+
+        if (delError) throw delError;
+      } else {
+        // Insert join rows for connecting tags (ignore duplicates)
+        const rows = tagsIds.map((tagId) => ({ A: assetId, B: tagId }));
+        const { error: insError } = await sbDb
+          .from("_AssetToTag")
+          .upsert(rows, { onConflict: "A,B", ignoreDuplicates: true });
+
+        if (insError) throw insError;
+      }
+
+      // Fetch current tags for this asset after update
+      const { data: currentJoinRows, error: cjError } = await sbDb
+        .from("_AssetToTag")
+        .select("B")
+        .eq("A", assetId);
+
+      if (cjError) throw cjError;
+
+      const currentTagIds = (currentJoinRows ?? []).map((r) => r.B);
+      const { data: currentTags, error: ctError } = await sbDb
+        .from("Tag")
+        .select("id, name")
+        .in("id", currentTagIds);
+
+      if (ctError) throw ctError;
+
+      return {
+        id: assetId,
+        tags: (currentTags ?? []).map((t) => ({
+          id: t.id,
+          name: t.name ?? "",
+        })),
+      };
+    });
 
     const updatedAssets = await Promise.all(updatePromises);
 
@@ -3958,10 +4025,15 @@ export async function relinkAssetQrCode({
         lastName: true,
       } satisfies Prisma.UserSelect,
     }),
-    db.asset.findFirst({
-      where: { id: assetId, organizationId },
-      select: { qrCodes: { select: { id: true } } },
-    }),
+    // Fetch asset's QR codes via Qr table instead of nested include
+    sbDb
+      .from("Qr")
+      .select("id")
+      .eq("assetId", assetId)
+      .then(({ data: qrRows, error: qrErr }) => {
+        if (qrErr) throw qrErr;
+        return qrRows ? { qrCodes: qrRows } : null;
+      }),
   ]);
 
   /** User cannot link qr code of other organization */
@@ -4013,15 +4085,23 @@ export async function relinkAssetQrCode({
           });
         }
       }),
-    db.asset.update({
-      where: { id: assetId, organizationId },
-      data: {
-        qrCodes: {
-          set: [],
-          connect: { id: qr.id },
-        },
-      },
-    }),
+    // Disconnect all existing QR codes from this asset, then connect the new one
+    sbDb
+      .from("Qr")
+      .update({ assetId: null })
+      .eq("assetId", assetId)
+      .then(({ error }) => {
+        if (error) throw error;
+      })
+      .then(() =>
+        sbDb
+          .from("Qr")
+          .update({ assetId })
+          .eq("id", qr.id)
+          .then(({ error }) => {
+            if (error) throw error;
+          })
+      ),
     createNote({
       assetId,
       userId,
@@ -4176,38 +4256,47 @@ export async function getEntitiesWithSelectedValues({
     /** Categories end */
 
     /** Tags start */
-    db.tag.findMany({
-      where: {
-        organizationId,
-        id: { notIn: selectedTagIds },
-        OR: [
-          { useFor: { isEmpty: true } },
-          { useFor: { has: TagUseFor.ASSET } },
-        ],
-      },
-      take: allSelectedEntries.includes("tag") ? undefined : 12,
-      orderBy: { name: "asc" },
-    }),
-    db.tag.findMany({
-      where: {
-        organizationId,
-        id: { in: selectedTagIds },
-        OR: [
-          { useFor: { isEmpty: true } },
-          { useFor: { has: TagUseFor.ASSET } },
-        ],
-      },
-      orderBy: { name: "asc" },
-    }),
-    db.tag.count({
-      where: {
-        organizationId,
-        OR: [
-          { useFor: { isEmpty: true } },
-          { useFor: { has: TagUseFor.ASSET } },
-        ],
-      },
-    }),
+    (() => {
+      let query = sbDb
+        .from("Tag")
+        .select("*")
+        .eq("organizationId", organizationId)
+        .or(`useFor.eq.{},useFor.cs.{ASSET}`)
+        .order("name", { ascending: true });
+
+      if (selectedTagIds.length > 0) {
+        query = query.not("id", "in", `(${selectedTagIds.join(",")})`);
+      }
+
+      if (!allSelectedEntries.includes("tag")) {
+        query = query.limit(12);
+      }
+
+      return query.then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      });
+    })(),
+    sbDb
+      .from("Tag")
+      .select("*")
+      .eq("organizationId", organizationId)
+      .in("id", selectedTagIds)
+      .or(`useFor.eq.{},useFor.cs.{ASSET}`)
+      .order("name", { ascending: true })
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
+    sbDb
+      .from("Tag")
+      .select("id", { count: "exact", head: true })
+      .eq("organizationId", organizationId)
+      .or(`useFor.eq.{},useFor.cs.{ASSET}`)
+      .then(({ count, error }) => {
+        if (error) throw error;
+        return count ?? 0;
+      }),
     /** Tags end */
 
     /** Location start */

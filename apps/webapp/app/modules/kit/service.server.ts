@@ -99,19 +99,6 @@ export async function createKit({
   barcodes?: Pick<Barcode, "type" | "value">[];
 }) {
   try {
-    /** User connection data */
-    const user = {
-      connect: {
-        id: createdById,
-      },
-    };
-
-    const organization = {
-      connect: {
-        id: organizationId as string,
-      },
-    };
-
     /**
      * If a qr code is passed, link to that QR
      * Otherwise, create a new one
@@ -121,32 +108,49 @@ export async function createKit({
      * 3. If the qr code is not linked to an asset
      */
     const qr = qrId ? await getQr({ id: qrId }) : null;
-    const qrCodes =
+    const shouldConnectExistingQr =
       qr &&
       qr.organizationId === organizationId &&
       qr.assetId === null &&
-      qr.kitId === null
-        ? { connect: { id: qrId } }
-        : {
-            create: [
-              {
-                id: id(),
-                version: 0,
-                errorCorrection: ErrorCorrection["L"],
-                user,
-                organization,
-              },
-            ],
-          };
+      qr.kitId === null;
 
-    const data: Prisma.KitCreateInput = {
-      name,
-      description,
-      createdBy: user,
-      organization,
-      qrCodes,
-      category: categoryId ? { connect: { id: categoryId } } : undefined,
-    };
+    const kitId = id();
+
+    /** Insert the kit with flat FKs */
+    const { data: newKit, error: kitError } = await sbDb
+      .from("Kit")
+      .insert({
+        id: kitId,
+        name,
+        description: description ?? null,
+        createdById,
+        organizationId: organizationId as string,
+        categoryId: categoryId ?? null,
+        locationId: locationId ?? null,
+      })
+      .select("*")
+      .single();
+
+    if (kitError) throw kitError;
+
+    /** Handle QR code: connect existing or create new */
+    if (shouldConnectExistingQr) {
+      const { error: qrConnectError } = await sbDb
+        .from("Qr")
+        .update({ kitId })
+        .eq("id", qrId!);
+      if (qrConnectError) throw qrConnectError;
+    } else {
+      const { error: qrCreateError } = await sbDb.from("Qr").insert({
+        id: id(),
+        version: 0,
+        errorCorrection: ErrorCorrection["L"],
+        userId: createdById,
+        organizationId: organizationId as string,
+        kitId,
+      });
+      if (qrCreateError) throw qrCreateError;
+    }
 
     /** If barcodes are passed, create them */
     if (barcodes && barcodes.length > 0) {
@@ -154,35 +158,37 @@ export async function createKit({
         (barcode) => !!barcode.value && !!barcode.type
       );
 
-      Object.assign(data, {
-        barcodes: {
-          create: barcodesToAdd.map(({ type, value }) => ({
+      if (barcodesToAdd.length > 0) {
+        const { error: barcodeError } = await sbDb.from("Barcode").insert(
+          barcodesToAdd.map(({ type, value }) => ({
+            id: id(),
             type,
             value: value.toUpperCase(),
             organizationId,
-          })),
-        },
-      });
+            kitId,
+          }))
+        );
+        if (barcodeError) throw barcodeError;
+      }
     }
 
-    if (locationId) {
-      data.location = { connect: { id: locationId } };
-    }
-
-    return await db.kit.create({ data });
+    return {
+      ...newKit,
+      createdAt: new Date(newKit.createdAt),
+      updatedAt: new Date(newKit.updatedAt),
+      imageExpiration: newKit.imageExpiration
+        ? new Date(newKit.imageExpiration)
+        : null,
+    } as Kit;
   } catch (cause) {
-    // If it's a Prisma unique constraint violation on barcode values,
+    // If it's a unique constraint violation on barcode values,
     // use our detailed validation to provide specific field errors
-    if (cause instanceof Error && "code" in cause && cause.code === "P2002") {
-      const prismaError = cause as any;
-      const target = prismaError.meta?.target;
-
-      if (
-        target &&
-        target.includes("value") &&
-        barcodes &&
-        barcodes.length > 0
-      ) {
+    const isUniqueViolation =
+      cause instanceof Error &&
+      (("code" in cause && cause.code === "P2002") ||
+        ("code" in cause && cause.code === "23505"));
+    if (isUniqueViolation) {
+      if (barcodes && barcodes.length > 0) {
         const barcodesToAdd = barcodes.filter(
           (barcode) => !!barcode.value && !!barcode.type
         );
@@ -213,42 +219,51 @@ export async function updateKit({
   locationId,
 }: UpdateKitPayload) {
   try {
-    const data: Prisma.KitUpdateInput = {
+    const updateData: Record<string, unknown> = {
       name,
       description,
       image,
-      imageExpiration,
       status,
     };
 
+    if (imageExpiration !== undefined) {
+      updateData.imageExpiration = imageExpiration
+        ? imageExpiration instanceof Date
+          ? imageExpiration.toISOString()
+          : imageExpiration
+        : null;
+    }
+
     /** If uncategorized is passed, disconnect the category */
     if (categoryId === "uncategorized") {
-      Object.assign(data, {
-        category: {
-          disconnect: true,
-        },
-      });
+      updateData.categoryId = null;
     }
 
     // If category id is passed and is different than uncategorized, connect the category
     if (categoryId && categoryId !== "uncategorized") {
-      Object.assign(data, {
-        category: {
-          connect: {
-            id: categoryId,
-          },
-        },
-      });
+      updateData.categoryId = categoryId;
     }
 
     if (locationId) {
-      data.location = { connect: { id: locationId } };
+      updateData.locationId = locationId;
     }
 
-    const kit = await db.kit.update({
-      where: { id, organizationId },
-      data,
-    });
+    // Remove undefined values so we don't overwrite with null
+    for (const key of Object.keys(updateData)) {
+      if (updateData[key] === undefined) {
+        delete updateData[key];
+      }
+    }
+
+    const { data: kit, error: kitError } = await sbDb
+      .from("Kit")
+      .update(updateData)
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .select("*")
+      .single();
+
+    if (kitError) throw kitError;
 
     /** If barcodes are passed, update existing barcodes efficiently */
     if (barcodes !== undefined) {
@@ -260,7 +275,14 @@ export async function updateKit({
       });
     }
 
-    return kit;
+    return {
+      ...kit,
+      createdAt: new Date(kit.createdAt),
+      updatedAt: new Date(kit.updatedAt),
+      imageExpiration: kit.imageExpiration
+        ? new Date(kit.imageExpiration)
+        : null,
+    } as Kit;
   } catch (cause) {
     // If it's already a ShelfError with validation errors, re-throw as is
     if (
@@ -1071,14 +1093,25 @@ export async function bulkAssignKitCustody({
           lastName: true,
         } satisfies Prisma.UserSelect,
       }),
-      db.teamMember.findUnique({
-        where: { id: custodianId },
-        select: {
-          id: true,
-          name: true,
-          user: { select: { id: true, firstName: true, lastName: true } },
-        },
-      }),
+      sbDb
+        .from("TeamMember")
+        .select("id, name, userId")
+        .eq("id", custodianId)
+        .single()
+        .then(async ({ data, error }) => {
+          if (error) throw error;
+          if (!data) return null;
+          let user = null;
+          if (data.userId) {
+            const { data: userData } = await sbDb
+              .from("User")
+              .select("id, firstName, lastName")
+              .eq("id", data.userId)
+              .single();
+            user = userData;
+          }
+          return { id: data.id, name: data.name, user };
+        }),
     ]);
 
     const someKitsNotAvailable = kits.some((kit) => kit.status !== "AVAILABLE");
@@ -1337,23 +1370,28 @@ export async function createKitsIfNotExists({
       }
 
       if (!existingKit) {
-        // if the location doesn't exist, we create a new one
-        const newKit = await db.kit.create({
-          data: {
+        // if the kit doesn't exist, we create a new one
+        const { data: newKit, error: createKitError } = await sbDb
+          .from("Kit")
+          .insert({
+            id: id(),
             name: kit.trim(),
-            createdBy: {
-              connect: {
-                id: userId,
-              },
-            },
-            organization: {
-              connect: {
-                id: organizationId,
-              },
-            },
-          },
-        });
-        kits.set(kit, newKit);
+            createdById: userId,
+            organizationId,
+          })
+          .select("*")
+          .single();
+
+        if (createKitError) throw createKitError;
+
+        kits.set(kit, {
+          ...newKit,
+          createdAt: new Date(newKit.createdAt),
+          updatedAt: new Date(newKit.updatedAt),
+          imageExpiration: newKit.imageExpiration
+            ? new Date(newKit.imageExpiration)
+            : null,
+        } as Kit);
       } else {
         // if the location exists, we just update the id
         kits.set(kit, {
@@ -1391,43 +1429,54 @@ export async function updateKitQrCode({
   newQrId: string;
 }) {
   try {
-    // Disconnect all existing QR codes
-    await db.kit
-      .update({
-        where: { id: kitId, organizationId },
-        data: {
-          qrCodes: {
-            set: [],
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Couldn't disconnect existing codes",
-          label,
-          additionalData: { kitId, organizationId, newQrId },
-        });
-      });
+    // Disconnect all existing QR codes from this kit
+    const { error: disconnectError } = await sbDb
+      .from("Qr")
+      .update({ kitId: null })
+      .eq("kitId", kitId);
 
-    // Connect the new QR code
-    return await db.kit
-      .update({
-        where: { id: kitId, organizationId },
-        data: {
-          qrCodes: {
-            connect: { id: newQrId },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Couldn't connect the new QR code",
-          label,
-          additionalData: { kitId, organizationId, newQrId },
-        });
+    if (disconnectError) {
+      throw new ShelfError({
+        cause: disconnectError,
+        message: "Couldn't disconnect existing codes",
+        label,
+        additionalData: { kitId, organizationId, newQrId },
       });
+    }
+
+    // Connect the new QR code to this kit
+    const { error: connectError } = await sbDb
+      .from("Qr")
+      .update({ kitId })
+      .eq("id", newQrId);
+
+    if (connectError) {
+      throw new ShelfError({
+        cause: connectError,
+        message: "Couldn't connect the new QR code",
+        label,
+        additionalData: { kitId, organizationId, newQrId },
+      });
+    }
+
+    // Return the updated kit
+    const { data: updatedKit, error: kitError } = await sbDb
+      .from("Kit")
+      .select("*")
+      .eq("id", kitId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (kitError) throw kitError;
+
+    return {
+      ...updatedKit,
+      createdAt: new Date(updatedKit.createdAt),
+      updatedAt: new Date(updatedKit.updatedAt),
+      imageExpiration: updatedKit.imageExpiration
+        ? new Date(updatedKit.imageExpiration)
+        : null,
+    } as Kit;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -1453,13 +1502,28 @@ export async function relinkKitQrCode({
   organizationId: Organization["id"];
   userId: User["id"];
 }) {
-  const [qr, kit] = await Promise.all([
+  const [qr, kitRow, kitQrCodes] = await Promise.all([
     getQr({ id: qrId }),
-    db.kit.findFirst({
-      where: { id: kitId, organizationId },
-      select: { qrCodes: { select: { id: true } } },
-    }),
+    sbDb
+      .from("Kit")
+      .select("id")
+      .eq("id", kitId)
+      .eq("organizationId", organizationId)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data;
+      }),
+    sbDb
+      .from("Qr")
+      .select("id")
+      .eq("kitId", kitId)
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
   ]);
+  const kit = kitRow ? { qrCodes: kitQrCodes } : null;
 
   if (!kit) {
     throw new ShelfError({
@@ -1531,14 +1595,14 @@ export async function getAvailableKitAssetForBooking(
   kitIds: Kit["id"][]
 ): Promise<string[]> {
   try {
-    const selectedKits = await db.kit.findMany({
-      where: { id: { in: kitIds } },
-      select: { assets: { select: { id: true, status: true } } },
-    });
+    const { data: allAssets, error: assetsError } = await sbDb
+      .from("Asset")
+      .select("id, status")
+      .in("kitId", kitIds);
 
-    const allAssets = selectedKits.flatMap((kit) => kit.assets);
+    if (assetsError) throw assetsError;
 
-    return allAssets.map((asset) => asset.id);
+    return (allAssets ?? []).map((asset) => asset.id);
   } catch (cause: any) {
     throw new ShelfError({
       cause: cause,
@@ -1564,23 +1628,17 @@ export async function updateKitLocation({
   userId?: User["id"];
 }) {
   try {
-    // Get kit with its assets first
-    const kit = await db.kit.findUnique({
-      where: { id, organizationId },
-      select: {
-        id: true,
-        name: true,
-        assets: {
-          select: {
-            id: true,
-            title: true,
-            location: { select: { id: true, name: true } },
-          },
-        },
-      },
-    });
+    // Get kit with its assets first (split into two queries)
+    const { data: kitRow, error: kitError } = await sbDb
+      .from("Kit")
+      .select("id, name")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
 
-    if (!kit) {
+    if (kitError) throw kitError;
+
+    if (!kitRow) {
       throw new ShelfError({
         cause: null,
         message: "Kit not found",
@@ -1588,21 +1646,52 @@ export async function updateKitLocation({
       });
     }
 
+    const { data: kitAssets, error: assetsError } = await sbDb
+      .from("Asset")
+      .select("id, title, locationId")
+      .eq("kitId", id);
+
+    if (assetsError) throw assetsError;
+
+    // Fetch locations for assets that have one
+    const locationIds = [
+      ...new Set((kitAssets ?? []).map((a) => a.locationId).filter(Boolean)),
+    ] as string[];
+    const locationMap = new Map<string, { id: string; name: string }>();
+    if (locationIds.length > 0) {
+      const { data: locations } = await sbDb
+        .from("Location")
+        .select("id, name")
+        .in("id", locationIds);
+      locations?.forEach((l) => locationMap.set(l.id, l));
+    }
+
+    const kit = {
+      ...kitRow,
+      assets: (kitAssets ?? []).map((a) => ({
+        id: a.id,
+        title: a.title,
+        location: a.locationId ? locationMap.get(a.locationId) ?? null : null,
+      })),
+    };
+
     const assetIds = kit.assets.map((asset) => asset.id);
 
     if (newLocationId) {
-      // Connect both kit and its assets to the new location in one update
-      await db.location.update({
-        where: { id: newLocationId },
-        data: {
-          kits: {
-            connect: { id },
-          },
-          assets: {
-            connect: assetIds.map((id) => ({ id })),
-          },
-        },
-      });
+      // Connect both kit and its assets to the new location via direct FK updates
+      const { error: kitLocError } = await sbDb
+        .from("Kit")
+        .update({ locationId: newLocationId })
+        .eq("id", id);
+      if (kitLocError) throw kitLocError;
+
+      if (assetIds.length > 0) {
+        const { error: assetLocError } = await sbDb
+          .from("Asset")
+          .update({ locationId: newLocationId })
+          .in("id", assetIds);
+        if (assetLocError) throw assetLocError;
+      }
 
       // Add notes to assets about location update via parent kit
       if (userId && assetIds.length > 0) {
@@ -1648,18 +1737,20 @@ export async function updateKitLocation({
         );
       }
     } else if (!newLocationId && currentLocationId) {
-      // Disconnect both kit and its assets from the current location
-      await db.location.update({
-        where: { id: currentLocationId },
-        data: {
-          kits: {
-            disconnect: { id },
-          },
-          assets: {
-            disconnect: assetIds.map((id) => ({ id })),
-          },
-        },
-      });
+      // Disconnect both kit and its assets from the current location via direct FK updates
+      const { error: kitDisconnectError } = await sbDb
+        .from("Kit")
+        .update({ locationId: null })
+        .eq("id", id);
+      if (kitDisconnectError) throw kitDisconnectError;
+
+      if (assetIds.length > 0) {
+        const { error: assetDisconnectError } = await sbDb
+          .from("Asset")
+          .update({ locationId: null })
+          .in("id", assetIds);
+        if (assetDisconnectError) throw assetDisconnectError;
+      }
 
       // Add notes to assets about location removal via parent kit
       if (userId && assetIds.length > 0) {
@@ -1778,18 +1869,25 @@ export async function bulkUpdateKitLocation({
       newLocationId.trim() !== "" &&
       actualKitIds.length > 0
     ) {
-      // Update location to connect both kits and their assets
-      await db.location.update({
-        where: { id: newLocationId },
-        data: {
-          kits: {
-            connect: actualKitIds.map((id) => ({ id })),
-          },
-          assets: {
-            connect: allAssets.map((asset) => ({ id: asset.id })),
-          },
-        },
-      });
+      // Update location for both kits and their assets via direct FK updates
+      if (actualKitIds.length > 0) {
+        const { error: kitsLocError } = await sbDb
+          .from("Kit")
+          .update({ locationId: newLocationId })
+          .in("id", actualKitIds);
+        if (kitsLocError) throw kitsLocError;
+      }
+
+      if (allAssets.length > 0) {
+        const { error: assetsLocError } = await sbDb
+          .from("Asset")
+          .update({ locationId: newLocationId })
+          .in(
+            "id",
+            allAssets.map((asset) => asset.id)
+          );
+        if (assetsLocError) throw assetsLocError;
+      }
 
       // Create notes for affected assets
       if (allAssets.length > 0) {
@@ -1836,12 +1934,13 @@ export async function bulkUpdateKitLocation({
       }
     } else {
       // Removing location - set to null and handle cascade
-      await db.kit.updateMany({
-        where,
-        data: {
-          locationId: null,
-        },
-      });
+      if (actualKitIds.length > 0) {
+        const { error: kitLocNullError } = await sbDb
+          .from("Kit")
+          .update({ locationId: null })
+          .in("id", actualKitIds);
+        if (kitLocNullError) throw kitLocNullError;
+      }
 
       // Also remove location from assets and create notes
       if (allAssets.length > 0) {
@@ -1853,14 +1952,14 @@ export async function bulkUpdateKitLocation({
           } satisfies Prisma.UserSelect,
         });
 
-        await db.asset.updateMany({
-          where: {
-            id: { in: allAssets.map((asset) => asset.id) },
-          },
-          data: {
-            locationId: null,
-          },
-        });
+        const { error: assetLocNullError } = await sbDb
+          .from("Asset")
+          .update({ locationId: null })
+          .in(
+            "id",
+            allAssets.map((asset) => asset.id)
+          );
+        if (assetLocNullError) throw assetLocNullError;
 
         // Create individual notes for each asset
         await Promise.all(
@@ -2166,24 +2265,30 @@ export async function updateKitAssets({
     const kitBookings =
       kit.assets.find((a) => a.bookings.length > 0)?.bookings ?? [];
 
-    await db.kit.update({
-      where: { id: kit.id, organizationId },
-      data: {
-        assets: {
-          /**
-           * Only disconnect assets if not in addOnly mode and there are assets to remove
-           * In addOnly mode (bulk-add), we preserve all existing assets
-           */
-          ...(addOnly || removedAssets.length === 0
-            ? {}
-            : { disconnect: removedAssets.map(({ id }) => ({ id })) }),
-          /**
-           * Connect assets that should be added (only the new ones)
-           */
-          connect: newlyAddedAssets.map(({ id }) => ({ id })),
-        },
-      },
-    });
+    // Update asset kitId FKs directly instead of using kit.update with connect/disconnect
+    if (!addOnly && removedAssets.length > 0) {
+      /** Disconnect assets that should be removed (set kitId to null) */
+      const { error: disconnectError } = await sbDb
+        .from("Asset")
+        .update({ kitId: null })
+        .in(
+          "id",
+          removedAssets.map(({ id }) => id)
+        );
+      if (disconnectError) throw disconnectError;
+    }
+
+    if (newlyAddedAssets.length > 0) {
+      /** Connect assets that should be added (set kitId to this kit) */
+      const { error: connectError } = await sbDb
+        .from("Asset")
+        .update({ kitId: kit.id })
+        .in(
+          "id",
+          newlyAddedAssets.map(({ id }) => id)
+        );
+      if (connectError) throw connectError;
+    }
 
     await createBulkKitChangeNotes({
       kit,
@@ -2196,10 +2301,14 @@ export async function updateKitAssets({
     if (newlyAddedAssets.length > 0) {
       if (kit.location) {
         // Kit has a location, update all newly added assets to that location
-        await db.asset.updateMany({
-          where: { id: { in: newlyAddedAssets.map((asset) => asset.id) } },
-          data: { locationId: kit.location.id },
-        });
+        const { error: assetLocUpdateError } = await sbDb
+          .from("Asset")
+          .update({ locationId: kit.location.id })
+          .in(
+            "id",
+            newlyAddedAssets.map((asset) => asset.id)
+          );
+        if (assetLocUpdateError) throw assetLocUpdateError;
 
         // Create notes for assets that had their location changed
         const user = await getUserByID(userId, {
@@ -2233,10 +2342,14 @@ export async function updateKitAssets({
         );
 
         if (assetsWithLocation.length > 0) {
-          await db.asset.updateMany({
-            where: { id: { in: assetsWithLocation.map((asset) => asset.id) } },
-            data: { locationId: null },
-          });
+          const { error: assetLocNullError2 } = await sbDb
+            .from("Asset")
+            .update({ locationId: null })
+            .in(
+              "id",
+              assetsWithLocation.map((asset) => asset.id)
+            );
+          if (assetLocNullError2) throw assetLocNullError2;
 
           // Create notes for assets that had their location removed
           const user = await getUserByID(userId, {
@@ -2280,21 +2393,25 @@ export async function updateKitAssets({
       assetsToInheritStatus.length > 0
     ) {
       // Update custody for all assets to inherit kit's custody
-      await Promise.all(
-        assetsToInheritStatus.map((asset) =>
-          db.asset.update({
-            where: { id: asset.id, organizationId },
-            data: {
-              status: AssetStatus.IN_CUSTODY,
-              custody: {
-                create: {
-                  custodian: { connect: { id: kit.custody?.custodian.id } },
-                },
-              },
-            },
-          })
-        )
+      const assetIdsForCustody = assetsToInheritStatus.map((a) => a.id);
+
+      // 1) Set all assets to IN_CUSTODY status
+      const { error: custodyStatusError } = await sbDb
+        .from("Asset")
+        .update({ status: AssetStatus.IN_CUSTODY })
+        .in("id", assetIdsForCustody)
+        .eq("organizationId", organizationId);
+      if (custodyStatusError) throw custodyStatusError;
+
+      // 2) Create custody records for each asset
+      const { error: custodyCreateError } = await sbDb.from("Custody").insert(
+        assetIdsForCustody.map((assetId) => ({
+          id: id(),
+          assetId,
+          teamMemberId: kit.custody!.custodian.id,
+        }))
       );
+      if (custodyCreateError) throw custodyCreateError;
 
       // Create notes for all assets that inherited custody
       const custodianDisplay = kitCustodianDisplay ?? "**Unknown Custodian**";
@@ -2367,10 +2484,14 @@ export async function updateKitAssets({
      * the assets CHECKED_OUT
      */
     if (kit.status === KitStatus.CHECKED_OUT) {
-      await db.asset.updateMany({
-        where: { id: { in: newlyAddedAssets.map((a) => a.id) } },
-        data: { status: AssetStatus.CHECKED_OUT },
-      });
+      const { error: checkoutError } = await sbDb
+        .from("Asset")
+        .update({ status: AssetStatus.CHECKED_OUT })
+        .in(
+          "id",
+          newlyAddedAssets.map((a) => a.id)
+        );
+      if (checkoutError) throw checkoutError;
     }
 
     return kit;
