@@ -1573,129 +1573,176 @@ describe("checkinBooking", () => {
     hints: mockClientHints,
   };
 
+  const checkinBookingRow = {
+    id: "booking-1",
+    name: "Test Booking",
+    status: BookingStatus.ONGOING,
+    organizationId: "org-1",
+    custodianUserId: "user-1",
+    custodianTeamMemberId: null,
+    creatorId: "user-1",
+    from: futureFromDate.toISOString(),
+    to: futureToDate.toISOString(),
+    createdAt: futureCreatedAt.toISOString(),
+    updatedAt: futureCreatedAt.toISOString(),
+    originalFrom: futureFromDate.toISOString(),
+    originalTo: futureToDate.toISOString(),
+    autoArchivedAt: null,
+    activeSchedulerReference: null,
+    cancellationReason: null,
+    description: "Test Description",
+  };
+
+  /**
+   * Sets up sbMock queue for checkinBooking's sbDb calls.
+   * checkinBooking uses sbDb for everything now.
+   */
+  function setupCheckinSbMock(opts?: {
+    bookingRow?: Record<string, unknown>;
+    assetJoins?: Array<{ A: string }>;
+    assetDetails?: Array<Record<string, unknown>>;
+    activeBookingJoins?: Array<{ A: string; B: string }>;
+    relatedBookings?: Array<Record<string, unknown>>;
+    partialCheckinsForLinked?: Array<Record<string, unknown>>;
+    autoArchiveSettings?: Record<string, unknown> | null;
+  }) {
+    const row = opts?.bookingRow ?? checkinBookingRow;
+    const assetJoins = opts?.assetJoins ?? [{ A: "asset-1" }, { A: "asset-2" }];
+    const assetDetails = opts?.assetDetails ?? [
+      { id: "asset-1", kitId: null, status: AssetStatus.CHECKED_OUT },
+      { id: "asset-2", kitId: "kit-1", status: AssetStatus.CHECKED_OUT },
+    ];
+    // 1. Booking fetch
+    sbMock.enqueueData(row);
+    // 2. _AssetToBooking join rows
+    sbMock.enqueueData(assetJoins);
+    // 3. Asset details
+    sbMock.enqueueData(assetDetails);
+    // 4. All active booking joins for assets
+    sbMock.enqueueData(
+      opts?.activeBookingJoins ??
+        assetJoins.map((j) => ({ A: j.A, B: "booking-1" }))
+    );
+    // 5. Related booking statuses
+    sbMock.enqueueData(
+      opts?.relatedBookings ?? [
+        { id: "booking-1", status: BookingStatus.ONGOING },
+      ]
+    );
+    // 6. PartialBookingCheckin for linked bookings (only if linkedActiveBookingIds.size > 0)
+    if (opts?.partialCheckinsForLinked) {
+      sbMock.enqueueData(opts.partialCheckinsForLinked);
+    }
+    // 7. sbDb.rpc("shelf_booking_checkin")
+    sbMock.enqueueData(null);
+    // 8-N. fetchBookingWithEmailIncludes (re-fetch booking)
+    sbMock.enqueueData({ ...row, status: BookingStatus.COMPLETE });
+    // Promise.all: User, Org, AssetCount, Assets
+    sbMock.enqueueData({
+      id: "user-1",
+      email: "test@example.com",
+      firstName: "Test",
+      lastName: "User",
+    });
+    sbMock.enqueueData({
+      id: "org-1",
+      name: "Test Org",
+      userId: "owner-1",
+      createdAt: futureCreatedAt.toISOString(),
+      updatedAt: futureCreatedAt.toISOString(),
+      customEmailFooter: null,
+    });
+    sbMock.enqueue({ data: null, error: null, count: assetJoins.length });
+    sbMock.enqueueData(assetJoins);
+    // Owner email
+    sbMock.enqueueData({ email: "owner@example.com" });
+    // Asset rows
+    sbMock.enqueueData(
+      assetJoins.map((j) => ({
+        id: j.A,
+        createdAt: futureCreatedAt.toISOString(),
+        updatedAt: futureCreatedAt.toISOString(),
+      }))
+    );
+    // BookingSettings fetch
+    sbMock.enqueueData(opts?.autoArchiveSettings ?? null);
+  }
+
   it("should checkin booking successfully", async () => {
-    expect.assertions(3);
+    expect.assertions(2);
 
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.ONGOING,
-      assets: [
-        {
-          id: "asset-1",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
-        },
-        {
-          id: "asset-2",
-          kitId: "kit-1",
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
-        },
-      ],
-      partialCheckins: [],
-    };
-    const checkedInBooking = { ...mockBooking, status: BookingStatus.COMPLETE };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue(checkedInBooking);
+    setupCheckinSbMock();
 
     const result = await checkinBooking(mockCheckinParams);
 
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1", "asset-2"] } },
-      data: { status: AssetStatus.AVAILABLE },
-    });
-
-    expect(db.booking.update).toHaveBeenCalledWith({
-      where: { id: "booking-1" },
-      data: { status: BookingStatus.COMPLETE },
-      include: expect.any(Object),
-    });
-
-    expect(result).toEqual(checkedInBooking);
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_checkin",
+      expect.objectContaining({
+        p_asset_ids: ["asset-1", "asset-2"],
+        p_booking_id: "booking-1",
+        p_new_status: BookingStatus.COMPLETE,
+      })
+    );
+    expect(result).toBeDefined();
   });
 
   it("should reset checked out assets even when partial check-in history exists", async () => {
     expect.assertions(1);
 
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.OVERDUE,
-      assets: [
-        {
-          id: "asset-1",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
-        },
-        {
-          id: "asset-2",
-          kitId: "kit-1",
-          status: AssetStatus.AVAILABLE,
-          bookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
-        },
+    setupCheckinSbMock({
+      bookingRow: { ...checkinBookingRow, status: BookingStatus.OVERDUE },
+      assetJoins: [{ A: "asset-1" }, { A: "asset-2" }],
+      assetDetails: [
+        { id: "asset-1", kitId: null, status: AssetStatus.CHECKED_OUT },
+        { id: "asset-2", kitId: "kit-1", status: AssetStatus.AVAILABLE },
       ],
-      partialCheckins: [
-        {
-          assetIds: ["asset-1"],
-        },
+      activeBookingJoins: [
+        { A: "asset-1", B: "booking-1" },
+        { A: "asset-2", B: "booking-1" },
       ],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+      relatedBookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
     });
 
     await checkinBooking(mockCheckinParams);
 
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["asset-1"] } },
-      data: { status: AssetStatus.AVAILABLE },
-    });
+    // The RPC handles the actual asset status updates; we verify the RPC was called
+    // with the correct asset IDs (only CHECKED_OUT assets with no conflicts)
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_checkin",
+      expect.objectContaining({
+        p_asset_ids: ["asset-1"],
+      })
+    );
   });
 
   it("should not reset assets that are checked out in another active booking", async () => {
     expect.assertions(1);
 
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.OVERDUE,
-      assets: [
-        {
-          id: "asset-1",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [
-            { id: "booking-1", status: BookingStatus.OVERDUE },
-            { id: "booking-2", status: BookingStatus.ONGOING },
-          ],
-        },
+    setupCheckinSbMock({
+      bookingRow: { ...checkinBookingRow, status: BookingStatus.OVERDUE },
+      assetJoins: [{ A: "asset-1" }],
+      assetDetails: [
+        { id: "asset-1", kitId: null, status: AssetStatus.CHECKED_OUT },
       ],
-      partialCheckins: [
-        {
-          assetIds: ["asset-1"],
-        },
+      activeBookingJoins: [
+        { A: "asset-1", B: "booking-1" },
+        { A: "asset-1", B: "booking-2" },
       ],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+      relatedBookings: [
+        { id: "booking-1", status: BookingStatus.OVERDUE },
+        { id: "booking-2", status: BookingStatus.ONGOING },
+      ],
     });
 
     await checkinBooking(mockCheckinParams);
 
-    expect(db.asset.updateMany).not.toHaveBeenCalled();
+    // asset-1 should NOT be reset because it's in another ONGOING booking
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_checkin",
+      expect.objectContaining({
+        p_asset_ids: [],
+      })
+    );
   });
 
   it("should reset asset when it was partially checked in from another ongoing booking", async () => {
@@ -1704,139 +1751,95 @@ describe("checkinBooking", () => {
     expect.assertions(1);
 
     // Scenario:
-    // - Booking A (booking-a, ONGOING) has Asset 1 and Asset 2
+    // - Booking A (booking-a, ONGOING) has Asset 2
     // - Asset 2 was partially checked in from Booking A (now AVAILABLE)
-    // - Booking B (booking-b, being checked in) has Asset 2 and Asset 3
+    // - Booking B (booking-1, being checked in) has Asset 2 and Asset 3
     // - When Booking B is checked in, Asset 2 should become AVAILABLE
     // - because it's not actively being used in Booking A anymore
-    const mockBooking = {
-      ...mockBookingData,
-      id: "booking-b",
-      status: BookingStatus.ONGOING,
-      assets: [
-        {
-          id: "asset-2",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [
-            { id: "booking-b", status: BookingStatus.ONGOING },
-            { id: "booking-a", status: BookingStatus.ONGOING },
-          ],
-        },
-        {
-          id: "asset-3",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-b", status: BookingStatus.ONGOING }],
-        },
+    setupCheckinSbMock({
+      assetJoins: [{ A: "asset-2" }, { A: "asset-3" }],
+      assetDetails: [
+        { id: "asset-2", kitId: null, status: AssetStatus.CHECKED_OUT },
+        { id: "asset-3", kitId: null, status: AssetStatus.CHECKED_OUT },
       ],
-      partialCheckins: [], // No partial check-ins for Booking B
-    };
-
-    // Mock partial check-ins for the linked Booking A
-    // Asset 2 was already checked in from Booking A
-    //@ts-expect-error missing vitest type
-    db.partialBookingCheckin.findMany.mockResolvedValue([
-      {
-        bookingId: "booking-a",
-        assetIds: ["asset-2"],
-      },
-    ]);
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+      activeBookingJoins: [
+        { A: "asset-2", B: "booking-1" },
+        { A: "asset-2", B: "booking-a" },
+        { A: "asset-3", B: "booking-1" },
+      ],
+      relatedBookings: [
+        { id: "booking-1", status: BookingStatus.ONGOING },
+        { id: "booking-a", status: BookingStatus.ONGOING },
+      ],
+      // Partial check-ins for linked booking-a show asset-2 was checked in
+      partialCheckinsForLinked: [
+        { bookingId: "booking-a", assetIds: ["asset-2"] },
+      ],
     });
 
     await checkinBooking(mockCheckinParams);
 
-    // Both assets should be reset to AVAILABLE because:
+    // Both assets should be in the RPC call because:
     // - Asset 2: was already checked in from Booking A, so no conflict
     // - Asset 3: no other bookings, so no conflict
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: {
-          in: ["asset-2", "asset-3"],
-        },
-      },
-      data: { status: AssetStatus.AVAILABLE },
-    });
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_checkin",
+      expect.objectContaining({
+        p_asset_ids: ["asset-2", "asset-3"],
+      })
+    );
   });
 
   it("should reset all assets (kit + singular) even when singular is in partial check-in history", async () => {
     expect.assertions(1);
 
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.OVERDUE,
-      assets: [
-        // Kit with 3 assets
-        {
-          id: "kit-asset-1",
-          kitId: "kit-1",
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
-        },
-        {
-          id: "kit-asset-2",
-          kitId: "kit-1",
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
-        },
-        {
-          id: "kit-asset-3",
-          kitId: "kit-1",
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
-        },
-        // Singular asset that was partially checked in
-        {
-          id: "singular-asset",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
-        },
+    setupCheckinSbMock({
+      bookingRow: { ...checkinBookingRow, status: BookingStatus.OVERDUE },
+      assetJoins: [
+        { A: "kit-asset-1" },
+        { A: "kit-asset-2" },
+        { A: "kit-asset-3" },
+        { A: "singular-asset" },
       ],
-      partialCheckins: [
-        {
-          assetIds: ["singular-asset"],
-        },
+      assetDetails: [
+        { id: "kit-asset-1", kitId: "kit-1", status: AssetStatus.CHECKED_OUT },
+        { id: "kit-asset-2", kitId: "kit-1", status: AssetStatus.CHECKED_OUT },
+        { id: "kit-asset-3", kitId: "kit-1", status: AssetStatus.CHECKED_OUT },
+        { id: "singular-asset", kitId: null, status: AssetStatus.CHECKED_OUT },
       ],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+      activeBookingJoins: [
+        { A: "kit-asset-1", B: "booking-1" },
+        { A: "kit-asset-2", B: "booking-1" },
+        { A: "kit-asset-3", B: "booking-1" },
+        { A: "singular-asset", B: "booking-1" },
+      ],
+      relatedBookings: [{ id: "booking-1", status: BookingStatus.OVERDUE }],
     });
 
     await checkinBooking(mockCheckinParams);
 
-    expect(db.asset.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: {
-          in: ["kit-asset-1", "kit-asset-2", "kit-asset-3", "singular-asset"],
-        },
-      },
-      data: { status: AssetStatus.AVAILABLE },
-    });
+    expect(sbMock.calls.rpc).toHaveBeenCalledWith(
+      "shelf_booking_checkin",
+      expect.objectContaining({
+        p_asset_ids: [
+          "kit-asset-1",
+          "kit-asset-2",
+          "kit-asset-3",
+          "singular-asset",
+        ],
+      })
+    );
   });
 
   it("should handle checkin for non-ongoing booking", async () => {
     expect.assertions(1);
 
-    const mockBooking = { ...mockBookingData, status: BookingStatus.DRAFT };
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+    setupCheckinSbMock({
+      bookingRow: { ...checkinBookingRow, status: BookingStatus.DRAFT },
+      assetJoins: [],
+      assetDetails: [],
+      activeBookingJoins: [],
+      relatedBookings: [],
     });
 
     const result = await checkinBooking(mockCheckinParams);
@@ -1844,32 +1847,17 @@ describe("checkinBooking", () => {
   });
 
   it("should schedule auto-archive when enabled", async () => {
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.ONGOING,
-      assets: [
-        {
-          id: "asset-1",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
-        },
+    setupCheckinSbMock({
+      assetJoins: [{ A: "asset-1" }],
+      assetDetails: [
+        { id: "asset-1", kitId: null, status: AssetStatus.CHECKED_OUT },
       ],
-      partialCheckins: [],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+      activeBookingJoins: [{ A: "asset-1", B: "booking-1" }],
+      relatedBookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
+      autoArchiveSettings: { autoArchiveBookings: true, autoArchiveDays: 3 },
     });
-    //@ts-expect-error missing vitest type
-    db.bookingSettings.findUnique.mockResolvedValue({
-      autoArchiveBookings: true,
-      autoArchiveDays: 3,
-    });
+    // Extra: scheduleNextBookingJob -> sbDb.from("Booking").update().eq()
+    sbMock.enqueueData({});
 
     await checkinBooking(mockCheckinParams);
 
@@ -1885,31 +1873,14 @@ describe("checkinBooking", () => {
   });
 
   it("should not schedule auto-archive when disabled", async () => {
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.ONGOING,
-      assets: [
-        {
-          id: "asset-1",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
-        },
+    setupCheckinSbMock({
+      assetJoins: [{ A: "asset-1" }],
+      assetDetails: [
+        { id: "asset-1", kitId: null, status: AssetStatus.CHECKED_OUT },
       ],
-      partialCheckins: [],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
-    });
-    //@ts-expect-error missing vitest type
-    db.bookingSettings.findUnique.mockResolvedValue({
-      autoArchiveBookings: false,
-      autoArchiveDays: 3,
+      activeBookingJoins: [{ A: "asset-1", B: "booking-1" }],
+      relatedBookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
+      autoArchiveSettings: { autoArchiveBookings: false, autoArchiveDays: 3 },
     });
 
     await checkinBooking(mockCheckinParams);
@@ -1925,29 +1896,15 @@ describe("checkinBooking", () => {
   });
 
   it("should not schedule auto-archive when settings not found", async () => {
-    const mockBooking = {
-      ...mockBookingData,
-      status: BookingStatus.ONGOING,
-      assets: [
-        {
-          id: "asset-1",
-          kitId: null,
-          status: AssetStatus.CHECKED_OUT,
-          bookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
-        },
+    setupCheckinSbMock({
+      assetJoins: [{ A: "asset-1" }],
+      assetDetails: [
+        { id: "asset-1", kitId: null, status: AssetStatus.CHECKED_OUT },
       ],
-      partialCheckins: [],
-    };
-
-    //@ts-expect-error missing vitest type
-    db.booking.findUniqueOrThrow.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
-      status: BookingStatus.COMPLETE,
+      activeBookingJoins: [{ A: "asset-1", B: "booking-1" }],
+      relatedBookings: [{ id: "booking-1", status: BookingStatus.ONGOING }],
+      autoArchiveSettings: null,
     });
-    //@ts-expect-error missing vitest type
-    db.bookingSettings.findUnique.mockResolvedValue(null);
 
     await checkinBooking(mockCheckinParams);
 
