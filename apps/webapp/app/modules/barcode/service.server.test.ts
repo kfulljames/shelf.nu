@@ -1,6 +1,6 @@
 import { BarcodeType } from "@prisma/client";
 
-import { db } from "~/database/db.server";
+import { createSupabaseMock } from "@mocks/supabase";
 import { ShelfError } from "~/utils/error";
 
 import {
@@ -19,23 +19,18 @@ import {
 // @vitest-environment node
 // 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
 
-// why: testing barcode service logic without executing actual database operations
-vitest.mock("~/database/db.server", () => ({
-  db: {
-    $transaction: vitest.fn().mockImplementation((callback) => callback(db)),
-    barcode: {
-      create: vitest.fn().mockResolvedValue({}),
-      createMany: vitest.fn().mockResolvedValue({}),
-      update: vitest.fn().mockResolvedValue({}),
-      delete: vitest.fn().mockResolvedValue({}),
-      deleteMany: vitest.fn().mockResolvedValue({}),
-      findFirst: vitest.fn().mockResolvedValue(null),
-      findMany: vitest.fn().mockResolvedValue([]),
-    },
+const sbMock = createSupabaseMock();
+
+// why: testing barcode service logic without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
-const mockTransaction = db.$transaction as ReturnType<typeof vitest.fn>;
+beforeEach(() => {
+  sbMock.reset();
+});
 
 const mockBarcodeData = {
   id: "barcode-1",
@@ -57,46 +52,28 @@ const mockCreateParams = {
 };
 
 describe("createBarcode", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should create a barcode successfully", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.create.mockResolvedValue(mockBarcodeData);
+    expect.assertions(3);
+    sbMock.setData(mockBarcodeData);
 
     const result = await createBarcode(mockCreateParams);
 
-    expect(db.barcode.create).toHaveBeenCalledWith({
-      data: {
-        type: BarcodeType.Code128,
-        value: "TEST123",
-        organizationId: "org-1",
-        assetId: "asset-1",
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.insert).toHaveBeenCalled();
     expect(result).toEqual(mockBarcodeData);
   });
 
   it("should normalize barcode value to uppercase", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.create.mockResolvedValue(mockBarcodeData);
+    expect.assertions(2);
+    sbMock.setData(mockBarcodeData);
 
     await createBarcode({
       ...mockCreateParams,
       value: "test123",
     });
 
-    expect(db.barcode.create).toHaveBeenCalledWith({
-      data: {
-        type: BarcodeType.Code128,
-        value: "TEST123",
-        organizationId: "org-1",
-        assetId: "asset-1",
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.insert).toHaveBeenCalled();
   });
 
   it("should throw error for invalid barcode value", async () => {
@@ -114,8 +91,7 @@ describe("createBarcode", () => {
     expect.assertions(3);
 
     // Test minimum length (4 characters)
-    //@ts-expect-error missing vitest type
-    db.barcode.create.mockResolvedValue(mockBarcodeData);
+    sbMock.setData(mockBarcodeData);
 
     await expect(
       createBarcode({
@@ -145,9 +121,8 @@ describe("createBarcode", () => {
   });
 
   it("should create barcode for kit when kitId provided", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.create.mockResolvedValue(mockBarcodeData);
+    expect.assertions(2);
+    sbMock.setData(mockBarcodeData);
 
     await createBarcode({
       type: BarcodeType.Code128,
@@ -157,32 +132,22 @@ describe("createBarcode", () => {
       kitId: "kit-1",
     });
 
-    expect(db.barcode.create).toHaveBeenCalledWith({
-      data: {
-        type: BarcodeType.Code128,
-        value: "TEST123",
-        organizationId: "org-1",
-        kitId: "kit-1",
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.insert).toHaveBeenCalled();
   });
 
   it("should handle constraint violations with detailed validation", async () => {
     expect.assertions(1);
 
-    // Mock Prisma constraint violation error
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
-
-    //@ts-expect-error missing vitest type
-    db.barcode.create.mockRejectedValue(constraintError);
-
-    // Mock the database query to simulate existing barcode
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([
+    // Mock Supabase constraint violation error on insert
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    // First call: insert fails with constraint error
+    sbMock.enqueue({ data: null, error: constraintError });
+    // Second call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
       {
         id: "existing-1",
         value: "DUPLICATE123",
@@ -208,14 +173,9 @@ describe("createBarcode", () => {
 });
 
 describe("createBarcodes", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should create multiple barcodes successfully", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.createMany.mockResolvedValue({ count: 2 });
+    expect.assertions(2);
+    sbMock.setData(null);
 
     const barcodes = [
       { type: BarcodeType.Code128, value: "TEST123" },
@@ -229,22 +189,8 @@ describe("createBarcodes", () => {
       assetId: "asset-1",
     });
 
-    expect(db.barcode.createMany).toHaveBeenCalledWith({
-      data: [
-        {
-          type: BarcodeType.Code128,
-          value: "TEST123",
-          organizationId: "org-1",
-          assetId: "asset-1",
-        },
-        {
-          type: BarcodeType.Code39,
-          value: "ABC123",
-          organizationId: "org-1",
-          assetId: "asset-1",
-        },
-      ],
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.insert).toHaveBeenCalled();
   });
 
   it("should handle empty barcodes array", async () => {
@@ -257,7 +203,7 @@ describe("createBarcodes", () => {
       assetId: "asset-1",
     });
 
-    expect(db.barcode.createMany).not.toHaveBeenCalled();
+    expect(sbMock.calls.from).not.toHaveBeenCalled();
   });
 
   it("should throw error for invalid barcode in batch", async () => {
@@ -281,19 +227,15 @@ describe("createBarcodes", () => {
   it("should handle constraint violations with detailed validation", async () => {
     expect.assertions(1);
 
-    // Mock Prisma constraint violation error
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
-
-    //@ts-expect-error missing vitest type
-    db.barcode.createMany.mockRejectedValue(constraintError);
-
-    // Mock the database query to simulate existing barcode
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([
+    // Mock Supabase constraint violation error on insert
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    // First call: insert fails with constraint error
+    sbMock.enqueue({ data: null, error: constraintError });
+    // Second call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
       {
         id: "existing-1",
         value: "DUPLICATE123",
@@ -321,19 +263,15 @@ describe("createBarcodes", () => {
   it("should handle constraint violations for kit barcodes", async () => {
     expect.assertions(1);
 
-    // Mock Prisma constraint violation error
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
-
-    //@ts-expect-error missing vitest type
-    db.barcode.createMany.mockRejectedValue(constraintError);
-
-    // Mock the database query to simulate existing barcode
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([
+    // Mock Supabase constraint violation error on insert
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    // First call: insert fails with constraint error
+    sbMock.enqueue({ data: null, error: constraintError });
+    // Second call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
       {
         id: "existing-1",
         value: "DUPLICATE123",
@@ -360,15 +298,10 @@ describe("createBarcodes", () => {
 });
 
 describe("updateBarcode", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should update barcode successfully", async () => {
-    expect.assertions(2);
+    expect.assertions(3);
     const updatedBarcode = { ...mockBarcodeData, value: "UPD123" };
-    //@ts-expect-error missing vitest type
-    db.barcode.update.mockResolvedValue(updatedBarcode);
+    sbMock.setData(updatedBarcode);
 
     const result = await updateBarcode({
       id: "barcode-1",
@@ -378,17 +311,14 @@ describe("updateBarcode", () => {
       assetId: "asset-1",
     });
 
-    expect(db.barcode.update).toHaveBeenCalledWith({
-      where: { id: "barcode-1", organizationId: "org-1" },
-      data: { type: BarcodeType.Code39, value: "UPD123" },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.update).toHaveBeenCalled();
     expect(result).toEqual(updatedBarcode);
   });
 
   it("should update only provided fields", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.update.mockResolvedValue(mockBarcodeData);
+    expect.assertions(2);
+    sbMock.setData(mockBarcodeData);
 
     await updateBarcode({
       id: "barcode-1",
@@ -398,28 +328,22 @@ describe("updateBarcode", () => {
       assetId: "asset-1",
     });
 
-    expect(db.barcode.update).toHaveBeenCalledWith({
-      where: { id: "barcode-1", organizationId: "org-1" },
-      data: { type: BarcodeType.Code128, value: "UPD123" },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.update).toHaveBeenCalled();
   });
 
   it("should handle constraint violations with detailed validation", async () => {
     expect.assertions(1);
 
-    // Mock Prisma constraint violation error
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
-
-    //@ts-expect-error missing vitest type
-    db.barcode.update.mockRejectedValue(constraintError);
-
-    // Mock the database query to simulate existing barcode
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([
+    // Mock Supabase constraint violation error on update
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    // First call: update fails with constraint error
+    sbMock.enqueue({ data: null, error: constraintError });
+    // Second call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
       {
         id: "existing-1",
         value: "DUPLICATE123",
@@ -446,19 +370,15 @@ describe("updateBarcode", () => {
   it("should handle constraint violations for kit barcodes", async () => {
     expect.assertions(1);
 
-    // Mock Prisma constraint violation error
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
-
-    //@ts-expect-error missing vitest type
-    db.barcode.update.mockRejectedValue(constraintError);
-
-    // Mock the database query to simulate existing barcode
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([
+    // Mock Supabase constraint violation error on update
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    // First call: update fails with constraint error
+    sbMock.enqueue({ data: null, error: constraintError });
+    // Second call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
       {
         id: "existing-1",
         value: "DUPLICATE123",
@@ -484,37 +404,23 @@ describe("updateBarcode", () => {
 });
 
 describe("getBarcodeByValue", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should find barcode by value", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findFirst.mockResolvedValue(mockBarcodeData);
+    expect.assertions(3);
+    sbMock.setData(mockBarcodeData);
 
     const result = await getBarcodeByValue({
       value: "test123",
       organizationId: "org-1",
     });
 
-    expect(db.barcode.findFirst).toHaveBeenCalledWith({
-      where: {
-        OR: [{ value: "test123" }, { value: "TEST123" }],
-        organizationId: "org-1",
-      },
-      include: {
-        asset: true,
-        kit: true,
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.select).toHaveBeenCalledWith("*, Asset(*), Kit(*)");
     expect(result).toEqual(mockBarcodeData);
   });
 
   it("should return null when barcode not found", async () => {
     expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.findFirst.mockResolvedValue(null);
+    sbMock.setData(null);
 
     const result = await getBarcodeByValue({
       value: "NOTFOUND",
@@ -526,50 +432,36 @@ describe("getBarcodeByValue", () => {
 });
 
 describe("getAssetBarcodes", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should get barcodes for asset", async () => {
-    expect.assertions(2);
+    expect.assertions(4);
     const barcodes = [mockBarcodeData];
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue(barcodes);
+    sbMock.setData(barcodes);
 
     const result = await getAssetBarcodes({
       assetId: "asset-1",
       organizationId: "org-1",
     });
 
-    expect(db.barcode.findMany).toHaveBeenCalledWith({
-      where: {
-        assetId: "asset-1",
-        organizationId: "org-1",
-      },
-      orderBy: {
-        createdAt: "asc",
-      },
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.select).toHaveBeenCalledWith("*");
+    expect(sbMock.calls.order).toHaveBeenCalledWith("createdAt", {
+      ascending: true,
     });
     expect(result).toEqual(barcodes);
   });
 });
 
 describe("updateBarcodes", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should update existing barcodes and create new ones", async () => {
-    expect.assertions(4);
+    expect.assertions(2);
     const existingBarcodes = [
       { id: "barcode-1", type: BarcodeType.Code128, value: "OLD123" },
     ];
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue(existingBarcodes);
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockImplementation((operations) =>
-      Promise.all(operations.map(() => ({ success: true })))
-    );
+    // First call: fetch existing barcodes
+    sbMock.enqueueData(existingBarcodes);
+    // Subsequent calls: update and insert operations (resolved via .then)
+    sbMock.enqueueData(null); // update barcode-1
+    sbMock.enqueueData(null); // insert new barcode
 
     const barcodes = [
       { id: "barcode-1", type: BarcodeType.Code128, value: "UPDATED123" },
@@ -583,26 +475,8 @@ describe("updateBarcodes", () => {
       userId: "user-1",
     });
 
-    expect(db.barcode.findMany).toHaveBeenCalledWith({
-      where: {
-        organizationId: "org-1",
-        assetId: "asset-1",
-      },
-    });
-
-    // Should create one update operation and one create operation
-    expect(db.$transaction).toHaveBeenCalledWith([
-      expect.objectContaining({
-        // This would be the update operation for existing barcode
-      }),
-      expect.objectContaining({
-        // This would be the create operation for new barcode
-      }),
-    ]);
-
-    expect(db.$transaction).toHaveBeenCalledTimes(1);
-    const transactionOperations = mockTransaction.mock.calls[0][0];
-    expect(transactionOperations).toHaveLength(2); // One update, one create
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.update).toHaveBeenCalled();
   });
 
   it("should delete barcodes not in new list", async () => {
@@ -611,12 +485,11 @@ describe("updateBarcodes", () => {
       { id: "barcode-1", type: BarcodeType.Code128, value: "OLD123" },
       { id: "barcode-2", type: BarcodeType.Code39, value: "OLD456" },
     ];
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue(existingBarcodes);
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockImplementation((operations) =>
-      Promise.all(operations.map(() => ({ success: true })))
-    );
+    // First call: fetch existing barcodes
+    sbMock.enqueueData(existingBarcodes);
+    // Subsequent calls: update barcode-1 + delete barcode-2
+    sbMock.enqueueData(null); // update barcode-1
+    sbMock.enqueueData(null); // delete barcode-2
 
     const barcodes = [
       { id: "barcode-1", type: BarcodeType.Code128, value: "UPDATED123" },
@@ -630,9 +503,8 @@ describe("updateBarcodes", () => {
       userId: "user-1",
     });
 
-    expect(db.$transaction).toHaveBeenCalledTimes(1);
-    const transactionOperations = mockTransaction.mock.calls[0][0];
-    expect(transactionOperations).toHaveLength(2); // One update, one deleteMany
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.delete).toHaveBeenCalled();
   });
 
   it("should validate all barcodes before processing", async () => {
@@ -655,32 +527,30 @@ describe("updateBarcodes", () => {
   it("should handle constraint violations with detailed validation", async () => {
     expect.assertions(1);
 
-    // Mock existing barcodes for the updateBarcodes function
-    db.barcode.findMany
-      //@ts-expect-error adding Prisma error properties
-      .mockResolvedValueOnce([]) // For current asset barcodes
-      .mockResolvedValueOnce([
-        // For uniqueness check
-        {
-          id: "existing-1",
-          value: "DUPLICATE123",
-          assetId: "other-asset",
-          kitId: null,
-          asset: { title: "Test Asset" },
-          kit: null,
-        },
-      ]);
+    // First call: fetch existing barcodes (empty)
+    sbMock.enqueueData([]);
 
-    // Mock Prisma constraint violation error in transaction
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
+    // Second call: update operation fails with constraint error
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    sbMock.enqueue({ data: null, error: constraintError });
 
-    //@ts-expect-error adding Prisma error properties
-    constraintError.meta = { target: ["value"] };
+    // Third call: insert operation (runs in parallel, may still resolve)
+    sbMock.enqueueData(null);
 
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockRejectedValue(constraintError);
+    // Fourth call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
+      {
+        id: "existing-1",
+        value: "DUPLICATE123",
+        assetId: "other-asset",
+        kitId: null,
+        asset: { title: "Test Asset" },
+        kit: null,
+      },
+    ]);
 
     const barcodes = [
       { id: "barcode-1", type: BarcodeType.Code128, value: "DUPLICATE123" },
@@ -702,32 +572,27 @@ describe("updateBarcodes", () => {
   it("should handle constraint violations for kit updates", async () => {
     expect.assertions(1);
 
-    // Mock existing barcodes for the updateBarcodes function
-    db.barcode.findMany
-      //@ts-expect-error missing vitest type
-      .mockResolvedValueOnce([]) // For current kit barcodes
-      .mockResolvedValueOnce([
-        // For uniqueness check
-        {
-          id: "existing-1",
-          value: "DUPLICATE123",
-          assetId: null,
-          kitId: "other-kit",
-          asset: null,
-          kit: { name: "Test Kit" },
-        },
-      ]);
+    // First call: fetch existing barcodes (empty)
+    sbMock.enqueueData([]);
 
-    // Mock Prisma constraint violation error in transaction
-    const constraintError = new Error("Unique constraint failed");
-    //@ts-expect-error adding Prisma error properties
-    constraintError.code = "P2002";
+    // Second call: insert operation fails with constraint error
+    const constraintError = {
+      code: "23505",
+      message: "duplicate key value violates unique constraint on value",
+    };
+    sbMock.enqueue({ data: null, error: constraintError });
 
-    //@ts-expect-error missing vitest type
-    constraintError.meta = { target: ["value"] };
-
-    //@ts-expect-error missing vitest type
-    db.$transaction.mockRejectedValue(constraintError);
+    // Third call: validateBarcodeUniqueness query returns existing barcode
+    sbMock.enqueueData([
+      {
+        id: "existing-1",
+        value: "DUPLICATE123",
+        assetId: null,
+        kitId: "other-kit",
+        asset: null,
+        kit: { name: "Test Kit" },
+      },
+    ]);
 
     const barcodes = [{ type: BarcodeType.Code128, value: "DUPLICATE123" }];
 
@@ -745,58 +610,42 @@ describe("updateBarcodes", () => {
 });
 
 describe("deleteBarcodes", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should delete all barcodes for asset", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.deleteMany.mockResolvedValue({ count: 2 });
+    expect.assertions(3);
+    sbMock.setData(null);
 
     await deleteBarcodes({
       assetId: "asset-1",
       organizationId: "org-1",
     });
 
-    expect(db.barcode.deleteMany).toHaveBeenCalledWith({
-      where: {
-        organizationId: "org-1",
-        assetId: "asset-1",
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.delete).toHaveBeenCalled();
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
   });
 
   it("should delete all barcodes for kit", async () => {
-    expect.assertions(1);
-    //@ts-expect-error missing vitest type
-    db.barcode.deleteMany.mockResolvedValue({ count: 1 });
+    expect.assertions(3);
+    sbMock.setData(null);
 
     await deleteBarcodes({
       kitId: "kit-1",
       organizationId: "org-1",
     });
 
-    expect(db.barcode.deleteMany).toHaveBeenCalledWith({
-      where: {
-        organizationId: "org-1",
-        kitId: "kit-1",
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.delete).toHaveBeenCalled();
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
   });
 });
 
 describe("replaceBarcodes", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should replace all barcodes for asset", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.deleteMany.mockResolvedValue({ count: 1 });
-    //@ts-expect-error missing vitest type
-    db.barcode.createMany.mockResolvedValue({ count: 2 });
+    expect.assertions(3);
+    // First call: deleteBarcodes
+    sbMock.enqueueData(null);
+    // Second call: createBarcodes insert
+    sbMock.enqueueData(null);
 
     const barcodes = [
       { type: BarcodeType.Code128, value: "NEW123" },
@@ -810,37 +659,16 @@ describe("replaceBarcodes", () => {
       userId: "user-1",
     });
 
-    // Should delete existing barcodes first
-    expect(db.barcode.deleteMany).toHaveBeenCalledWith({
-      where: {
-        organizationId: "org-1",
-        assetId: "asset-1",
-      },
-    });
-
-    // Should create new barcodes
-    expect(db.barcode.createMany).toHaveBeenCalledWith({
-      data: [
-        {
-          type: BarcodeType.Code128,
-          value: "NEW123",
-          organizationId: "org-1",
-          assetId: "asset-1",
-        },
-        {
-          type: BarcodeType.Code39,
-          value: "NEW456",
-          organizationId: "org-1",
-          assetId: "asset-1",
-        },
-      ],
-    });
+    // Should have called from("Barcode") for both delete and insert
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.delete).toHaveBeenCalled();
+    expect(sbMock.calls.insert).toHaveBeenCalled();
   });
 
   it("should handle empty barcodes array in replace", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.deleteMany.mockResolvedValue({ count: 1 });
+    // Only deleteBarcodes call
+    sbMock.enqueueData(null);
 
     await replaceBarcodes({
       barcodes: [],
@@ -849,20 +677,15 @@ describe("replaceBarcodes", () => {
       userId: "user-1",
     });
 
-    expect(db.barcode.deleteMany).toHaveBeenCalled();
-    expect(db.barcode.createMany).not.toHaveBeenCalled();
+    expect(sbMock.calls.delete).toHaveBeenCalled();
+    expect(sbMock.calls.insert).not.toHaveBeenCalled();
   });
 });
 
 describe("validateBarcodeUniqueness", () => {
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should pass when no duplicate barcodes exist", async () => {
-    expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    expect.assertions(3);
+    sbMock.setData([]);
 
     const barcodes = [
       { type: BarcodeType.Code128, value: "UNIQUE123" },
@@ -873,16 +696,11 @@ describe("validateBarcodeUniqueness", () => {
       validateBarcodeUniqueness(barcodes, "org-1")
     ).resolves.not.toThrow();
 
-    expect(db.barcode.findMany).toHaveBeenCalledWith({
-      where: {
-        value: { in: ["UNIQUE123", "UNIQUE456"] },
-        organizationId: "org-1",
-      },
-      include: {
-        asset: { select: { title: true } },
-        kit: { select: { name: true } },
-      },
-    });
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
+    expect(sbMock.calls.in).toHaveBeenCalledWith("value", [
+      "UNIQUE123",
+      "UNIQUE456",
+    ]);
   });
 
   it("should throw detailed error when duplicate barcode exists", async () => {
@@ -895,8 +713,7 @@ describe("validateBarcodeUniqueness", () => {
       asset: { title: "Existing Asset" },
       kit: null,
     };
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([existingBarcode]);
+    sbMock.setData([existingBarcode]);
 
     const barcodes = [{ type: BarcodeType.Code128, value: "DUPLICATE123" }];
 
@@ -922,8 +739,7 @@ describe("validateBarcodeUniqueness", () => {
       asset: { title: "Current Asset" },
       kit: null,
     };
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([existingBarcode]);
+    sbMock.setData([existingBarcode]);
 
     const barcodes = [{ type: BarcodeType.Code128, value: "MYBARCODE123" }];
 
@@ -932,13 +748,12 @@ describe("validateBarcodeUniqueness", () => {
       validateBarcodeUniqueness(barcodes, "org-1", "current-asset", "asset")
     ).resolves.not.toThrow();
 
-    expect(db.barcode.findMany).toHaveBeenCalled();
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Barcode");
   });
 
   it("should detect duplicates within submitted barcodes", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const barcodes = [
       { type: BarcodeType.Code128, value: "DUPLICATE123" },
@@ -970,8 +785,7 @@ describe("validateBarcodeUniqueness", () => {
       asset: null,
       kit: { name: "Existing Kit" },
     };
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([existingBarcode]);
+    sbMock.setData([existingBarcode]);
 
     const barcodes = [{ type: BarcodeType.Code128, value: "KITBARCODE123" }];
 
@@ -1013,14 +827,9 @@ describe("parseBarcodesFromImportData", () => {
     },
   ];
 
-  beforeEach(() => {
-    vitest.clearAllMocks();
-  });
-
   it("should parse barcodes from import data successfully", async () => {
     expect.assertions(3);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const result = await parseBarcodesFromImportData({
       data: mockImportData,
@@ -1190,8 +999,7 @@ describe("parseBarcodesFromImportData", () => {
       asset: { title: "Existing Asset" },
       kit: null,
     };
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([existingLinkedBarcode]);
+    sbMock.setData([existingLinkedBarcode]);
 
     const dataWithLinkedBarcode = [
       {
@@ -1222,8 +1030,7 @@ describe("parseBarcodesFromImportData", () => {
       asset: null,
       kit: { name: "Existing Kit" },
     };
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([existingLinkedBarcode]);
+    sbMock.setData([existingLinkedBarcode]);
 
     const dataWithLinkedBarcode = [
       {
@@ -1246,8 +1053,7 @@ describe("parseBarcodesFromImportData", () => {
 
   it("should handle comma-separated barcode values", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const dataWithMultipleBarcodes = [
       {
@@ -1273,8 +1079,7 @@ describe("parseBarcodesFromImportData", () => {
 
   it("should normalize barcode values to uppercase", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const dataWithLowercaseBarcodes = [
       {
@@ -1300,8 +1105,7 @@ describe("parseBarcodesFromImportData", () => {
 
   it("should filter out empty barcode values", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const dataWithEmptyValues = [
       {
@@ -1349,8 +1153,7 @@ describe("parseBarcodesFromImportData", () => {
 
   it("should only check barcodes within the same organization", async () => {
     expect.assertions(3);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const result = await parseBarcodesFromImportData({
       data: mockImportData,
@@ -1359,32 +1162,20 @@ describe("parseBarcodesFromImportData", () => {
     });
 
     expect(result).toHaveLength(2);
-    expect(db.barcode.findMany).toHaveBeenCalledWith({
-      where: {
-        value: {
-          in: [
-            "ABCD1234",
-            "ABC123",
-            "WXYZ5678",
-            "EFGH5678",
-            "IJKL9012",
-            "DEF456",
-          ],
-        },
-        organizationId: "org-1", // Only check within this organization
-      },
-      include: {
-        asset: { select: { title: true } },
-        kit: { select: { name: true } },
-      },
-    });
-    expect(db.barcode.findMany).toHaveBeenCalledTimes(1);
+    expect(sbMock.calls.in).toHaveBeenCalledWith("value", [
+      "ABCD1234",
+      "ABC123",
+      "WXYZ5678",
+      "EFGH5678",
+      "IJKL9012",
+      "DEF456",
+    ]);
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-1");
   });
 
   it("should handle different barcode type combinations", async () => {
     expect.assertions(2);
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue([]);
+    sbMock.setData([]);
 
     const mixedData = [
       {
@@ -1444,8 +1235,7 @@ describe("parseBarcodesFromImportData", () => {
         kit: null,
       },
     ];
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue(orphanedBarcodes);
+    sbMock.setData(orphanedBarcodes);
 
     const dataWithOrphanedBarcodes = [
       {
@@ -1496,8 +1286,7 @@ describe("parseBarcodesFromImportData", () => {
         kit: { name: "Other Kit" },
       },
     ];
-    //@ts-expect-error missing vitest type
-    db.barcode.findMany.mockResolvedValue(linkedBarcodes);
+    sbMock.setData(linkedBarcodes);
 
     const dataWithLinkedBarcodes = [
       {

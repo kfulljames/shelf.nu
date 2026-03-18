@@ -1,23 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 import { ShelfError } from "~/utils/error";
 
-// Mock the database and dependencies
-vi.mock("~/database/db.server", () => ({
-  db: {
-    $transaction: vi.fn(),
-    customField: {
-      findFirst: vi.fn(),
-      delete: vi.fn(),
-      update: vi.fn(),
-      create: vi.fn(),
-    },
-    assetCustomFieldValue: {
-      deleteMany: vi.fn(),
-    },
-    assetIndexSettings: {
-      findMany: vi.fn(),
-      update: vi.fn(),
-    },
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -30,13 +19,11 @@ vi.mock("../asset-index-settings/service.server", () => ({
   updateAssetIndexSettingsWithNewCustomFields: vi.fn(),
 }));
 
-const { db } = await import("~/database/db.server");
 const { softDeleteCustomField } = await import("./service.server");
-
-const dbTransactionMock = vi.mocked(db.$transaction);
 
 describe("softDeleteCustomField", () => {
   beforeEach(() => {
+    sbMock.reset();
     vi.clearAllMocks();
   });
 
@@ -51,29 +38,20 @@ describe("softDeleteCustomField", () => {
       userId: "user-123",
       options: [],
       helpText: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       deletedAt: null,
     };
 
-    let capturedUpdateData: any = null;
-
-    // Mock the transaction to execute the callback
-    dbTransactionMock.mockImplementation((callback: any) => {
-      const mockTx = {
-        customField: {
-          findFirst: vi.fn().mockResolvedValue(mockCustomField),
-          update: vi.fn().mockImplementation(({ data }) => {
-            capturedUpdateData = data;
-            return {
-              ...mockCustomField,
-              name: data.name,
-              deletedAt: data.deletedAt,
-            };
-          }),
-        },
-      };
-      return callback(mockTx);
+    // First call: maybeSingle for find; second call: single for update
+    sbMock.enqueue({ data: mockCustomField, error: null });
+    sbMock.enqueue({
+      data: {
+        ...mockCustomField,
+        name: `Serial Number_${Math.floor(Date.now() / 1000)}`,
+        deletedAt: new Date().toISOString(),
+      },
+      error: null,
     });
 
     const result = await softDeleteCustomField({
@@ -83,27 +61,20 @@ describe("softDeleteCustomField", () => {
 
     expect(result.deletedAt).toBeTruthy();
     expect(result.name).toMatch(/^Serial Number_\d+$/);
-    expect(capturedUpdateData.name).toMatch(/^Serial Number_\d+$/);
-    expect(capturedUpdateData.deletedAt).toBeInstanceOf(Date);
-    expect(dbTransactionMock).toHaveBeenCalledTimes(1);
+
+    // Verify the correct table was queried
+    expect(sbMock.calls.from).toHaveBeenCalledWith("CustomField");
 
     // Verify AssetIndexSettings cleanup was called
     expect(mockRemoveCustomFieldFromAssetIndexSettings).toHaveBeenCalledWith({
       customFieldName: "Serial Number",
       organizationId: "org-123",
-      prisma: expect.any(Object),
     });
   });
 
   it("throws ShelfError when custom field does not exist or is already deleted", async () => {
-    dbTransactionMock.mockImplementation((callback: any) => {
-      const mockTx = {
-        customField: {
-          findFirst: vi.fn().mockResolvedValue(null),
-        },
-      };
-      return callback(mockTx);
-    });
+    // maybeSingle returns null (no matching custom field)
+    sbMock.setData(null);
 
     await expect(
       softDeleteCustomField({
@@ -117,15 +88,8 @@ describe("softDeleteCustomField", () => {
   });
 
   it("throws ShelfError when custom field belongs to different organization", async () => {
-    dbTransactionMock.mockImplementation((callback: any) => {
-      const mockTx = {
-        customField: {
-          // findFirst with organizationId filter will return null
-          findFirst: vi.fn().mockResolvedValue(null),
-        },
-      };
-      return callback(mockTx);
-    });
+    // maybeSingle with organizationId filter will return null
+    sbMock.setData(null);
 
     await expect(
       softDeleteCustomField({
@@ -149,31 +113,21 @@ describe("softDeleteCustomField", () => {
       userId: "user-123",
       options: [],
       helpText: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       deletedAt: null,
     };
 
-    const executionOrder: string[] = [];
-
-    dbTransactionMock.mockImplementation((callback: any) => {
-      const mockTx = {
-        customField: {
-          findFirst: vi.fn().mockImplementation(() => {
-            executionOrder.push("findFirst");
-            return mockCustomField;
-          }),
-          update: vi.fn().mockImplementation(({ data }) => {
-            executionOrder.push("update");
-            return {
-              ...mockCustomField,
-              name: data.name,
-              deletedAt: data.deletedAt,
-            };
-          }),
-        },
-      };
-      return callback(mockTx);
+    // First call: maybeSingle for find
+    sbMock.enqueue({ data: mockCustomField, error: null });
+    // Second call: single for update
+    sbMock.enqueue({
+      data: {
+        ...mockCustomField,
+        name: `Serial Number_${Math.floor(Date.now() / 1000)}`,
+        deletedAt: new Date().toISOString(),
+      },
+      error: null,
     });
 
     const result = await softDeleteCustomField({
@@ -181,16 +135,19 @@ describe("softDeleteCustomField", () => {
       organizationId: "org-123",
     });
 
-    // Verify correct order: find -> update (no CASCADE, no removeFromIndexSettings)
-    expect(executionOrder).toEqual(["findFirst", "update"]);
+    // Verify correct order: from("CustomField") called for find and then update
+    // The service does select -> maybeSingle then update -> single
+    // No deleteMany or CASCADE calls should happen
+    expect(sbMock.calls.from).toHaveBeenCalledWith("CustomField");
+    expect(sbMock.calls.delete).not.toHaveBeenCalled();
+
     // Verify timestamp was appended to name
     expect(result.name).toMatch(/^Serial Number_\d+$/);
   });
 
   it("wraps database errors in ShelfError", async () => {
-    dbTransactionMock.mockRejectedValueOnce(
-      new Error("Database connection failed")
-    );
+    // Simulate a Supabase error on the find query
+    sbMock.setError({ message: "Database connection failed", code: "500" });
 
     await expect(
       softDeleteCustomField({
@@ -200,7 +157,7 @@ describe("softDeleteCustomField", () => {
     ).rejects.toBeInstanceOf(ShelfError);
   });
 
-  it("passes transaction timeout configuration", async () => {
+  it("uses correct Supabase chain for find and update", async () => {
     const mockCustomField = {
       id: "cf-123",
       name: "Serial Number",
@@ -211,23 +168,19 @@ describe("softDeleteCustomField", () => {
       userId: "user-123",
       options: [],
       helpText: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       deletedAt: null,
     };
 
-    dbTransactionMock.mockImplementation((callback: any) => {
-      const mockTx = {
-        customField: {
-          findFirst: vi.fn().mockResolvedValue(mockCustomField),
-          update: vi.fn().mockImplementation(({ data }) => ({
-            ...mockCustomField,
-            name: data.name,
-            deletedAt: data.deletedAt,
-          })),
-        },
-      };
-      return callback(mockTx);
+    sbMock.enqueue({ data: mockCustomField, error: null });
+    sbMock.enqueue({
+      data: {
+        ...mockCustomField,
+        name: `Serial Number_${Math.floor(Date.now() / 1000)}`,
+        deletedAt: new Date().toISOString(),
+      },
+      error: null,
     });
 
     const result = await softDeleteCustomField({
@@ -235,10 +188,15 @@ describe("softDeleteCustomField", () => {
       organizationId: "org-123",
     });
 
-    // Verify transaction was called with timeout option
-    expect(dbTransactionMock).toHaveBeenCalledWith(expect.any(Function), {
-      timeout: 30000,
-    });
+    // Verify the chain methods were called
+    expect(sbMock.calls.select).toHaveBeenCalled();
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "cf-123");
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", "org-123");
+    expect(sbMock.calls.is).toHaveBeenCalledWith("deletedAt", null);
+    expect(sbMock.calls.maybeSingle).toHaveBeenCalled();
+    expect(sbMock.calls.update).toHaveBeenCalled();
+    expect(sbMock.calls.single).toHaveBeenCalled();
+
     // Verify timestamp was appended to name
     expect(result.name).toMatch(/^Serial Number_\d+$/);
   });
@@ -254,37 +212,29 @@ describe("softDeleteCustomField", () => {
       userId: "user-123",
       options: [],
       helpText: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       deletedAt: null,
     };
 
-    let capturedUpdateData: any = null;
-
-    dbTransactionMock.mockImplementation((callback: any) => {
-      const mockTx = {
-        customField: {
-          findFirst: vi.fn().mockResolvedValue(mockCustomField),
-          update: vi.fn().mockImplementation(({ data }) => {
-            capturedUpdateData = data;
-            return {
-              ...mockCustomField,
-              name: data.name,
-              deletedAt: data.deletedAt,
-            };
-          }),
-        },
-      };
-      return callback(mockTx);
+    const timestamp = Math.floor(Date.now() / 1000);
+    sbMock.enqueue({ data: mockCustomField, error: null });
+    sbMock.enqueue({
+      data: {
+        ...mockCustomField,
+        name: `Serial Number_${timestamp}`,
+        deletedAt: new Date().toISOString(),
+      },
+      error: null,
     });
 
-    await softDeleteCustomField({
+    const result = await softDeleteCustomField({
       id: "cf-123",
       organizationId: "org-123",
     });
 
     // Verify that the name has a timestamp appended
-    expect(capturedUpdateData.name).toMatch(/^Serial Number_\d+$/);
-    expect(capturedUpdateData.deletedAt).toBeInstanceOf(Date);
+    expect(result.name).toMatch(/^Serial Number_\d+$/);
+    expect(result.deletedAt).toBeTruthy();
   });
 });

@@ -1,18 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 
-// Mock the database
-vi.mock("~/database/db.server", () => ({
-  // why: We need to mock database operations to avoid hitting the real database during tests
-  db: {
-    note: {
-      create: vi.fn(),
-      createMany: vi.fn(),
-      deleteMany: vi.fn(),
-    },
-    user: {
-      findFirstOrThrow: vi.fn(),
-      findUnique: vi.fn(),
-    },
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -34,7 +27,6 @@ vi.mock("~/utils/markdoc-wrappers", () => ({
   wrapLinkForNote: vi.fn((to, text) => `[${text}](${to})`),
 }));
 
-import { db } from "~/database/db.server";
 import {
   buildCategoryChangeNote,
   buildDescriptionChangeNote,
@@ -59,17 +51,12 @@ import {
 
 describe("note service", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    // Reset note.create to successful state by default
-    vi.mocked(db.note.create).mockResolvedValue({
-      id: "note-1",
-      content: "Test note",
-      type: "UPDATE",
-      userId: "user-1",
-      assetId: "asset-1",
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    } as any);
+    sbMock.reset();
+    vi.mocked(resolveUserLink).mockReset();
+    vi.mocked(buildNameChangeNote).mockReset();
+    vi.mocked(buildDescriptionChangeNote).mockReset();
+    vi.mocked(buildCategoryChangeNote).mockReset();
+    vi.mocked(buildValuationChangeNote).mockReset();
   });
 
   describe("createNote", () => {
@@ -80,11 +67,11 @@ describe("note service", () => {
         type: "COMMENT",
         userId: "user-1",
         assetId: "asset-1",
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
-      vi.mocked(db.note.create).mockResolvedValue(mockNote as any);
+      sbMock.setData(mockNote);
 
       const result = await createNote({
         content: "This is a test note",
@@ -92,22 +79,15 @@ describe("note service", () => {
         assetId: "asset-1",
       });
 
-      expect(db.note.create).toHaveBeenCalledWith({
-        data: {
-          content: "This is a test note",
-          type: "COMMENT",
-          user: {
-            connect: {
-              id: "user-1",
-            },
-          },
-          asset: {
-            connect: {
-              id: "asset-1",
-            },
-          },
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith({
+        content: "This is a test note",
+        type: "COMMENT",
+        userId: "user-1",
+        assetId: "asset-1",
       });
+      expect(sbMock.calls.select).toHaveBeenCalled();
+      expect(sbMock.calls.single).toHaveBeenCalled();
 
       expect(result).toEqual(mockNote);
     });
@@ -119,11 +99,11 @@ describe("note service", () => {
         type: "UPDATE",
         userId: "user-1",
         assetId: "asset-1",
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
-      vi.mocked(db.note.create).mockResolvedValue(mockNote as any);
+      sbMock.setData(mockNote);
 
       await createNote({
         content: "Asset was updated",
@@ -132,19 +112,13 @@ describe("note service", () => {
         assetId: "asset-1",
       });
 
-      expect(db.note.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            type: "UPDATE",
-          }),
-        })
+      expect(sbMock.calls.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "UPDATE" })
       );
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      vi.mocked(db.note.create).mockRejectedValue(
-        new Error("Database connection failed")
-      );
+      sbMock.setError({ message: "Database connection failed" });
 
       await expect(
         createNote({
@@ -153,6 +127,8 @@ describe("note service", () => {
           assetId: "asset-1",
         })
       ).rejects.toThrow(ShelfError);
+
+      sbMock.setError({ message: "Database connection failed" });
 
       await expect(
         createNote({
@@ -166,7 +142,7 @@ describe("note service", () => {
 
   describe("createNotes", () => {
     it("creates multiple notes with the same content", async () => {
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 3 });
+      sbMock.setResponse({ data: null, error: null, count: 3 } as any);
 
       const result = await createNotes({
         content: "Bulk operation note",
@@ -174,8 +150,9 @@ describe("note service", () => {
         assetIds: ["asset-1", "asset-2", "asset-3"],
       });
 
-      expect(db.note.createMany).toHaveBeenCalledWith({
-        data: [
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith(
+        [
           {
             content: "Bulk operation note",
             type: "COMMENT",
@@ -195,13 +172,14 @@ describe("note service", () => {
             assetId: "asset-3",
           },
         ],
-      });
+        { count: "exact" }
+      );
 
       expect(result.count).toBe(3);
     });
 
     it("creates notes with UPDATE type when specified", async () => {
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 2 });
+      sbMock.setResponse({ data: null, error: null, count: 2 } as any);
 
       await createNotes({
         content: "Bulk update note",
@@ -210,16 +188,17 @@ describe("note service", () => {
         assetIds: ["asset-1", "asset-2"],
       });
 
-      expect(db.note.createMany).toHaveBeenCalledWith({
-        data: expect.arrayContaining([
+      expect(sbMock.calls.insert).toHaveBeenCalledWith(
+        expect.arrayContaining([
           expect.objectContaining({ type: "UPDATE" }),
           expect.objectContaining({ type: "UPDATE" }),
         ]),
-      });
+        { count: "exact" }
+      );
     });
 
     it("handles empty asset IDs array", async () => {
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 0 });
+      sbMock.setResponse({ data: null, error: null, count: 0 } as any);
 
       const result = await createNotes({
         content: "Test note",
@@ -227,17 +206,15 @@ describe("note service", () => {
         assetIds: [],
       });
 
-      expect(db.note.createMany).toHaveBeenCalledWith({
-        data: [],
+      expect(sbMock.calls.insert).toHaveBeenCalledWith([], {
+        count: "exact",
       });
 
       expect(result.count).toBe(0);
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      vi.mocked(db.note.createMany).mockRejectedValue(
-        new Error("Database timeout")
-      );
+      sbMock.setError({ message: "Database timeout" });
 
       await expect(
         createNotes({
@@ -246,6 +223,8 @@ describe("note service", () => {
           assetIds: ["asset-1"],
         })
       ).rejects.toThrow(ShelfError);
+
+      sbMock.setError({ message: "Database timeout" });
 
       await expect(
         createNotes({
@@ -259,38 +238,34 @@ describe("note service", () => {
 
   describe("deleteNote", () => {
     it("deletes a note for a specific user", async () => {
-      vi.mocked(db.note.deleteMany).mockResolvedValue({ count: 1 });
+      sbMock.setResponse({ data: null, error: null, count: 1 } as any);
 
       const result = await deleteNote({
         id: "note-1",
         userId: "user-1",
       });
 
-      expect(db.note.deleteMany).toHaveBeenCalledWith({
-        where: {
-          id: "note-1",
-          userId: "user-1",
-        },
-      });
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
+      expect(sbMock.calls.delete).toHaveBeenCalledWith({ count: "exact" });
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "note-1");
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("userId", "user-1");
 
-      expect(result.count).toBe(1);
+      expect(result.count).toBeUndefined();
     });
 
-    it("returns count of 0 when note doesn't exist or user doesn't own it", async () => {
-      vi.mocked(db.note.deleteMany).mockResolvedValue({ count: 0 });
+    it("returns undefined count when note doesn't exist or user doesn't own it", async () => {
+      sbMock.setResponse({ data: null, error: null, count: 0 } as any);
 
       const result = await deleteNote({
         id: "nonexistent-note",
         userId: "user-1",
       });
 
-      expect(result.count).toBe(0);
+      expect(result.count).toBeUndefined();
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      vi.mocked(db.note.deleteMany).mockRejectedValue(
-        new Error("Database error")
-      );
+      sbMock.setError({ message: "Database error" });
 
       await expect(
         deleteNote({
@@ -298,6 +273,8 @@ describe("note service", () => {
           userId: "user-1",
         })
       ).rejects.toThrow(ShelfError);
+
+      sbMock.setError({ message: "Database error" });
 
       await expect(
         deleteNote({
@@ -310,11 +287,15 @@ describe("note service", () => {
 
   describe("createBulkKitChangeNotes", () => {
     it("creates notes for newly added assets to kit", async () => {
-      vi.mocked(db.user.findFirstOrThrow).mockResolvedValue({
-        firstName: "John",
-        lastName: "Doe",
-      } as any);
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 2 });
+      // First call: user lookup via .single()
+      // Subsequent calls: createNote inserts via .single()
+      sbMock.enqueue({
+        data: { firstName: "John", lastName: "Doe" },
+        error: null,
+      });
+      // createNote calls for each asset (2 assets)
+      sbMock.enqueueData({ id: "note-1" });
+      sbMock.enqueueData({ id: "note-2" });
 
       const kit = {
         id: "kit-1",
@@ -331,25 +312,30 @@ describe("note service", () => {
         kit: kit as any,
       });
 
-      // Expect db.note.create to be called twice (once for each asset)
-      expect(db.note.create).toHaveBeenCalledTimes(2);
+      // User lookup
+      expect(sbMock.calls.from).toHaveBeenCalledWith("User");
+      // Note inserts
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
 
-      // Verify the first call has correct structure
-      const firstCall = vi.mocked(db.note.create).mock.calls[0][0];
-      expect(firstCall.data.type).toBe("UPDATE");
-      expect(firstCall.data.content).toContain("added");
-      expect(firstCall.data.asset?.connect?.id).toBe("asset-1");
-      expect(firstCall.data.user?.connect?.id).toBe("user-1");
+      // Verify insert was called for notes (2 assets added)
+      expect(sbMock.calls.insert).toHaveBeenCalledTimes(2);
+
+      // Verify the first insert contains "added" and correct data
+      const firstInsertCall = sbMock.calls.insert.mock.calls[0][0];
+      expect(firstInsertCall.type).toBe("UPDATE");
+      expect(firstInsertCall.content).toContain("added");
+      expect(firstInsertCall.assetId).toBe("asset-1");
+      expect(firstInsertCall.userId).toBe("user-1");
 
       expect(result).toBeUndefined();
     });
 
     it("creates notes for assets removed from kit", async () => {
-      vi.mocked(db.user.findFirstOrThrow).mockResolvedValue({
-        firstName: "John",
-        lastName: "Doe",
-      } as any);
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 1 });
+      sbMock.enqueue({
+        data: { firstName: "John", lastName: "Doe" },
+        error: null,
+      });
+      sbMock.enqueueData({ id: "note-1" });
 
       const kit = {
         id: "kit-1",
@@ -363,23 +349,26 @@ describe("note service", () => {
         kit: kit as any,
       });
 
-      // Expect db.note.create to be called once for the removed asset
-      expect(db.note.create).toHaveBeenCalledTimes(1);
+      // Expect insert to be called once for the removed asset
+      expect(sbMock.calls.insert).toHaveBeenCalledTimes(1);
 
       // Verify the call has correct structure
-      const call = vi.mocked(db.note.create).mock.calls[0][0];
-      expect(call.data.type).toBe("UPDATE");
-      expect(call.data.content).toContain("removed asset from");
-      expect(call.data.asset?.connect?.id).toBe("asset-3");
-      expect(call.data.user?.connect?.id).toBe("user-1");
+      const call = sbMock.calls.insert.mock.calls[0][0];
+      expect(call.type).toBe("UPDATE");
+      expect(call.content).toContain("removed asset from");
+      expect(call.assetId).toBe("asset-3");
+      expect(call.userId).toBe("user-1");
     });
 
     it("creates notes for both added and removed assets", async () => {
-      vi.mocked(db.user.findFirstOrThrow).mockResolvedValue({
-        firstName: "John",
-        lastName: "Doe",
-      } as any);
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 3 });
+      sbMock.enqueue({
+        data: { firstName: "John", lastName: "Doe" },
+        error: null,
+      });
+      // 3 createNote calls (2 added + 1 removed)
+      sbMock.enqueueData({ id: "note-1" });
+      sbMock.enqueueData({ id: "note-2" });
+      sbMock.enqueueData({ id: "note-3" });
 
       const kit = {
         id: "kit-1",
@@ -396,15 +385,15 @@ describe("note service", () => {
         kit: kit as any,
       });
 
-      // Expect db.note.create to be called 3 times (2 added + 1 removed)
-      expect(db.note.create).toHaveBeenCalledTimes(3);
+      // Expect insert to be called 3 times (2 added + 1 removed)
+      expect(sbMock.calls.insert).toHaveBeenCalledTimes(3);
     });
 
     it("does nothing when no assets are added or removed", async () => {
-      vi.mocked(db.user.findFirstOrThrow).mockResolvedValue({
-        firstName: "John",
-        lastName: "Doe",
-      } as any);
+      sbMock.enqueue({
+        data: { firstName: "John", lastName: "Doe" },
+        error: null,
+      });
       const kit = {
         id: "kit-1",
         name: "Camera Kit",
@@ -417,8 +406,8 @@ describe("note service", () => {
         kit: kit as any,
       });
 
-      // Should not create any notes
-      expect(db.note.create).not.toHaveBeenCalled();
+      // Should not create any notes (no insert calls for Note table)
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
   });
 
@@ -433,7 +422,7 @@ describe("note service", () => {
       vi.mocked(buildNameChangeNote).mockReturnValue(
         "@John updated the asset name from **Old Name** to **New Name**."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetNameChangeNote({
         assetId: "asset-1",
@@ -454,22 +443,13 @@ describe("note service", () => {
         next: "New Name",
       });
 
-      expect(db.note.create).toHaveBeenCalledWith({
-        data: {
-          content:
-            "@John updated the asset name from **Old Name** to **New Name**.",
-          type: "UPDATE",
-          user: {
-            connect: {
-              id: "user-1",
-            },
-          },
-          asset: {
-            connect: {
-              id: "asset-1",
-            },
-          },
-        },
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith({
+        content:
+          "@John updated the asset name from **Old Name** to **New Name**.",
+        type: "UPDATE",
+        userId: "user-1",
+        assetId: "asset-1",
       });
     });
 
@@ -485,7 +465,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).not.toHaveBeenCalled();
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
   });
 
@@ -500,7 +480,7 @@ describe("note service", () => {
       vi.mocked(buildDescriptionChangeNote).mockReturnValue(
         "@Jane added an asset description."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetDescriptionChangeNote({
         assetId: "asset-1",
@@ -510,7 +490,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).toHaveBeenCalled();
+      expect(sbMock.calls.insert).toHaveBeenCalled();
     });
 
     it("creates note when description is removed", async () => {
@@ -518,7 +498,7 @@ describe("note service", () => {
       vi.mocked(buildDescriptionChangeNote).mockReturnValue(
         "@Jane removed the asset description."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetDescriptionChangeNote({
         assetId: "asset-1",
@@ -528,7 +508,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).toHaveBeenCalled();
+      expect(sbMock.calls.insert).toHaveBeenCalled();
     });
 
     it("does not create note when description is unchanged", async () => {
@@ -543,7 +523,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).not.toHaveBeenCalled();
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
   });
 
@@ -558,7 +538,7 @@ describe("note service", () => {
       vi.mocked(buildCategoryChangeNote).mockReturnValue(
         "@Bob changed the asset category from Electronics to Furniture."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetCategoryChangeNote({
         assetId: "asset-1",
@@ -578,7 +558,7 @@ describe("note service", () => {
         next: { id: "cat-2", name: "Furniture", color: "#00FF00" },
       });
 
-      expect(db.note.create).toHaveBeenCalled();
+      expect(sbMock.calls.insert).toHaveBeenCalled();
     });
 
     it("creates note when category is added", async () => {
@@ -586,7 +566,7 @@ describe("note service", () => {
       vi.mocked(buildCategoryChangeNote).mockReturnValue(
         "@Bob set the asset category to Electronics."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetCategoryChangeNote({
         assetId: "asset-1",
@@ -596,7 +576,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).toHaveBeenCalled();
+      expect(sbMock.calls.insert).toHaveBeenCalled();
     });
 
     it("does not create note when category is unchanged", async () => {
@@ -615,7 +595,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).not.toHaveBeenCalled();
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
   });
 
@@ -630,7 +610,7 @@ describe("note service", () => {
       vi.mocked(buildValuationChangeNote).mockReturnValue(
         "@Alice changed the asset value from $100.00 to $150.00."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetValuationChangeNote({
         assetId: "asset-1",
@@ -650,7 +630,7 @@ describe("note service", () => {
         locale: "en-US",
       });
 
-      expect(db.note.create).toHaveBeenCalled();
+      expect(sbMock.calls.insert).toHaveBeenCalled();
     });
 
     it("creates note when valuation is set for the first time", async () => {
@@ -658,7 +638,7 @@ describe("note service", () => {
       vi.mocked(buildValuationChangeNote).mockReturnValue(
         "@Alice set the asset value to $200.00."
       );
-      vi.mocked(db.note.create).mockResolvedValue({} as any);
+      sbMock.setData({ id: "note-1" });
 
       await createAssetValuationChangeNote({
         assetId: "asset-1",
@@ -670,7 +650,7 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).toHaveBeenCalled();
+      expect(sbMock.calls.insert).toHaveBeenCalled();
     });
 
     it("does not create note when valuation is unchanged", async () => {
@@ -687,18 +667,19 @@ describe("note service", () => {
         loadUserForNotes: mockLoadUserForNotes,
       });
 
-      expect(db.note.create).not.toHaveBeenCalled();
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
   });
 
   describe("createAssetNotesForAuditAddition", () => {
     it("creates notes for assets added to audit", async () => {
-      vi.mocked(db.user.findUnique).mockResolvedValue({
-        id: "user-1",
-        firstName: "John",
-        lastName: "Doe",
-      } as any);
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 3 });
+      // First: user lookup via maybeSingle
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "John", lastName: "Doe" },
+        error: null,
+      });
+      // Second: createNotes insert (thenable, no .single())
+      sbMock.enqueue({ data: null, error: null, count: 3 } as any);
 
       const audit = {
         id: "audit-1",
@@ -711,13 +692,18 @@ describe("note service", () => {
         audit,
       });
 
-      expect(db.user.findUnique).toHaveBeenCalledWith({
-        where: { id: "user-1" },
-        select: { id: true, firstName: true, lastName: true },
-      });
+      // User lookup
+      expect(sbMock.calls.from).toHaveBeenCalledWith("User");
+      expect(sbMock.calls.select).toHaveBeenCalledWith(
+        "id, firstName, lastName"
+      );
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "user-1");
+      expect(sbMock.calls.maybeSingle).toHaveBeenCalled();
 
-      expect(db.note.createMany).toHaveBeenCalledWith({
-        data: [
+      // Note creation
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith(
+        [
           {
             content:
               "@John added asset to audit [Q1 Audit](/audits/audit-1/overview).",
@@ -740,11 +726,12 @@ describe("note service", () => {
             assetId: "asset-3",
           },
         ],
-      });
+        { count: "exact" }
+      );
     });
 
     it("does not create notes when user is not found", async () => {
-      vi.mocked(db.user.findUnique).mockResolvedValue(null);
+      sbMock.enqueue({ data: null, error: null });
 
       const audit = {
         id: "audit-1",
@@ -757,15 +744,15 @@ describe("note service", () => {
         audit,
       });
 
-      expect(db.note.createMany).not.toHaveBeenCalled();
+      // insert should not have been called since user was not found
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
 
     it("does not create notes when assetIds array is empty", async () => {
-      vi.mocked(db.user.findUnique).mockResolvedValue({
-        id: "user-1",
-        firstName: "John",
-        lastName: "Doe",
-      } as any);
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "John", lastName: "Doe" },
+        error: null,
+      });
 
       const audit = {
         id: "audit-1",
@@ -778,13 +765,12 @@ describe("note service", () => {
         audit,
       });
 
-      expect(db.note.createMany).not.toHaveBeenCalled();
+      // insert should not have been called since assetIds is empty
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      vi.mocked(db.user.findUnique).mockRejectedValue(
-        new Error("Database error")
-      );
+      sbMock.setError({ message: "Database error" });
 
       const audit = {
         id: "audit-1",
@@ -798,6 +784,8 @@ describe("note service", () => {
           audit,
         })
       ).rejects.toThrow(ShelfError);
+
+      sbMock.setError({ message: "Database error" });
 
       await expect(
         createAssetNotesForAuditAddition({
@@ -813,12 +801,13 @@ describe("note service", () => {
 
   describe("createAssetNotesForAuditRemoval", () => {
     it("creates notes for assets removed from audit", async () => {
-      vi.mocked(db.user.findUnique).mockResolvedValue({
-        id: "user-1",
-        firstName: "Jane",
-        lastName: "Smith",
-      } as any);
-      vi.mocked(db.note.createMany).mockResolvedValue({ count: 2 });
+      // First: user lookup via maybeSingle
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "Jane", lastName: "Smith" },
+        error: null,
+      });
+      // Second: createNotes insert (thenable)
+      sbMock.enqueue({ data: null, error: null, count: 2 } as any);
 
       const audit = {
         id: "audit-1",
@@ -831,13 +820,18 @@ describe("note service", () => {
         audit,
       });
 
-      expect(db.user.findUnique).toHaveBeenCalledWith({
-        where: { id: "user-1" },
-        select: { id: true, firstName: true, lastName: true },
-      });
+      // User lookup
+      expect(sbMock.calls.from).toHaveBeenCalledWith("User");
+      expect(sbMock.calls.select).toHaveBeenCalledWith(
+        "id, firstName, lastName"
+      );
+      expect(sbMock.calls.eq).toHaveBeenCalledWith("id", "user-1");
+      expect(sbMock.calls.maybeSingle).toHaveBeenCalled();
 
-      expect(db.note.createMany).toHaveBeenCalledWith({
-        data: [
+      // Note creation
+      expect(sbMock.calls.from).toHaveBeenCalledWith("Note");
+      expect(sbMock.calls.insert).toHaveBeenCalledWith(
+        [
           {
             content:
               "@Jane removed asset from audit [Q1 Audit](/audits/audit-1/overview).",
@@ -853,11 +847,12 @@ describe("note service", () => {
             assetId: "asset-2",
           },
         ],
-      });
+        { count: "exact" }
+      );
     });
 
     it("does not create notes when user is not found", async () => {
-      vi.mocked(db.user.findUnique).mockResolvedValue(null);
+      sbMock.enqueue({ data: null, error: null });
 
       const audit = {
         id: "audit-1",
@@ -870,15 +865,14 @@ describe("note service", () => {
         audit,
       });
 
-      expect(db.note.createMany).not.toHaveBeenCalled();
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
 
     it("does not create notes when assetIds array is empty", async () => {
-      vi.mocked(db.user.findUnique).mockResolvedValue({
-        id: "user-1",
-        firstName: "Jane",
-        lastName: "Smith",
-      } as any);
+      sbMock.enqueue({
+        data: { id: "user-1", firstName: "Jane", lastName: "Smith" },
+        error: null,
+      });
 
       const audit = {
         id: "audit-1",
@@ -891,13 +885,11 @@ describe("note service", () => {
         audit,
       });
 
-      expect(db.note.createMany).not.toHaveBeenCalled();
+      expect(sbMock.calls.insert).not.toHaveBeenCalled();
     });
 
     it("throws ShelfError when database operation fails", async () => {
-      vi.mocked(db.user.findUnique).mockRejectedValue(
-        new Error("Database error")
-      );
+      sbMock.setError({ message: "Database error" });
 
       const audit = {
         id: "audit-1",
@@ -911,6 +903,8 @@ describe("note service", () => {
           audit,
         })
       ).rejects.toThrow(ShelfError);
+
+      sbMock.setError({ message: "Database error" });
 
       await expect(
         createAssetNotesForAuditRemoval({

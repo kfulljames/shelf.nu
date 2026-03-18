@@ -1,42 +1,57 @@
 // @vitest-environment node
 import { OrganizationRoles } from "@prisma/client";
-import { describe, expect, it, vi } from "vitest";
-import { db } from "~/database/db.server";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { createSupabaseMock } from "@mocks/supabase";
 import { ShelfError } from "~/utils/error";
 import { changeUserRole } from "./service.server";
 
-// why: testing role change validation logic without actual database operations
-vi.mock("~/database/db.server", () => ({
-  db: {
-    userOrganization: {
-      findFirst: vi.fn(),
-      update: vi.fn(),
-    },
+const sbMock = createSupabaseMock();
+// why: testing role change validation logic without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
+
+beforeEach(() => {
+  sbMock.reset();
+});
 
 const ORG_ID = "org-1";
 const USER_ID = "user-1";
 
 function mockUserOrg(roles: OrganizationRoles[]) {
-  vi.mocked(db.userOrganization.findFirst).mockResolvedValue({
+  sbMock.setData({
     id: "uo-1",
     userId: USER_ID,
     organizationId: ORG_ID,
     roles,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   });
 }
 
-function mockUpdateSuccess(newRole: OrganizationRoles) {
-  vi.mocked(db.userOrganization.update).mockResolvedValue({
+function mockFindThenUpdate(
+  roles: OrganizationRoles[],
+  newRole: OrganizationRoles
+) {
+  // First call: maybeSingle (find)
+  sbMock.enqueueData({
+    id: "uo-1",
+    userId: USER_ID,
+    organizationId: ORG_ID,
+    roles,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  // Second call: single (update)
+  sbMock.enqueueData({
     id: "uo-1",
     userId: USER_ID,
     organizationId: ORG_ID,
     roles: [newRole],
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   });
 }
 
@@ -62,7 +77,8 @@ describe("changeUserRole", () => {
   });
 
   it("rejects when user is not a member", async () => {
-    vi.mocked(db.userOrganization.findFirst).mockResolvedValue(null);
+    // maybeSingle returns null
+    sbMock.setData(null);
 
     await expect(
       changeUserRole({
@@ -114,8 +130,7 @@ describe("changeUserRole", () => {
   });
 
   it("allows OWNER to promote BASE to ADMIN", async () => {
-    mockUserOrg([OrganizationRoles.BASE]);
-    mockUpdateSuccess(OrganizationRoles.ADMIN);
+    mockFindThenUpdate([OrganizationRoles.BASE], OrganizationRoles.ADMIN);
 
     const result = await changeUserRole({
       userId: USER_ID,
@@ -125,22 +140,16 @@ describe("changeUserRole", () => {
     });
 
     expect(result.previousRole).toBe(OrganizationRoles.BASE);
-    expect(db.userOrganization.update).toHaveBeenCalledWith({
-      where: {
-        userId_organizationId: {
-          userId: USER_ID,
-          organizationId: ORG_ID,
-        },
-      },
-      data: {
-        roles: { set: [OrganizationRoles.ADMIN] },
-      },
+    expect(sbMock.calls.from).toHaveBeenCalledWith("UserOrganization");
+    expect(sbMock.calls.update).toHaveBeenCalledWith({
+      roles: [OrganizationRoles.ADMIN],
     });
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("userId", USER_ID);
+    expect(sbMock.calls.eq).toHaveBeenCalledWith("organizationId", ORG_ID);
   });
 
   it("allows OWNER to demote ADMIN to BASE", async () => {
-    mockUserOrg([OrganizationRoles.ADMIN]);
-    mockUpdateSuccess(OrganizationRoles.BASE);
+    mockFindThenUpdate([OrganizationRoles.ADMIN], OrganizationRoles.BASE);
 
     const result = await changeUserRole({
       userId: USER_ID,
@@ -153,8 +162,10 @@ describe("changeUserRole", () => {
   });
 
   it("allows ADMIN to change BASE to SELF_SERVICE", async () => {
-    mockUserOrg([OrganizationRoles.BASE]);
-    mockUpdateSuccess(OrganizationRoles.SELF_SERVICE);
+    mockFindThenUpdate(
+      [OrganizationRoles.BASE],
+      OrganizationRoles.SELF_SERVICE
+    );
 
     const result = await changeUserRole({
       userId: USER_ID,

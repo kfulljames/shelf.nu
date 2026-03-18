@@ -1,5 +1,5 @@
 import { BookingStatus } from "@prisma/client";
-import { db } from "~/database/db.server";
+import { createSupabaseMock } from "@mocks/supabase";
 import { Logger } from "~/utils/logger";
 import { scheduler } from "~/utils/scheduler.server";
 import { BOOKING_SCHEDULER_EVENTS_ENUM } from "./constants";
@@ -9,16 +9,11 @@ import { registerBookingWorkers } from "./worker.server";
 
 // @vitest-environment node
 
-// why: testing worker handlers without executing actual database operations
-vitest.mock("~/database/db.server", () => ({
-  db: {
-    booking: {
-      findUnique: vitest.fn().mockResolvedValue(null),
-      update: vitest.fn().mockResolvedValue({}),
-    },
-    bookingSettings: {
-      findUnique: vitest.fn().mockResolvedValue(null),
-    },
+const sbMock = createSupabaseMock();
+// why: testing worker handlers without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -117,6 +112,7 @@ describe("autoArchiveHandler", () => {
   });
 
   beforeEach(() => {
+    sbMock.reset();
     vitest.clearAllMocks();
   });
 
@@ -136,27 +132,25 @@ describe("autoArchiveHandler", () => {
       organizationId: "org-1",
     };
 
-    //@ts-expect-error missing vitest type
-    db.booking.findUnique.mockResolvedValue(mockBooking);
-    //@ts-expect-error missing vitest type
-    db.bookingSettings.findUnique.mockResolvedValue({
-      autoArchiveBookings: true,
-    });
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockResolvedValue({
-      ...mockBooking,
+    // 1st call (maybeSingle): fetch booking
+    sbMock.enqueueData(mockBooking);
+    // 2nd call (maybeSingle): fetch booking settings
+    sbMock.enqueueData({ autoArchiveBookings: true });
+    // 3rd call (maybeSingle): archive update returns updated booking
+    sbMock.enqueueData({
+      id: "booking-1",
       status: BookingStatus.ARCHIVED,
+      custodianUserId: "user-1",
     });
 
     await workerHandler(mockJob);
 
-    expect(db.booking.update).toHaveBeenCalledWith(
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Booking");
+    expect(sbMock.calls.from).toHaveBeenCalledWith("BookingSettings");
+    expect(sbMock.calls.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "booking-1", status: BookingStatus.COMPLETE },
-        data: expect.objectContaining({
-          status: BookingStatus.ARCHIVED,
-          autoArchivedAt: expect.any(Date),
-        }),
+        status: "ARCHIVED",
+        autoArchivedAt: expect.any(String),
       })
     );
     expect(createStatusTransitionNote).toHaveBeenCalledWith({
@@ -169,20 +163,20 @@ describe("autoArchiveHandler", () => {
   });
 
   it("should skip when booking not found", async () => {
-    //@ts-expect-error missing vitest type
-    db.booking.findUnique.mockResolvedValue(null);
+    // maybeSingle returns null for booking lookup
+    sbMock.setData(null);
 
     await workerHandler(mockJob);
 
     expect(Logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("not found")
     );
-    expect(db.booking.update).not.toHaveBeenCalled();
+    expect(sbMock.calls.update).not.toHaveBeenCalled();
   });
 
   it("should skip when booking is no longer COMPLETE", async () => {
-    //@ts-expect-error missing vitest type
-    db.booking.findUnique.mockResolvedValue({
+    // maybeSingle returns booking with non-COMPLETE status
+    sbMock.setData({
       id: "booking-1",
       status: BookingStatus.ARCHIVED,
       custodianUserId: "user-1",
@@ -194,44 +188,40 @@ describe("autoArchiveHandler", () => {
     expect(Logger.info).toHaveBeenCalledWith(
       expect.stringContaining("no longer COMPLETE")
     );
-    expect(db.booking.update).not.toHaveBeenCalled();
+    expect(sbMock.calls.update).not.toHaveBeenCalled();
   });
 
   it("should skip when auto-archive is disabled for org", async () => {
-    //@ts-expect-error missing vitest type
-    db.booking.findUnique.mockResolvedValue({
+    // 1st call: booking fetch
+    sbMock.enqueueData({
       id: "booking-1",
       status: BookingStatus.COMPLETE,
       custodianUserId: "user-1",
       organizationId: "org-1",
     });
-    //@ts-expect-error missing vitest type
-    db.bookingSettings.findUnique.mockResolvedValue({
-      autoArchiveBookings: false,
-    });
+    // 2nd call: booking settings fetch
+    sbMock.enqueueData({ autoArchiveBookings: false });
 
     await workerHandler(mockJob);
 
     expect(Logger.info).toHaveBeenCalledWith(
       expect.stringContaining("disabled for organization")
     );
-    expect(db.booking.update).not.toHaveBeenCalled();
+    expect(sbMock.calls.update).not.toHaveBeenCalled();
   });
 
   it("should skip on concurrent modification", async () => {
-    //@ts-expect-error missing vitest type
-    db.booking.findUnique.mockResolvedValue({
+    // 1st call: booking fetch
+    sbMock.enqueueData({
       id: "booking-1",
       status: BookingStatus.COMPLETE,
       custodianUserId: "user-1",
       organizationId: "org-1",
     });
-    //@ts-expect-error missing vitest type
-    db.bookingSettings.findUnique.mockResolvedValue({
-      autoArchiveBookings: true,
-    });
-    //@ts-expect-error missing vitest type
-    db.booking.update.mockRejectedValue(new Error("concurrent modification"));
+    // 2nd call: booking settings fetch
+    sbMock.enqueueData({ autoArchiveBookings: true });
+    // 3rd call: archive update returns null (concurrent modification)
+    sbMock.enqueueData(null);
 
     await workerHandler(mockJob);
 
@@ -241,8 +231,8 @@ describe("autoArchiveHandler", () => {
   });
 
   it("should handle errors gracefully", async () => {
-    //@ts-expect-error missing vitest type
-    db.booking.findUnique.mockRejectedValue(new Error("DB connection error"));
+    // Simulate a Supabase error on the first query
+    sbMock.setError({ message: "DB connection error" });
 
     await workerHandler(mockJob);
 
