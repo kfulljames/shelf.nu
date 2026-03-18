@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-type SupaResponse = { data: unknown; error: unknown };
+type SupaResponse = { data: unknown; error: unknown; count?: number };
 
 /**
  * Creates a chainable mock that simulates the Supabase PostgREST client.

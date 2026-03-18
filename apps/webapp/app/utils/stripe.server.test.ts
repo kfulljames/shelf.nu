@@ -406,16 +406,15 @@ describe("getOwnerSubscriptionInfo", () => {
   });
 
   it("should return hasActiveSubscription false when user has no customerId", async () => {
-    // sbDb calls: first for getUserActiveSubscriptions, second for tierId lookup
-    sbMock.enqueueData({ customerId: null });
-    sbMock.enqueueData({ tierId: "free" });
+    // Single sbDb call: user lookup returns customerId=null, tierId=null
+    sbMock.enqueueData({ customerId: null, tierId: null });
 
     const result = await getOwnerSubscriptionInfo("owner_1", "org_1");
 
     expect(result).toEqual({
       hasActiveSubscription: false,
       subscriptions: [],
-      tierId: "free",
+      tierId: null,
     });
   });
 

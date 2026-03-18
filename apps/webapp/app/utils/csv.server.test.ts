@@ -467,9 +467,9 @@ describe("buildCsvExportDataFromTeamMembers", () => {
   it("returns CSV content with headers and row values", () => {
     const csv = buildCsvExportDataFromTeamMembers({
       teamMembers: [
-        { id: "tm-1", name: "Alex", _count: { custodies: 3 } },
-        { id: "tm-2", name: "Riley", _count: { custodies: 0 } },
-      ] as any,
+        { id: "tm-1", name: "Alex", custodyCount: 3 },
+        { id: "tm-2", name: "Riley", custodyCount: 0 },
+      ],
     });
 
     expect(csv).toBe(
