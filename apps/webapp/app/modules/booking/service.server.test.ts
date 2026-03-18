@@ -2824,7 +2824,7 @@ describe("extendBooking", () => {
       },
     });
 
-    const result = await extendBooking({
+    await extendBooking({
       id: "booking-1",
       organizationId: "org-1",
       newEndDate: new Date("2025-01-02T17:00:00Z"),
