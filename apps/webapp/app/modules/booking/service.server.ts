@@ -250,10 +250,18 @@ export async function scheduleNextBookingJob({
       {},
       when
     );
-    await db.booking.update({
-      where: { id: data.id },
-      data: { activeSchedulerReference: id },
-    });
+    const { error: updateError } = await sbDb
+      .from("Booking")
+      .update({ activeSchedulerReference: id })
+      .eq("id", data.id);
+    if (updateError) {
+      throw new ShelfError({
+        cause: updateError,
+        message: "Failed to update booking scheduler reference.",
+        additionalData: { bookingId: data.id },
+        label,
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -269,13 +277,23 @@ async function updateBookingAssetStates(
   status: AssetStatus
 ) {
   try {
-    return await db.asset.updateMany({
-      where: {
-        status: { not: status },
-        id: { in: booking.assets.map((a) => a.id) },
-      },
-      data: { status },
-    });
+    const { error } = await sbDb
+      .from("Asset")
+      .update({ status })
+      .in(
+        "id",
+        booking.assets.map((a) => a.id)
+      )
+      .neq("status", status);
+    if (error) {
+      throw new ShelfError({
+        cause: error,
+        message:
+          "Something went wrong while updating the booking asset states.",
+        additionalData: { booking, status },
+        label,
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -294,10 +312,18 @@ async function updateBookingKitStates({
   status: KitStatus;
 }) {
   try {
-    return await db.kit.updateMany({
-      where: { id: { in: kitIds } },
-      data: { status },
-    });
+    const { error } = await sbDb
+      .from("Kit")
+      .update({ status })
+      .in("id", kitIds);
+    if (error) {
+      throw new ShelfError({
+        cause: error,
+        message: "Something went wrong while updating the booking kit states.",
+        additionalData: { kitIds, status },
+        label,
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -733,10 +759,17 @@ export async function updateBasicBooking({
         booking.tags.map((tag) => tag.name).join(", ") || "(none)";
 
       // Get new tag names - we need to fetch them since we only have IDs
-      const newTags = await db.tag.findMany({
-        where: { id: { in: newTagIds } },
-        select: { name: true },
-      });
+      const { data: newTags, error: newTagsError } = await sbDb
+        .from("Tag")
+        .select("name")
+        .in("id", newTagIds);
+      if (newTagsError) {
+        throw new ShelfError({
+          cause: newTagsError,
+          message: "Failed to fetch tag names.",
+          label,
+        });
+      }
       const newTagNames = newTags.map((tag) => tag.name).join(", ") || "(none)";
 
       await createSystemBookingNote({
@@ -1607,13 +1640,18 @@ export async function checkinBooking({
      * Check if auto-archive is enabled for this organization
      * and schedule the auto-archive job if needed
      */
-    const bookingSettings = await db.bookingSettings.findUnique({
-      where: { organizationId: updatedBooking.organizationId },
-      select: {
-        autoArchiveBookings: true,
-        autoArchiveDays: true,
-      },
-    });
+    const { data: bookingSettings, error: bookingSettingsError } = await sbDb
+      .from("BookingSettings")
+      .select("autoArchiveBookings, autoArchiveDays")
+      .eq("organizationId", updatedBooking.organizationId)
+      .maybeSingle();
+    if (bookingSettingsError) {
+      throw new ShelfError({
+        cause: bookingSettingsError,
+        message: "Failed to fetch booking settings.",
+        label,
+      });
+    }
 
     if (bookingSettings?.autoArchiveBookings) {
       const when = new Date();
@@ -1712,10 +1750,20 @@ export async function partialCheckinBooking({
 
     // Early exit: If we're checking in all remaining CHECKED_OUT assets, do a complete check-in instead
     // First, get the current status of all assets in the booking
-    const currentAssetStatuses = await db.asset.findMany({
-      where: { id: { in: bookingFound.assets.map((a) => a.id) } },
-      select: { id: true, status: true },
-    });
+    const { data: currentAssetStatuses, error: assetStatusError } = await sbDb
+      .from("Asset")
+      .select("id, status")
+      .in(
+        "id",
+        bookingFound.assets.map((a) => a.id)
+      );
+    if (assetStatusError) {
+      throw new ShelfError({
+        cause: assetStatusError,
+        message: "Failed to fetch asset statuses.",
+        label,
+      });
+    }
 
     // Find assets that are still CHECKED_OUT (not yet checked in)
     const checkedOutAssets = currentAssetStatuses.filter(
@@ -2015,20 +2063,37 @@ export async function updateBookingAssets({
       });
     }
 
-    const booking = await db.booking.findUniqueOrThrow({
-      where: { id, organizationId },
-      select: { id: true, name: true, status: true },
-    });
+    const { data: booking, error: bookingError } = await sbDb
+      .from("Booking")
+      .select("id, name, status")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingError || !booking) {
+      throw new ShelfError({
+        cause: bookingError,
+        message: "Booking not found.",
+        label,
+      });
+    }
 
     // BOOKING ACTIVITY LOG: Log asset addition activity
     // Creates user-attributed note when assets are added to a booking
     // Skip note creation if kits are involved - kit notes are created separately
     if (!kitIds || kitIds.length === 0) {
       // Fetch asset data to use proper wrapper for single assets
-      const assets = await db.asset.findMany({
-        where: { id: { in: assetIds }, organizationId },
-        select: { id: true, title: true },
-      });
+      const { data: assets, error: assetsError } = await sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", assetIds)
+        .eq("organizationId", organizationId);
+      if (assetsError) {
+        throw new ShelfError({
+          cause: assetsError,
+          message: "Failed to fetch assets.",
+          label,
+        });
+      }
 
       const assetContent = wrapAssetsWithDataForNote(assets, "added");
 
@@ -2115,20 +2180,21 @@ export async function archiveBooking({
   userId?: string;
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: { id: true, status: true, activeSchedulerReference: true },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          title: "Not found",
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    const { data: booking, error: bookingFetchError } = await sbDb
+      .from("Booking")
+      .select("id, status, activeSchedulerReference")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingFetchError || !booking) {
+      throw new ShelfError({
+        cause: bookingFetchError,
+        label,
+        title: "Not found",
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
 
     /** Booking can be archived only if it is COMPLETE */
     if (booking.status !== BookingStatus.COMPLETE) {
@@ -2139,10 +2205,19 @@ export async function archiveBooking({
       });
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: { status: BookingStatus.ARCHIVED },
-    });
+    const { data: updatedBooking, error: updateError } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.ARCHIVED })
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateError || !updatedBooking) {
+      throw new ShelfError({
+        cause: updateError,
+        label,
+        message: "Failed to archive booking.",
+      });
+    }
 
     // Cancel any pending auto-archive job
     await cancelScheduler(booking);
@@ -2298,19 +2373,20 @@ export async function revertBookingToDraft({
   userId?: User["id"];
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: { id: true, status: true },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          message:
-            "Booking not found, are you sure the booking exists in current workspace?",
-        });
+    const { data: booking, error: bookingFetchError } = await sbDb
+      .from("Booking")
+      .select("id, status")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingFetchError || !booking) {
+      throw new ShelfError({
+        cause: bookingFetchError,
+        label,
+        message:
+          "Booking not found, are you sure the booking exists in current workspace?",
       });
+    }
 
     /** User can only revert the booking to DRAFT from RESERVED */
     if (booking.status !== BookingStatus.RESERVED) {
@@ -2321,10 +2397,19 @@ export async function revertBookingToDraft({
       });
     }
 
-    const cancelledBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: { status: BookingStatus.DRAFT },
-    });
+    const { data: cancelledBooking, error: updateError } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.DRAFT })
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateError || !cancelledBooking) {
+      throw new ShelfError({
+        cause: updateError,
+        label,
+        message: "Failed to revert booking to draft.",
+      });
+    }
 
     // Add activity log for booking revert to draft
     if (userId) {
@@ -2643,12 +2728,19 @@ export async function getBookingsFilterData({
   // Only fetch team member data if the user doesn't have permission to see all bookings
   if (!canSeeAllBookings) {
     // Get the team member for the current user
-    const teamMember = await db.teamMember.findFirst({
-      where: {
-        userId,
-        organizationId,
-      },
-    });
+    const { data: teamMember, error: teamMemberError } = await sbDb
+      .from("TeamMember")
+      .select("*")
+      .eq("userId", userId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+    if (teamMemberError) {
+      throw new ShelfError({
+        cause: teamMemberError,
+        message: "Failed to fetch team member.",
+        label: "Booking",
+      });
+    }
 
     if (!teamMember) {
       throw new ShelfError({
@@ -3034,16 +3126,34 @@ export async function removeAssets({
       b.status === BookingStatus.ONGOING ||
       b.status === BookingStatus.OVERDUE
     ) {
-      await db.asset.updateMany({
-        where: { id: { in: assetIds }, organizationId },
-        data: { status: AssetStatus.AVAILABLE },
-      });
+      const { error: assetUpdateError } = await sbDb
+        .from("Asset")
+        .update({ status: AssetStatus.AVAILABLE })
+        .in("id", assetIds)
+        .eq("organizationId", organizationId);
+      if (assetUpdateError) {
+        throw new ShelfError({
+          cause: assetUpdateError,
+          message:
+            "Failed to update asset statuses after removing from booking.",
+          label,
+        });
+      }
 
       if (kitIds.length > 0) {
-        await db.kit.updateMany({
-          where: { id: { in: kitIds }, organizationId },
-          data: { status: KitStatus.AVAILABLE },
-        });
+        const { error: kitUpdateError } = await sbDb
+          .from("Kit")
+          .update({ status: KitStatus.AVAILABLE })
+          .in("id", kitIds)
+          .eq("organizationId", organizationId);
+        if (kitUpdateError) {
+          throw new ShelfError({
+            cause: kitUpdateError,
+            message:
+              "Failed to update kit statuses after removing from booking.",
+            label,
+          });
+        }
       }
     }
 
@@ -4198,10 +4308,18 @@ export async function addScannedAssetsToBooking({
     if (rpcError) throw rpcError;
 
     /** Fetch booking details for notes and return */
-    const updatedBooking = await db.booking.findUniqueOrThrow({
-      where: { id: bookingId },
-      select: { id: true, name: true, status: true },
-    });
+    const { data: updatedBooking, error: bookingFetchError } = await sbDb
+      .from("Booking")
+      .select("id, name, status")
+      .eq("id", bookingId)
+      .single();
+    if (bookingFetchError || !updatedBooking) {
+      throw new ShelfError({
+        cause: bookingFetchError,
+        message: "Booking not found.",
+        label,
+      });
+    }
 
     /** Step 2: Create activity notes */
     await createNotesForScannedAssetsAndKits({
@@ -4264,10 +4382,17 @@ export async function getAvailableAssetsIdsForBooking(
   assetIds: Asset["id"][]
 ): Promise<string[]> {
   try {
-    const selectedAssets = await db.asset.findMany({
-      where: { id: { in: assetIds } },
-      select: { status: true, id: true, kitId: true },
-    });
+    const { data: selectedAssets, error: assetsError } = await sbDb
+      .from("Asset")
+      .select("status, id, kitId")
+      .in("id", assetIds);
+    if (assetsError) {
+      throw new ShelfError({
+        cause: assetsError,
+        message: "Failed to fetch assets.",
+        label: "Booking",
+      });
+    }
 
     if (selectedAssets.some((asset) => asset.kitId)) {
       throw new ShelfError({
@@ -4465,10 +4590,18 @@ export async function duplicateBooking({
  * Check if a booking has any partial check-ins
  */
 export async function hasPartialCheckins(bookingId: string): Promise<boolean> {
-  const count = await db.partialBookingCheckin.count({
-    where: { bookingId },
-  });
-  return count > 0;
+  const { count, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("id", { count: "exact", head: true })
+    .eq("bookingId", bookingId);
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to check partial check-ins.",
+      label,
+    });
+  }
+  return (count ?? 0) > 0;
 }
 
 /**
@@ -4509,13 +4642,20 @@ export async function getTotalPartialCheckinCount(
 export async function getPartiallyCheckedInAssetIds(
   bookingId: string
 ): Promise<string[]> {
-  const partialCheckins = await db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    select: { assetIds: true },
-  });
+  const { data: partialCheckins, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("assetIds")
+    .eq("bookingId", bookingId);
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to fetch partial check-in asset IDs.",
+      label,
+    });
+  }
 
   // Flatten all asset ID arrays and get unique values
-  const allAssetIds = partialCheckins.flatMap((pc) => pc.assetIds);
+  const allAssetIds = (partialCheckins ?? []).flatMap((pc) => pc.assetIds);
   return [...new Set(allAssetIds)];
 }
 

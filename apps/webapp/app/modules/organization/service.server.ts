@@ -105,25 +105,55 @@ export async function getOrganizationsBySsoDomain(emailDomain: string) {
     }
 
     // Query for organizations where the domain field contains the email domain
-    const organizations = await db.organization.findMany({
-      where: {
-        ssoDetails: {
-          isNot: null,
-        },
-        AND: [
-          {
-            ssoDetails: {
-              domain: {
-                contains: emailDomain,
-              },
-            },
-          },
-        ],
-      },
-      include: {
-        ssoDetails: true,
-      },
-    });
+    // Organization has ssoDetailsId FK → SsoDetails
+    const { data: orgs, error: orgsError } = await sbDb
+      .from("Organization")
+      .select("*")
+      .not("ssoDetailsId", "is", null);
+
+    if (orgsError) throw orgsError;
+    if (!orgs || orgs.length === 0) return [];
+
+    // Fetch SsoDetails for these orgs
+    const ssoDetailIds = orgs
+      .map((o) => o.ssoDetailsId)
+      .filter(Boolean) as string[];
+    const { data: ssoDetails, error: ssoError } = await sbDb
+      .from("SsoDetails")
+      .select("*")
+      .in("id", ssoDetailIds)
+      .ilike("domain", `%${emailDomain}%`);
+
+    if (ssoError) throw ssoError;
+    if (!ssoDetails || ssoDetails.length === 0) return [];
+
+    const ssoDetailMap = new Map(ssoDetails.map((s) => [s.id, s]));
+
+    // Combine org + ssoDetails for downstream compatibility
+    // Cast date strings to Date objects for Prisma type compatibility
+    const organizations = orgs
+      .filter((org) => org.ssoDetailsId && ssoDetailMap.has(org.ssoDetailsId))
+      .map((org) => {
+        const sso = ssoDetailMap.get(org.ssoDetailsId!) ?? null;
+        return {
+          ...org,
+          createdAt: new Date(org.createdAt),
+          updatedAt: new Date(org.updatedAt),
+          barcodesEnabledAt: org.barcodesEnabledAt
+            ? new Date(org.barcodesEnabledAt)
+            : null,
+          auditsEnabledAt: org.auditsEnabledAt
+            ? new Date(org.auditsEnabledAt)
+            : null,
+          ssoDetails: sso
+            ? {
+                ...sso,
+                createdAt: new Date(sso.createdAt),
+                updatedAt: new Date(sso.updatedAt),
+              }
+            : null,
+        };
+      });
 
     // Filter to ensure exact domain matches
     return organizations.filter((org) =>
@@ -151,14 +181,20 @@ export async function createOrganization({
   image: File | null;
 }) {
   try {
-    const owner = await db.user.findFirstOrThrow({
-      where: { id: userId },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-      },
-    });
+    const { data: owner, error: ownerError } = await sbDb
+      .from("User")
+      .select("id, firstName, lastName")
+      .eq("id", userId)
+      .single();
+
+    if (ownerError || !owner) {
+      throw new ShelfError({
+        cause: ownerError,
+        message: "User not found",
+        additionalData: { userId },
+        label,
+      });
+    }
 
     const data = {
       name,
@@ -419,23 +455,25 @@ export async function getOrganizationAdminsEmails({
   organizationId: string;
 }) {
   try {
-    const admins = await db.userOrganization.findMany({
-      where: {
-        organizationId,
-        roles: {
-          hasSome: [OrganizationRoles.OWNER, OrganizationRoles.ADMIN],
-        },
-      },
-      select: {
-        user: {
-          select: {
-            email: true,
-          },
-        },
-      },
-    });
+    const { data: adminOrgs, error: adminOrgsError } = await sbDb
+      .from("UserOrganization")
+      .select("userId")
+      .eq("organizationId", organizationId)
+      .overlaps("roles", [OrganizationRoles.OWNER, OrganizationRoles.ADMIN]);
 
-    return admins.map((a) => a.user.email);
+    if (adminOrgsError) throw adminOrgsError;
+
+    const adminUserIds = (adminOrgs ?? []).map((a) => a.userId);
+    if (adminUserIds.length === 0) return [];
+
+    const { data: users, error: usersError } = await sbDb
+      .from("User")
+      .select("email")
+      .in("id", adminUserIds);
+
+    if (usersError) throw usersError;
+
+    return (users ?? []).map((u) => u.email);
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -661,16 +699,25 @@ export async function getOrganizationAdmins({
 }) {
   try {
     /** Get all the admins in current organization */
-    const admins = await db.userOrganization.findMany({
-      where: { organizationId, roles: { has: OrganizationRoles.ADMIN } },
-      select: {
-        user: {
-          select: { id: true, firstName: true, lastName: true, email: true },
-        },
-      },
-    });
+    const { data: admins, error: adminsError } = await sbDb
+      .from("UserOrganization")
+      .select("userId")
+      .eq("organizationId", organizationId)
+      .contains("roles", [OrganizationRoles.ADMIN]);
 
-    return admins.map((a) => a.user);
+    if (adminsError) throw adminsError;
+
+    const adminUserIds = (admins ?? []).map((a) => a.userId);
+    if (adminUserIds.length === 0) return [];
+
+    const { data: users, error: usersError } = await sbDb
+      .from("User")
+      .select("id, firstName, lastName, email")
+      .in("id", adminUserIds);
+
+    if (usersError) throw usersError;
+
+    return users ?? [];
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -877,11 +924,10 @@ export async function transferOwnership({
             // Transfer usedFreeTrial flag if original owner used it
             // This prevents the new owner from starting another trial
             if (currentOwnerUserOrg.user.usedFreeTrial) {
-              await db.user.update({
-                where: { id: newOwnerId },
-                data: { usedFreeTrial: true },
-                select: { id: true },
-              });
+              await sbDb
+                .from("User")
+                .update({ usedFreeTrial: true })
+                .eq("id", newOwnerId);
             }
 
             // Check if new owner has a payment method on their Stripe customer
@@ -889,11 +935,10 @@ export async function transferOwnership({
             const hasPaymentMethod =
               await customerHasPaymentMethod(newOwnerCustomerId);
             if (!hasPaymentMethod) {
-              await db.user.update({
-                where: { id: newOwnerId },
-                data: { warnForNoPaymentMethod: true },
-                select: { id: true },
-              });
+              await sbDb
+                .from("User")
+                .update({ warnForNoPaymentMethod: true })
+                .eq("id", newOwnerId);
             }
           }
         }

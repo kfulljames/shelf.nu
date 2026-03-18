@@ -693,11 +693,15 @@ export async function deleteKit({
   id: Kit["id"];
   organizationId: Kit["organizationId"];
 }) {
-  try {
-    return await db.kit.delete({ where: { id, organizationId } });
-  } catch (cause) {
+  const { error } = await sbDb
+    .from("Kit")
+    .delete()
+    .eq("id", id)
+    .eq("organizationId", organizationId);
+
+  if (error) {
     throw new ShelfError({
-      cause,
+      cause: error,
       message: "Something went wrong while deleting kit",
       additionalData: { id, organizationId },
       label,
@@ -1316,12 +1320,21 @@ export async function createKitsIfNotExists({
     // now we loop through the kits and check if they exist
     const kits = new Map<string, Kit>();
     for (const kit of kitNames) {
-      const existingKit = await db.kit.findFirst({
-        where: {
-          name: { equals: kit, mode: "insensitive" },
-          organizationId,
-        },
-      });
+      const { data: existingKit, error: findKitError } = await sbDb
+        .from("Kit")
+        .select("*")
+        .ilike("name", kit)
+        .eq("organizationId", organizationId)
+        .maybeSingle();
+
+      if (findKitError) {
+        throw new ShelfError({
+          cause: findKitError,
+          message: "Failed to check for existing kit",
+          additionalData: { kit, organizationId },
+          label,
+        });
+      }
 
       if (!existingKit) {
         // if the location doesn't exist, we create a new one
@@ -1343,7 +1356,14 @@ export async function createKitsIfNotExists({
         kits.set(kit, newKit);
       } else {
         // if the location exists, we just update the id
-        kits.set(kit, existingKit);
+        kits.set(kit, {
+          ...existingKit,
+          createdAt: new Date(existingKit.createdAt),
+          updatedAt: new Date(existingKit.updatedAt),
+          imageExpiration: existingKit.imageExpiration
+            ? new Date(existingKit.imageExpiration)
+            : null,
+        } as any);
       }
     }
 
@@ -1483,17 +1503,23 @@ export async function relinkKitQrCode({
 
   const oldQrCode = kit.qrCodes[0];
 
-  await Promise.all([
-    db.qr.update({
-      where: { id: qr.id },
-      data: { organizationId, userId },
-    }),
+  const [qrUpdateResult] = await Promise.all([
+    sbDb.from("Qr").update({ organizationId, userId }).eq("id", qr.id),
     updateKitQrCode({
       kitId,
       newQrId: qr.id,
       organizationId,
     }),
   ]);
+
+  if (qrUpdateResult.error) {
+    throw new ShelfError({
+      cause: qrUpdateResult.error,
+      message: "Failed to update QR code",
+      additionalData: { qrId: qr.id, organizationId, userId },
+      label,
+    });
+  }
 
   return {
     oldQrCodeId: oldQrCode?.id,
@@ -1587,10 +1613,20 @@ export async function updateKitLocation({
             lastName: true,
           } satisfies Prisma.UserSelect,
         });
-        const location = await db.location.findUnique({
-          where: { id: newLocationId },
-          select: { name: true, id: true },
-        });
+        const { data: location, error: locationError } = await sbDb
+          .from("Location")
+          .select("id, name")
+          .eq("id", newLocationId)
+          .maybeSingle();
+
+        if (locationError) {
+          throw new ShelfError({
+            cause: locationError,
+            message: "Failed to fetch location",
+            additionalData: { newLocationId },
+            label,
+          });
+        }
 
         // Create individual notes for each asset
         await Promise.all(
@@ -1634,10 +1670,21 @@ export async function updateKitLocation({
             lastName: true,
           } satisfies Prisma.UserSelect,
         });
-        const currentLocation = await db.location.findUnique({
-          where: { id: currentLocationId },
-          select: { name: true, id: true },
-        });
+        const { data: currentLocation, error: currentLocationError } =
+          await sbDb
+            .from("Location")
+            .select("id, name")
+            .eq("id", currentLocationId)
+            .maybeSingle();
+
+        if (currentLocationError) {
+          throw new ShelfError({
+            cause: currentLocationError,
+            message: "Failed to fetch current location",
+            additionalData: { currentLocationId },
+            label,
+          });
+        }
 
         // Create individual notes for each asset
         await Promise.all(
@@ -1661,9 +1708,23 @@ export async function updateKitLocation({
     }
 
     // Return the updated kit
-    return await db.kit.findUnique({
-      where: { id, organizationId },
-    });
+    const { data: updatedKit, error: updatedKitError } = await sbDb
+      .from("Kit")
+      .select("*")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+
+    if (updatedKitError) {
+      throw new ShelfError({
+        cause: updatedKitError,
+        message: "Failed to fetch updated kit",
+        additionalData: { id, organizationId },
+        label,
+      });
+    }
+
+    return updatedKit;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -1739,10 +1800,20 @@ export async function bulkUpdateKitLocation({
             lastName: true,
           } satisfies Prisma.UserSelect,
         });
-        const location = await db.location.findUnique({
-          where: { id: newLocationId },
-          select: { name: true, id: true },
-        });
+        const { data: location, error: locationError } = await sbDb
+          .from("Location")
+          .select("id, name")
+          .eq("id", newLocationId)
+          .maybeSingle();
+
+        if (locationError) {
+          throw new ShelfError({
+            cause: locationError,
+            message: "Failed to fetch location",
+            additionalData: { newLocationId },
+            label,
+          });
+        }
 
         // Create individual notes for each asset
         await Promise.all(
@@ -1827,10 +1898,20 @@ export async function bulkUpdateKitLocation({
     });
 
     if (newLocationId && newLocationId.trim() !== "") {
-      const location = await db.location.findUnique({
-        where: { id: newLocationId },
-        select: { id: true, name: true },
-      });
+      const { data: location, error: locationError } = await sbDb
+        .from("Location")
+        .select("id, name")
+        .eq("id", newLocationId)
+        .maybeSingle();
+
+      if (locationError) {
+        throw new ShelfError({
+          cause: locationError,
+          message: "Failed to fetch location",
+          additionalData: { newLocationId },
+          label,
+        });
+      }
 
       if (location) {
         const locLink = wrapLinkForNote(

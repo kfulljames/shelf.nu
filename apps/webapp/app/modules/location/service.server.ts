@@ -431,12 +431,26 @@ export async function getLocationTotalValuation({
 }: {
   locationId: Location["id"];
 }) {
-  const result = await db.asset.aggregate({
-    _sum: { valuation: true },
-    where: { locationId },
-  });
+  const { data, error } = await sbDb
+    .from("Asset")
+    .select("value")
+    .eq("locationId", locationId);
 
-  return result._sum.valuation ?? 0;
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Something went wrong while fetching the location valuation",
+      additionalData: { locationId },
+      label,
+    });
+  }
+
+  const total = data.reduce(
+    (sum, asset) => sum + (asset.value ? Number(asset.value) : 0),
+    0
+  );
+
+  return total;
 }
 
 /**
@@ -467,12 +481,14 @@ async function validateParentLocation({
     });
   }
 
-  const parentLocation = await db.location.findFirst({
-    where: { id: parentId, organizationId },
-    select: { id: true },
-  });
+  const { data: parentLocation, error: parentLocationError } = await sbDb
+    .from("Location")
+    .select("id")
+    .eq("id", parentId)
+    .eq("organizationId", organizationId)
+    .single();
 
-  if (!parentLocation) {
+  if (parentLocationError || !parentLocation) {
     throw new ShelfError({
       cause: null,
       message: "Parent location not found.",
@@ -597,14 +613,37 @@ export async function deleteLocation({
   organizationId,
 }: Pick<Location, "id" | "organizationId">) {
   try {
-    const location = await db.location.delete({
-      where: { id, organizationId },
-    });
+    const { data: location, error: deleteLocationError } = await sbDb
+      .from("Location")
+      .delete()
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .select()
+      .single();
+
+    if (deleteLocationError || !location) {
+      throw new ShelfError({
+        cause: deleteLocationError,
+        message: "Something went wrong while deleting the location",
+        additionalData: { id },
+        label,
+      });
+    }
 
     if (location.imageId) {
-      await db.image.delete({
-        where: { id: location.imageId },
-      });
+      const { error: deleteImageError } = await sbDb
+        .from("Image")
+        .delete()
+        .eq("id", location.imageId);
+
+      if (deleteImageError) {
+        throw new ShelfError({
+          cause: deleteImageError,
+          message: "Something went wrong while deleting the location image",
+          additionalData: { imageId: location.imageId },
+          label,
+        });
+      }
     }
 
     return location;
@@ -780,10 +819,20 @@ async function createLocationEditNotes({
 
     let newParentDisplay = "*none*";
     if (next.parentId) {
-      const newParent = await db.location.findUnique({
-        where: { id: next.parentId },
-        select: { id: true, name: true },
-      });
+      const { data: newParent, error: newParentError } = await sbDb
+        .from("Location")
+        .select("id, name")
+        .eq("id", next.parentId)
+        .single();
+
+      if (newParentError) {
+        throw new ShelfError({
+          cause: newParentError,
+          message: "Something went wrong while fetching the parent location",
+          additionalData: { parentId: next.parentId },
+          label,
+        });
+      }
       newParentDisplay = newParent
         ? wrapLinkForNote(`/locations/${newParent.id}`, newParent.name)
         : "*unknown*";
@@ -794,10 +843,21 @@ async function createLocationEditNotes({
 
   if (changes.length === 0) return;
 
-  const user = await db.user.findFirst({
-    where: { id: userId },
-    select: { firstName: true, lastName: true },
-  });
+  const { data: user, error: userError } = await sbDb
+    .from("User")
+    .select("firstName, lastName")
+    .eq("id", userId)
+    .single();
+
+  if (userError) {
+    throw new ShelfError({
+      cause: userError,
+      message: "Something went wrong while fetching the user",
+      additionalData: { userId },
+      label,
+    });
+  }
+
   const userLink = wrapUserLinkForNote({
     id: userId,
     firstName: user?.firstName,
@@ -833,12 +893,22 @@ export async function createLocationsIfNotExists({
     // now we loop through the locations and check if they exist
     for (const [location, _] of locations) {
       const trimmedLocation = (location as string).trim();
-      const existingLocation = await db.location.findFirst({
-        where: {
-          name: { equals: trimmedLocation, mode: "insensitive" },
-          organizationId,
-        },
-      });
+      const { data: existingLocation, error: existingLocationError } =
+        await sbDb
+          .from("Location")
+          .select("*")
+          .ilike("name", trimmedLocation)
+          .eq("organizationId", organizationId)
+          .maybeSingle();
+
+      if (existingLocationError) {
+        throw new ShelfError({
+          cause: existingLocationError,
+          message: "Something went wrong while checking for existing location",
+          additionalData: { trimmedLocation, organizationId },
+          label,
+        });
+      }
 
       if (!existingLocation) {
         // if the location doesn't exist, we create a new one
@@ -984,13 +1054,23 @@ export async function updateLocationImage({
       thumbnailPublicUrl = publicUrl;
     }
 
-    await db.location.update({
-      where: { id: locationId, organizationId },
-      data: {
+    const { error: updateImageError } = await sbDb
+      .from("Location")
+      .update({
         imageUrl: imagePublicUrl,
-        thumbnailUrl: thumbnailPublicUrl ? thumbnailPublicUrl : undefined,
-      },
-    });
+        ...(thumbnailPublicUrl ? { thumbnailUrl: thumbnailPublicUrl } : {}),
+      })
+      .eq("id", locationId)
+      .eq("organizationId", organizationId);
+
+    if (updateImageError) {
+      throw new ShelfError({
+        cause: updateImageError,
+        message: "Something went wrong while updating the location image",
+        additionalData: { locationId, organizationId },
+        label,
+      });
+    }
 
     if (prevImageUrl) {
       await removePublicFile({ publicUrl: prevImageUrl });
@@ -1274,24 +1354,20 @@ async function createBulkLocationChangeNotes({
   location: Pick<Location, "id" | "name">;
 }) {
   try {
-    const user = await db.user
-      .findFirstOrThrow({
-        where: {
-          id: userId,
-        },
-        select: {
-          firstName: true,
-          lastName: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "User not found",
-          additionalData: { userId },
-          label,
-        });
+    const { data: user, error: userError } = await sbDb
+      .from("User")
+      .select("firstName, lastName")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      throw new ShelfError({
+        cause: userError,
+        message: "User not found",
+        additionalData: { userId },
+        label,
       });
+    }
 
     const addedAssets: Array<{ id: string; title: string }> = [];
     const removedAssetsSummary: Array<{ id: string; title: string }> = [];

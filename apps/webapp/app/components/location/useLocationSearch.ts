@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import type { ChangeEvent } from "react";
-import type { Location } from "@prisma/client";
 import { atom, useAtom, useAtomValue } from "jotai";
 import { useLoaderData } from "react-router";
 import type { loader } from "~/routes/_layout+/assets.$assetId_.edit";
@@ -18,7 +17,7 @@ export const useLocationSearch = () => {
   const refinedLocations = useMemo(
     () =>
       atom(
-        locations.filter((cat: Location) =>
+        locations.filter((cat) =>
           cat.name.toLowerCase().includes(locationSearch.toLowerCase())
         )
       ),

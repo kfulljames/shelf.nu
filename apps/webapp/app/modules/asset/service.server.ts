@@ -1426,19 +1426,27 @@ export async function updateAsset({
       const user = await loadUserForNotes();
 
       const currentLocation = currentLocationId
-        ? await db.location.findFirst({
-            where: {
-              id: currentLocationId,
-            },
-          })
+        ? await sbDb
+            .from("Location")
+            .select("*")
+            .eq("id", currentLocationId)
+            .maybeSingle()
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data;
+            })
         : null;
 
       const newLocation = newLocationId
-        ? await db.location.findFirst({
-            where: {
-              id: newLocationId,
-            },
-          })
+        ? await sbDb
+            .from("Location")
+            .select("*")
+            .eq("id", newLocationId)
+            .maybeSingle()
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data;
+            })
         : null;
 
       await createLocationChangeNote({
@@ -1560,18 +1568,41 @@ export async function updateAsset({
       if (potentialChanges.length > 0) {
         // Fetch required data in parallel only if we have potential changes
         const [user, customFieldsFromForm] = await Promise.all([
-          db.user.findFirst({
-            where: { id: userId },
-            select: { firstName: true, lastName: true },
-          }),
-          db.customField.findMany({
-            where: {
-              id: { in: customFieldsValuesFromForm.map((cf) => cf.id) },
-              active: true,
-              deletedAt: null,
-            },
-            select: { id: true, name: true, type: true },
-          }),
+          sbDb
+            .from("User")
+            .select("firstName, lastName")
+            .eq("id", userId)
+            .maybeSingle()
+            .then(({ data, error }) => {
+              if (error) {
+                throw new ShelfError({
+                  cause: error,
+                  message: "Failed to fetch user for custom field notes",
+                  additionalData: { userId },
+                  label,
+                });
+              }
+              return data;
+            }),
+          sbDb
+            .from("CustomField")
+            .select("id, name, type")
+            .in(
+              "id",
+              customFieldsValuesFromForm.map((cf) => cf.id)
+            )
+            .eq("active", true)
+            .is("deletedAt", null)
+            .then(({ data, error }) => {
+              if (error) {
+                throw new ShelfError({
+                  cause: error,
+                  message: "Failed to fetch custom fields",
+                  label,
+                });
+              }
+              return data ?? [];
+            }),
         ]);
 
         // Detect actual changes with robust comparison
@@ -1972,13 +2003,22 @@ export async function duplicateAsset({
           );
 
           if (typeof imagePath === "string") {
-            await db.asset.update({
-              where: { id: duplicatedAsset.id },
-              data: {
+            const { error: updateError } = await sbDb
+              .from("Asset")
+              .update({
                 mainImage: imagePath,
-                mainImageExpiration: oneDayFromNow(),
-              },
-            });
+                mainImageExpiration: oneDayFromNow().toISOString(),
+              })
+              .eq("id", duplicatedAsset.id);
+
+            if (updateError) {
+              throw new ShelfError({
+                cause: updateError,
+                message: "Failed to update duplicated asset main image",
+                additionalData: { assetId: duplicatedAsset.id },
+                label,
+              });
+            }
           }
         } catch (cause) {
           // Log the error so we are aware there is an issue anc can check if it is on our side
@@ -2731,26 +2771,36 @@ export async function createAssetsFromBackupImport({
         if (asset.category && Object.keys(asset?.category).length > 0) {
           const category = asset.category as Category;
 
-          const existingCat = await db.category.findFirst({
-            where: {
-              organizationId,
-              name: category.name,
-            },
-          });
+          const existingCat = await sbDb
+            .from("Category")
+            .select("*")
+            .eq("organizationId", organizationId)
+            .eq("name", category.name)
+            .maybeSingle()
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data;
+            });
 
           /** If it doesn't exist, create a new one */
           if (!existingCat) {
-            const newCat = await db.category.create({
-              data: {
+            const { data: newCat, error: catCreateError } = await sbDb
+              .from("Category")
+              .insert({
                 organizationId,
                 name: category.name,
                 description: category.description || "",
                 color: category.color,
                 userId,
-                createdAt: new Date(category.createdAt),
-                updatedAt: new Date(category.updatedAt),
-              },
-            });
+                createdAt: new Date(category.createdAt).toISOString(),
+                updatedAt: new Date(category.updatedAt).toISOString(),
+              })
+              .select()
+              .single();
+
+            if (catCreateError || !newCat) {
+              throw catCreateError || new Error("Failed to create category");
+            }
             /** Add it to the data for creating the asset */
             Object.assign(d.data, {
               categoryId: newCat.id,
@@ -2767,26 +2817,36 @@ export async function createAssetsFromBackupImport({
         if (asset.location && Object.keys(asset?.location).length > 0) {
           const location = asset.location as Location;
 
-          const existingLoc = await db.location.findFirst({
-            where: {
-              organizationId,
-              name: location.name,
-            },
-          });
+          const existingLoc = await sbDb
+            .from("Location")
+            .select("*")
+            .eq("organizationId", organizationId)
+            .eq("name", location.name)
+            .maybeSingle()
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data;
+            });
 
           /** If it doesn't exist, create a new one */
           if (!existingLoc) {
-            const newLoc = await db.location.create({
-              data: {
+            const { data: newLoc, error: locCreateError } = await sbDb
+              .from("Location")
+              .insert({
                 name: location.name,
                 description: location.description || "",
                 address: location.address || "",
                 organizationId,
                 userId,
-                createdAt: new Date(location.createdAt),
-                updatedAt: new Date(location.updatedAt),
-              },
-            });
+                createdAt: new Date(location.createdAt).toISOString(),
+                updatedAt: new Date(location.updatedAt).toISOString(),
+              })
+              .select()
+              .single();
+
+            if (locCreateError || !newLoc) {
+              throw locCreateError || new Error("Failed to create location");
+            }
             /** Add it to the data for creating the asset */
             Object.assign(d.data, {
               locationId: newLoc.id,
@@ -2803,23 +2863,37 @@ export async function createAssetsFromBackupImport({
         if (asset.custody && Object.keys(asset?.custody).length > 0) {
           const { custodian } = asset.custody;
 
-          const existingCustodian = await db.teamMember.findFirst({
-            where: {
-              deletedAt: null,
-              organizationId,
-              name: custodian.name,
-            },
-          });
+          const existingCustodian = await sbDb
+            .from("TeamMember")
+            .select("*")
+            .is("deletedAt", null)
+            .eq("organizationId", organizationId)
+            .eq("name", custodian.name)
+            .maybeSingle()
+            .then(({ data, error }) => {
+              if (error) throw error;
+              return data;
+            });
 
           if (!existingCustodian) {
-            const newCustodian = await db.teamMember.create({
-              data: {
-                name: custodian.name,
-                organizationId,
-                createdAt: new Date(custodian.createdAt),
-                updatedAt: new Date(custodian.updatedAt),
-              },
-            });
+            const { data: newCustodian, error: custodianCreateError } =
+              await sbDb
+                .from("TeamMember")
+                .insert({
+                  name: custodian.name,
+                  organizationId,
+                  createdAt: new Date(custodian.createdAt).toISOString(),
+                  updatedAt: new Date(custodian.updatedAt).toISOString(),
+                })
+                .select()
+                .single();
+
+            if (custodianCreateError || !newCustodian) {
+              throw (
+                custodianCreateError ||
+                new Error("Failed to create team member")
+              );
+            }
 
             Object.assign(d.data, {
               custody: {
@@ -2845,12 +2919,16 @@ export async function createAssetsFromBackupImport({
           // now we loop through the categories and check if they exist
           const tags: Record<string, string> = {};
           for (const tag of tagsNames) {
-            const existingTag = await db.tag.findFirst({
-              where: {
-                name: tag,
-                organizationId,
-              },
-            });
+            const existingTag = await sbDb
+              .from("Tag")
+              .select("*")
+              .eq("name", tag)
+              .eq("organizationId", organizationId)
+              .maybeSingle()
+              .then(({ data, error }) => {
+                if (error) throw error;
+                return data;
+              });
 
             if (!existingTag) {
               // if the tag doesn't exist, we create a new one
@@ -2919,16 +2997,18 @@ export async function createAssetsFromBackupImport({
 
         /** Create notes */
         if (asset?.notes?.length > 0) {
-          await db.note.createMany({
-            data: asset.notes.map((note: Note) => ({
+          const { error: notesError } = await sbDb.from("Note").insert(
+            asset.notes.map((note: Note) => ({
               content: note.content,
               type: note.type,
               assetId,
               userId,
-              createdAt: new Date(note.createdAt),
-              updatedAt: new Date(note.updatedAt),
-            })),
-          });
+              createdAt: new Date(note.createdAt).toISOString(),
+              updatedAt: new Date(note.updatedAt).toISOString(),
+            }))
+          );
+
+          if (notesError) throw notesError;
         }
       })
     );
@@ -2948,10 +3028,16 @@ export async function updateAssetBookingAvailability({
   organizationId,
 }: Pick<Asset, "id" | "availableToBook" | "organizationId">) {
   try {
-    return await db.asset.update({
-      where: { id, organizationId },
-      data: { availableToBook },
-    });
+    const { data, error } = await sbDb
+      .from("Asset")
+      .update({ availableToBook })
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data;
   } catch (cause) {
     throw maybeUniqueConstraintViolation(cause, "Asset", {
       additionalData: { id },
@@ -3151,18 +3237,30 @@ export async function bulkDeleteAssets({
     /**
      * We have to remove the images of assets so we have to make this query first
      */
-    const assets = await db.asset.findMany({
-      where: {
-        id: { in: resolvedIds },
-        organizationId,
-      },
-      select: { id: true, mainImage: true },
-    });
+    const { data: assets, error: findError } = await sbDb
+      .from("Asset")
+      .select("id, mainImage")
+      .in("id", resolvedIds)
+      .eq("organizationId", organizationId);
+
+    if (findError) {
+      throw new ShelfError({
+        cause: findError,
+        message: "Failed to fetch assets for bulk delete",
+        label,
+      });
+    }
 
     try {
-      await db.asset.deleteMany({
-        where: { id: { in: assets.map((asset) => asset.id) } },
-      });
+      const { error: deleteError } = await sbDb
+        .from("Asset")
+        .delete()
+        .in(
+          "id",
+          (assets ?? []).map((asset) => asset.id)
+        );
+
+      if (deleteError) throw deleteError;
 
       /** Deleting images of the assets (if any) */
       const assetsWithImages = assets.filter((asset) => !!asset.mainImage);
@@ -3228,13 +3326,21 @@ export async function bulkCheckOutAssets({
      * In order to make notes for the assets we have to make this query to get info about assets
      */
     const [assets, user, custodianTeamMember] = await Promise.all([
-      db.asset.findMany({
-        where: {
-          id: { in: resolvedIds },
-          organizationId,
-        },
-        select: { id: true, title: true, status: true },
-      }),
+      sbDb
+        .from("Asset")
+        .select("id, title, status")
+        .in("id", resolvedIds)
+        .eq("organizationId", organizationId)
+        .then(({ data, error }) => {
+          if (error) {
+            throw new ShelfError({
+              cause: error,
+              message: "Failed to fetch assets for bulk checkout",
+              label,
+            });
+          }
+          return data ?? [];
+        }),
       getUserByID(userId, {
         select: {
           id: true,
@@ -3494,9 +3600,23 @@ export async function bulkUpdateAssetLocation({
     }
 
     const newLocation = newLocationId
-      ? await db.location.findFirst({
-          where: { id: newLocationId, organizationId },
-        })
+      ? await sbDb
+          .from("Location")
+          .select("*")
+          .eq("id", newLocationId)
+          .eq("organizationId", organizationId)
+          .maybeSingle()
+          .then(({ data, error }) => {
+            if (error) {
+              throw new ShelfError({
+                cause: error,
+                message: "Failed to fetch location",
+                additionalData: { newLocationId },
+                label,
+              });
+            }
+            return data;
+          })
       : null;
 
     // Filter out assets already at the target location
@@ -3644,16 +3764,16 @@ export async function bulkUpdateAssetCategory({
       settings,
     });
 
-    await db.asset.updateMany({
-      where: {
-        id: { in: resolvedIds },
-        organizationId,
-      },
-      data: {
+    const { error: updateError } = await sbDb
+      .from("Asset")
+      .update({
         /** If nothing is selected then we have to remove the relation and set category to null */
         categoryId: !categoryId ? null : categoryId,
-      },
-    });
+      })
+      .in("id", resolvedIds)
+      .eq("organizationId", organizationId);
+
+    if (updateError) throw updateError;
 
     return true;
   } catch (cause) {
@@ -3794,14 +3914,14 @@ export async function bulkMarkAvailability({
     });
 
     // Simple, consistent where clause
-    await db.asset.updateMany({
-      where: {
-        id: { in: resolvedIds },
-        organizationId,
-        availableToBook: type === "unavailable",
-      },
-      data: { availableToBook: type === "available" },
-    });
+    const { error: updateError } = await sbDb
+      .from("Asset")
+      .update({ availableToBook: type === "available" })
+      .in("id", resolvedIds)
+      .eq("organizationId", organizationId)
+      .eq("availableToBook", type === "unavailable");
+
+    if (updateError) throw updateError;
 
     return true;
   } catch (cause) {
@@ -3879,10 +3999,20 @@ export async function relinkAssetQrCode({
   const oldQrCode = asset?.qrCodes[0];
 
   await Promise.all([
-    db.qr.update({
-      where: { id: qr.id },
-      data: { organizationId, userId },
-    }),
+    sbDb
+      .from("Qr")
+      .update({ organizationId, userId })
+      .eq("id", qr.id)
+      .then(({ error }) => {
+        if (error) {
+          throw new ShelfError({
+            cause: error,
+            message: "Failed to update QR code",
+            additionalData: { qrId: qr.id },
+            label,
+          });
+        }
+      }),
     db.asset.update({
       where: { id: assetId, organizationId },
       data: {
@@ -4016,14 +4146,33 @@ export async function getEntitiesWithSelectedValues({
     totalLocations,
   ] = await Promise.all([
     /** Categories start */
-    db.category.findMany({
-      where: { organizationId, id: { notIn: selectedCategoryIds } },
-      take: allSelectedEntries.includes("category") ? undefined : 12,
-    }),
-    db.category.findMany({
-      where: { organizationId, id: { in: selectedCategoryIds } },
-    }),
-    db.category.count({ where: { organizationId } }),
+    sbDb
+      .from("Category")
+      .select("*")
+      .eq("organizationId", organizationId)
+      .not("id", "in", `(${selectedCategoryIds.join(",")})`)
+      .limit(allSelectedEntries.includes("category") ? 1000 : 12)
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
+    sbDb
+      .from("Category")
+      .select("*")
+      .eq("organizationId", organizationId)
+      .in("id", selectedCategoryIds)
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
+    sbDb
+      .from("Category")
+      .select("id", { count: "exact", head: true })
+      .eq("organizationId", organizationId)
+      .then(({ count, error }) => {
+        if (error) throw error;
+        return count ?? 0;
+      }),
     /** Categories end */
 
     /** Tags start */
@@ -4062,14 +4211,33 @@ export async function getEntitiesWithSelectedValues({
     /** Tags end */
 
     /** Location start */
-    db.location.findMany({
-      where: { organizationId, id: { notIn: selectedLocationIds } },
-      take: allSelectedEntries.includes("location") ? undefined : 12,
-    }),
-    db.location.findMany({
-      where: { organizationId, id: { in: selectedLocationIds } },
-    }),
-    db.location.count({ where: { organizationId } }),
+    sbDb
+      .from("Location")
+      .select("*")
+      .eq("organizationId", organizationId)
+      .not("id", "in", `(${selectedLocationIds.join(",")})`)
+      .limit(allSelectedEntries.includes("location") ? 1000 : 12)
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
+    sbDb
+      .from("Location")
+      .select("*")
+      .eq("organizationId", organizationId)
+      .in("id", selectedLocationIds)
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return data ?? [];
+      }),
+    sbDb
+      .from("Location")
+      .select("id", { count: "exact", head: true })
+      .eq("organizationId", organizationId)
+      .then(({ count, error }) => {
+        if (error) throw error;
+        return count ?? 0;
+      }),
     /** Location end */
   ]);
 
@@ -4100,24 +4268,47 @@ export async function getCategoriesForCreateAndEdit({
   try {
     const [categoryExcludedSelected, selectedCategories, totalCategories] =
       await Promise.all([
-        db.category.findMany({
-          where: {
-            organizationId,
-            id: Array.isArray(categorySelected)
-              ? { notIn: categorySelected }
-              : { not: categorySelected },
-          },
-          take: getAllEntries.includes("category") ? undefined : 12,
-        }),
-        db.category.findMany({
-          where: {
-            organizationId,
-            id: Array.isArray(categorySelected)
-              ? { in: categorySelected }
-              : categorySelected,
-          },
-        }),
-        db.category.count({ where: { organizationId } }),
+        (() => {
+          let query = sbDb
+            .from("Category")
+            .select("*")
+            .eq("organizationId", organizationId);
+          if (Array.isArray(categorySelected)) {
+            query = query.not("id", "in", `(${categorySelected.join(",")})`);
+          } else {
+            query = query.neq("id", categorySelected);
+          }
+          if (!getAllEntries.includes("category")) {
+            query = query.limit(12);
+          }
+          return query.then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          });
+        })(),
+        (() => {
+          let query = sbDb
+            .from("Category")
+            .select("*")
+            .eq("organizationId", organizationId);
+          if (Array.isArray(categorySelected)) {
+            query = query.in("id", categorySelected);
+          } else {
+            query = query.eq("id", categorySelected);
+          }
+          return query.then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          });
+        })(),
+        sbDb
+          .from("Category")
+          .select("id", { count: "exact", head: true })
+          .eq("organizationId", organizationId)
+          .then(({ count, error }) => {
+            if (error) throw error;
+            return count ?? 0;
+          }),
       ]);
 
     return {
@@ -4151,14 +4342,37 @@ export async function getLocationsForCreateAndEdit({
 
     const [locationExcludedSelected, selectedLocation, totalLocations] =
       await Promise.all([
-        db.location.findMany({
-          where: { organizationId, id: { not: locationSelected } },
-          take: getAllEntries.includes("location") ? undefined : 12,
-        }),
-        db.location.findMany({
-          where: { organizationId, id: locationSelected },
-        }),
-        db.location.count({ where: { organizationId } }),
+        (() => {
+          let query = sbDb
+            .from("Location")
+            .select("*")
+            .eq("organizationId", organizationId)
+            .neq("id", locationSelected);
+          if (!getAllEntries.includes("location")) {
+            query = query.limit(12);
+          }
+          return query.then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          });
+        })(),
+        sbDb
+          .from("Location")
+          .select("*")
+          .eq("organizationId", organizationId)
+          .eq("id", locationSelected)
+          .then(({ data, error }) => {
+            if (error) throw error;
+            return data ?? [];
+          }),
+        sbDb
+          .from("Location")
+          .select("id", { count: "exact", head: true })
+          .eq("organizationId", organizationId)
+          .then(({ count, error }) => {
+            if (error) throw error;
+            return count ?? 0;
+          }),
       ]);
 
     return {
