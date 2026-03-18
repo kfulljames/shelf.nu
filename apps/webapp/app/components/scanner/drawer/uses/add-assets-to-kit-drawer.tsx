@@ -55,7 +55,8 @@ export default function AddAssetsToKitDrawer({
   defaultExpanded?: boolean;
 }) {
   const { kit } = useLoaderData<LoaderData>();
-  const kitAssetsIds = kit.assets.map((a) => a.id) || [];
+  const kitAssets = kit.assets as unknown as Array<{ id: string }>;
+  const kitAssetsIds = kitAssets.map((a) => a.id) || [];
   // Get the scanned items from jotai
   const items = useAtomValue(scannedItemsAtom);
   const clearList = useSetAtom(clearScannedItemsAtom);

@@ -25,7 +25,10 @@ import {
 } from "~/components/audit/audit-image-upload-box";
 import { AuditImageUploadDialog } from "~/components/audit/audit-image-upload-dialog";
 import { Button } from "~/components/shared/button";
+// KEPT AS PRISMA: db.auditAsset.findFirst with nested include
+// (auditSession -> assignments) — not convertible to Supabase
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useDisabled } from "~/hooks/use-disabled";
 import { createAuditAssetImagesAddedNote } from "~/modules/audit/helpers.server";
 import {
@@ -109,46 +112,40 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     });
 
     // Fetch notes for this audit asset
-    const notes = await db.auditNote.findMany({
-      where: {
-        auditSessionId: auditId,
-        auditAssetId: auditAssetId,
-      },
-      select: {
-        id: true,
-        content: true,
-        createdAt: true,
-        userId: true,
-        type: true,
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            profilePicture: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+    const { data: notesRaw, error: notesError } = await sbDb
+      .from("AuditNote")
+      .select(
+        "id, content, createdAt, userId, type, user:User(id, firstName, lastName, email, profilePicture)"
+      )
+      .eq("auditSessionId", auditId)
+      .eq("auditAssetId", auditAssetId)
+      .order("createdAt", { ascending: false });
+
+    if (notesError) throw notesError;
+
+    const notes = (notesRaw ?? []) as unknown as Array<{
+      id: string;
+      content: string;
+      createdAt: string;
+      userId: string | null;
+      type: "COMMENT" | "UPDATE";
+      user: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+        profilePicture: string | null;
+      } | null;
+    }>;
 
     // Fetch images
-    const images = await db.auditImage.findMany({
-      where: {
-        auditAssetId: auditAssetId,
-      },
-      select: {
-        id: true,
-        imageUrl: true,
-        thumbnailUrl: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+    const { data: images, error: imagesError } = await sbDb
+      .from("AuditImage")
+      .select("id, imageUrl, thumbnailUrl")
+      .eq("auditAssetId", auditAssetId)
+      .order("createdAt", { ascending: false });
+
+    if (imagesError) throw imagesError;
 
     const header = {
       title: auditAsset.asset.title,
@@ -203,25 +200,41 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         });
       }
 
-      const note = await db.auditNote.create({
-        data: {
+      const { data: note, error: noteInsertErr } = (await sbDb
+        .from("AuditNote")
+        .insert({
           content: content.trim(),
           auditSessionId: auditId,
           auditAssetId: auditAssetId,
           userId,
-        },
-        include: {
+        })
+        .select("*, user:User(id, firstName, lastName, email, profilePicture)")
+        .single()) as unknown as {
+        data: {
+          id: string;
+          content: string;
+          createdAt: string;
+          userId: string;
+          type: "COMMENT" | "UPDATE";
           user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              profilePicture: true,
-            },
-          },
-        },
-      });
+            id: string;
+            firstName: string;
+            lastName: string;
+            email: string;
+            profilePicture: string | null;
+          };
+        } | null;
+        error: any;
+      };
+
+      if (noteInsertErr || !note) {
+        throw new ShelfError({
+          cause: noteInsertErr,
+          message: "Failed to create audit note",
+          additionalData: { auditAssetId, auditId },
+          label: "Audit",
+        });
+      }
 
       return payload({ note });
     }
@@ -240,10 +253,11 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       }
 
       // Prevent deletion of auto-generated notes (UPDATE type)
-      const noteToDelete = await db.auditNote.findUnique({
-        where: { id: noteId },
-        select: { type: true },
-      });
+      const { data: noteToDelete } = await sbDb
+        .from("AuditNote")
+        .select("type")
+        .eq("id", noteId)
+        .single();
 
       if (noteToDelete?.type === "UPDATE") {
         throw new ShelfError({
@@ -255,11 +269,12 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         });
       }
 
-      await db.auditNote.delete({
-        where: {
-          id: noteId,
-        },
-      });
+      const { error: deleteError } = await sbDb
+        .from("AuditNote")
+        .delete()
+        .eq("id", noteId);
+
+      if (deleteError) throw deleteError;
 
       return payload({ success: true });
     }
@@ -312,34 +327,29 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         uploadedImages.push(image);
       }
 
-      // Create a note in a transaction to track the image uploads
-      await db.$transaction(async (tx) => {
-        const imageIds = uploadedImages.map((img) => img.id);
-        // Create note with custom content if provided, otherwise use default
-        if (noteContent?.trim()) {
-          // User provided a note - create a COMMENT note with images
-          await tx.auditNote.create({
-            data: {
-              auditSessionId: auditId,
-              auditAssetId: auditAssetId,
-              userId,
-              content: `${noteContent.trim()}\n\n{% audit_images count=${
-                imageIds.length
-              } ids="${imageIds.join(",")}" /%}`,
-              type: "COMMENT",
-            },
-          });
-        } else {
-          // No note provided - use default auto-generated note
-          await createAuditAssetImagesAddedNote({
-            auditSessionId: auditId,
-            auditAssetId: auditAssetId,
-            userId,
-            imageIds,
-            tx,
-          });
-        }
-      });
+      // Create a note to track the image uploads
+      const imageIds = uploadedImages.map((img) => img.id);
+      if (noteContent?.trim()) {
+        // User provided a note - create a COMMENT note with images
+        const { error: noteError } = await sbDb.from("AuditNote").insert({
+          auditSessionId: auditId,
+          auditAssetId: auditAssetId,
+          userId,
+          content: `${noteContent.trim()}\n\n{% audit_images count=${
+            imageIds.length
+          } ids="${imageIds.join(",")}" /%}`,
+          type: "COMMENT",
+        });
+        if (noteError) throw noteError;
+      } else {
+        // No note provided - use default auto-generated note
+        await createAuditAssetImagesAddedNote({
+          auditSessionId: auditId,
+          auditAssetId: auditAssetId,
+          userId,
+          imageIds,
+        });
+      }
 
       return payload({ images: uploadedImages });
     }
@@ -400,50 +410,50 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       }
 
       // Update the note to append the audit_images tag
-      await db.$transaction(async (tx) => {
-        const existingNote = await tx.auditNote.findUnique({
-          where: { id: noteId },
+      const { data: existingNote, error: noteReadError } = await sbDb
+        .from("AuditNote")
+        .select("id, content")
+        .eq("id", noteId)
+        .single();
+
+      if (noteReadError || !existingNote) {
+        throw new ShelfError({
+          cause: noteReadError,
+          message: "Note not found",
+          additionalData: { noteId },
+          label: "Audit Image",
+          status: 404,
         });
+      }
 
-        if (!existingNote) {
-          throw new ShelfError({
-            cause: null,
-            message: "Note not found",
-            additionalData: { noteId },
-            label: "Audit Image",
-            status: 404,
-          });
-        }
+      // Extract existing image IDs from content if any
+      const existingImageIds: string[] = [];
+      const regex = /{%\s*audit_images[^%]*ids="([^"]+)"[^%]*%}/g;
+      let match;
+      while ((match = regex.exec(existingNote.content)) !== null) {
+        existingImageIds.push(...match[1].split(","));
+      }
 
-        // Extract existing image IDs from content if any
-        const existingImageIds: string[] = [];
-        const regex = /{%\s*audit_images[^%]*ids="([^"]+)"[^%]*%}/g;
-        let match;
-        while ((match = regex.exec(existingNote.content)) !== null) {
-          existingImageIds.push(...match[1].split(","));
-        }
+      // Add new image IDs
+      const newImageIds = uploadedImages.map((img) => img.id);
+      const allImageIds = [...existingImageIds, ...newImageIds];
 
-        // Add new image IDs
-        const newImageIds = uploadedImages.map((img) => img.id);
-        const allImageIds = [...existingImageIds, ...newImageIds];
+      // Remove existing audit_images tags and append new one with all images
+      let updatedContent = existingNote.content.replace(
+        /{%\s*audit_images[^%]*%}/g,
+        ""
+      );
+      updatedContent = updatedContent.trim();
+      updatedContent += `\n\n{% audit_images count=${
+        allImageIds.length
+      } ids="${allImageIds.join(",")}" /%}`;
 
-        // Remove existing audit_images tags and append new one with all images
-        let updatedContent = existingNote.content.replace(
-          /{%\s*audit_images[^%]*%}/g,
-          ""
-        );
-        updatedContent = updatedContent.trim();
-        updatedContent += `\n\n{% audit_images count=${
-          allImageIds.length
-        } ids="${allImageIds.join(",")}" /%}`;
+      const { error: noteUpdateError } = await sbDb
+        .from("AuditNote")
+        .update({ content: updatedContent })
+        .eq("id", noteId);
 
-        await tx.auditNote.update({
-          where: { id: noteId },
-          data: {
-            content: updatedContent,
-          },
-        });
-      });
+      if (noteUpdateError) throw noteUpdateError;
 
       return payload({ images: uploadedImages });
     }
@@ -541,7 +551,7 @@ export default function AuditAssetDetails() {
         content: note.content,
         createdAt: note.createdAt,
         userId: note.userId ?? "",
-        type: note.type,
+        type: note.type as "COMMENT" | "UPDATE" | undefined,
         user: {
           id: note.user?.id ?? "",
           name:

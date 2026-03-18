@@ -6,7 +6,7 @@ import { z } from "zod";
 import { Form } from "~/components/custom-form";
 import { UserXIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getKit, releaseCustody } from "~/modules/kit/service.server";
 import styles from "~/styles/layout/custom-modal.css?url";
@@ -85,16 +85,13 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     const isSelfService = role === OrganizationRoles.SELF_SERVICE;
 
     if (isSelfService) {
-      const custody = await db.kitCustody.findUnique({
-        where: { kitId },
-        select: {
-          custodian: {
-            select: { id: true, userId: true },
-          },
-        },
-      });
+      const { data: custody } = await sbDb
+        .from("KitCustody")
+        .select("custodian:TeamMember(id, userId)")
+        .eq("kitId", kitId)
+        .maybeSingle();
 
-      if (custody?.custodian?.userId !== userId) {
+      if ((custody?.custodian as any)?.userId !== userId) {
         throw new ShelfError({
           cause: null,
           title: "Action not allowed",

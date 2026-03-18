@@ -6,12 +6,12 @@ import { Form } from "~/components/custom-form";
 import Input from "~/components/forms/input";
 import { UserIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import styles from "~/styles/layout/custom-modal.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 
 import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { isFormProcessing } from "~/utils/form";
 import { payload, error, parseData } from "~/utils/http.server";
 import {
@@ -62,12 +62,19 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     const { name } = payload;
 
-    await db.teamMember.create({
-      data: {
-        name: name.trim(),
-        organizationId,
-      },
+    const { error: createError } = await sbDb.from("TeamMember").insert({
+      name: name.trim(),
+      organizationId,
     });
+
+    if (createError) {
+      throw new ShelfError({
+        cause: createError,
+        message: "Failed to create team member",
+        additionalData: { userId, organizationId },
+        label: "Team",
+      });
+    }
 
     sendNotification({
       title: "Successfully added a new team member",

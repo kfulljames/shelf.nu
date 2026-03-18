@@ -9,7 +9,7 @@ import {
 } from "react-router";
 import { z } from "zod";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useSearchParams } from "~/hooks/search-params";
 import { useDisabled } from "~/hooks/use-disabled";
 import { signInWithEmail } from "~/modules/auth/service.server";
@@ -38,34 +38,23 @@ export async function loader({ context, params }: LoaderFunctionArgs) {
   });
   try {
     /** We get the invite based on the id of the params */
-    const invite = await db.invite
-      .findFirstOrThrow({
-        where: {
-          id: inviteId,
-        },
-        include: {
-          organization: {
-            select: {
-              name: true,
-            },
-          },
-          inviter: {
-            select: {
-              firstName: true,
-              lastName: true,
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Invite not found",
-          message:
-            "The invitation you are trying to accept is either not found or expired",
-          label: "Invite",
-        });
+    const { data: invite, error: inviteError } = await sbDb
+      .from("Invite")
+      .select(
+        "*, organization:Organization!organizationId(name), inviter:User!inviterId(firstName, lastName)"
+      )
+      .eq("id", inviteId)
+      .single();
+
+    if (inviteError || !invite) {
+      throw new ShelfError({
+        cause: inviteError,
+        title: "Invite not found",
+        message:
+          "The invitation you are trying to accept is either not found or expired",
+        label: "Invite",
       });
+    }
 
     /** Here we have to do a check based on the session of the current user
      * If the user is already signed in, we have to make sure the invite sent, is for the same user
@@ -73,13 +62,16 @@ export async function loader({ context, params }: LoaderFunctionArgs) {
     if (context.isAuthenticated) {
       await checkUserAndInviteMatch({
         context,
-        invite,
+        invite: invite as any,
       });
     }
 
+    const inviterData = invite.inviter as any;
+    const organizationData = invite.organization as any;
+
     return payload({
-      inviter: `${invite.inviter.firstName} ${invite.inviter.lastName}`,
-      workspace: `${invite.organization.name}`,
+      inviter: `${inviterData.firstName} ${inviterData.lastName}`,
+      workspace: `${organizationData.name}`,
     });
   } catch (cause) {
     const reason = makeShelfError(cause);

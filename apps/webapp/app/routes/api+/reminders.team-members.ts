@@ -1,6 +1,10 @@
 import type { Prisma } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
+// KEEP AS PRISMA: This query uses deeply nested relation filters that cannot be
+// expressed with Supabase's query builder:
+// - `user: { isNot: null }` with nested `userOrganizations.some` + `roles.hasSome`
+// These require Prisma's nested WHERE capabilities.
 import { db } from "~/database/db.server";
 import { makeShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";

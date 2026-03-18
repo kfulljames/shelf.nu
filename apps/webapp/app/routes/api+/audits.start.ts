@@ -3,7 +3,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { data } from "react-router";
 import { z } from "zod";
 
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { resolveAssetIdsForBulkOperation } from "~/modules/asset/bulk-operations-helper.server";
 import { CurrentSearchParamsSchema } from "~/modules/asset/utils.server";
 import { getAssetIndexSettings } from "~/modules/asset-index-settings/service.server";
@@ -171,43 +171,45 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
     // Send email notification if audit is assigned to someone other than the creator
     if (assignee && assignee !== userId) {
-      // Fetch full audit details for email
-      const auditForEmail = await db.auditSession.findUnique({
-        where: { id: session.id },
-        include: {
-          createdBy: {
-            select: {
-              firstName: true,
-              lastName: true,
-            },
-          },
-          organization: {
-            include: {
-              owner: {
-                select: { email: true },
-              },
-            },
-          },
-          _count: {
-            select: { assets: true },
-          },
-          assignments: {
-            include: {
-              user: {
-                select: {
-                  email: true,
-                  firstName: true,
-                  lastName: true,
-                },
-              },
-            },
-          },
-        },
-      });
+      // Fetch full audit details for email using multiple Supabase queries
+      const [auditResult, assetCountResult, assignmentsResult] =
+        await Promise.all([
+          sbDb
+            .from("AuditSession")
+            .select(
+              "*, createdBy:User!createdById(firstName, lastName), organization:Organization!organizationId(*, owner:User!userId(email))"
+            )
+            .eq("id", session.id)
+            .single(),
+          sbDb
+            .from("AuditAsset")
+            .select("*", { count: "exact", head: true })
+            .eq("auditSessionId", session.id),
+          sbDb
+            .from("AuditAssignment")
+            .select("*, user:User!userId(email, firstName, lastName)")
+            .eq("auditSessionId", session.id),
+        ]);
+
+      const auditForEmail = auditResult.data
+        ? {
+            ...auditResult.data,
+            dueDate: auditResult.data.dueDate
+              ? new Date(auditResult.data.dueDate)
+              : null,
+            createdAt: new Date(auditResult.data.createdAt as string),
+            updatedAt: new Date(auditResult.data.updatedAt as string),
+            _count: { assets: assetCountResult.count ?? 0 },
+            assignments: (assignmentsResult.data ?? []) as unknown as Array<{
+              userId: string;
+              user: { email: string; firstName: string; lastName: string };
+            }>,
+          }
+        : null;
 
       if (auditForEmail) {
         const assigneeUser = auditForEmail.assignments.find(
-          (a: { userId: string }) => a.userId === assignee
+          (a) => a.userId === assignee
         );
 
         if (assigneeUser?.user.email) {
@@ -217,7 +219,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
           // Send async email (don't await to avoid blocking response)
           void sendAuditAssignedEmail({
-            audit: auditForEmail,
+            audit: auditForEmail as any,
             assigneeEmail: assigneeUser.user.email,
             assigneeName,
             hints,

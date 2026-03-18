@@ -11,7 +11,7 @@ import { Form } from "~/components/custom-form";
 import Input from "~/components/forms/input";
 import { SuccessIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { usePosition } from "~/hooks/use-position";
 import { getQrOrganizationLookup } from "~/modules/qr/service.server";
 import {
@@ -89,22 +89,23 @@ export async function action({ request, params }: ActionFunctionArgs) {
     assertIsPost(request);
 
     /** Query the QR and include the asset and userId for later use */
-    const qr = await db.qr
-      .findUniqueOrThrow({
-        where: {
-          id: qrId,
-        },
-        select: QR_SELECT_FOR_REPORT,
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message:
-            "Something went wrong while fetching the QR. Please try again or contact support.",
-          additionalData: { qrId },
-          label: "QR",
-        });
+    const { data: qr, error: qrError } = await sbDb
+      .from("Qr")
+      .select(
+        "id, organizationId, userId, assetId, kitId, asset:Asset!assetId(id, title, organization:Organization!organizationId(owner:User!ownerId(email, id))), kit:Kit!kitId(*)"
+      )
+      .eq("id", qrId)
+      .single();
+
+    if (qrError || !qr) {
+      throw new ShelfError({
+        cause: qrError,
+        message:
+          "Something went wrong while fetching the QR. Please try again or contact support.",
+        additionalData: { qrId },
+        label: "QR",
       });
+    }
 
     /**
      * This should not happen, as QRs should be claimed by an organization before this page is accessed.
@@ -120,7 +121,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       });
     }
 
-    const ownerEmail = qr?.asset?.organization?.owner.email;
+    const ownerEmail = (qr?.asset as any)?.organization?.owner?.email;
 
     const parsedData = parseData(await request.formData(), NewReportSchema);
     const { email, content } = parsedData;
@@ -128,8 +129,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
     const report = await createReport({
       email,
       content,
-      assetId: qr?.asset?.id,
-      kitId: qr?.kit?.id,
+      assetId: (qr?.asset as any)?.id,
+      kitId: (qr?.kit as any)?.id,
     });
 
     /**
@@ -140,7 +141,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     if (ownerEmail) {
       sendReportEmails({
         ownerEmail,
-        qr,
+        qr: qr as any,
         message: report.content,
         reporterEmail: report.email,
       });

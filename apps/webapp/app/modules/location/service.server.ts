@@ -8,7 +8,6 @@ import type {
   Kit,
 } from "@prisma/client";
 import { BookingStatus } from "@prisma/client";
-import invariant from "tiny-invariant";
 import { db } from "~/database/db.server";
 import { sbDb } from "~/database/supabase.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
@@ -196,7 +195,15 @@ export async function getLocation(
         };
 
     const [location, totalAssetsWithinLocation] = await Promise.all([
-      /** Get the items */
+      /**
+       * Get the items.
+       * KEPT AS PRISMA: `locationInclude` is a dynamic Prisma.LocationInclude
+       * built from an optional `include` parameter that varies per caller
+       * (assets with nested category/tags/custody, kits, notes, etc.).
+       * It also uses `_count` in the parent include and pagination (skip/take)
+       * on nested assets. Replicating this in Supabase would require
+       * rewriting every caller and losing the dynamic include pattern.
+       */
       db.location.findFirstOrThrow({
         where: {
           OR: [
@@ -210,11 +217,14 @@ export async function getLocation(
       }),
 
       /** Count them */
-      db.asset.count({
-        where: {
-          locationId: id,
-        },
-      }),
+      sbDb
+        .from("Asset")
+        .select("*", { count: "exact", head: true })
+        .eq("locationId", id)
+        .then(({ count, error }) => {
+          if (error) throw error;
+          return count ?? 0;
+        }),
     ]);
 
     /* User is accessing the location in the wrong organization. In that case we need special 404 handling. */
@@ -391,32 +401,94 @@ export async function getLocations(params: {
     const skip = page > 1 ? (page - 1) * perPage : 0;
     const take = perPage >= 1 ? perPage : 8; // min 1 and max 25 per page
 
-    /** Default value of where. Takes the items belonging to current user */
-    const where: Prisma.LocationWhereInput = { organizationId };
+    /**
+     * Supabase select with nested relation counts to match the
+     * Prisma LOCATION_LIST_INCLUDE shape:
+     *   _count: { kits, assets, children }
+     *   parent: { id, name, parentId, _count: { children } }
+     *   image: { updatedAt }
+     *
+     * PostgREST returns counts as `[{ count: N }]` arrays — we
+     * transform them into the `_count` shape below.
+     */
+    const selectFields = [
+      "*",
+      "Kit(count)",
+      "Asset(count)",
+      "children:Location!Location_parentId_fkey(count)",
+      "parent:Location!parentId(id, name, parentId, children:Location!Location_parentId_fkey(count))",
+      "image:Image(updatedAt)",
+    ].join(", ");
 
-    /** If the search string exists, add it to the where object */
+    let listQuery = sbDb
+      .from("Location")
+      .select(selectFields, { count: "exact" })
+      .eq("organizationId", organizationId)
+      .order("updatedAt", { ascending: false })
+      .range(skip, skip + take - 1);
+
     if (search) {
-      where.name = {
-        contains: search,
-        mode: "insensitive",
-      };
+      listQuery = listQuery.ilike("name", `%${search}%`);
     }
 
-    const [locations, totalLocations] = await Promise.all([
-      /** Get the items */
-      db.location.findMany({
-        skip,
-        take,
-        where,
-        orderBy: { updatedAt: "desc" },
-        include: LOCATION_LIST_INCLUDE,
-      }),
+    const { data, count: totalLocations, error } = await listQuery;
 
-      /** Count them */
-      db.location.count({ where }),
-    ]);
+    if (error) throw error;
 
-    return { locations, totalLocations };
+    // Transform rows to match the Prisma shape expected by consumers
+    const locations = (data ?? []).map((row) => {
+      const {
+        Kit: kitCount,
+        Asset: assetCount,
+        children,
+        parent: rawParent,
+        image: rawImage,
+        ...rest
+      } = row as unknown as Record<string, unknown> & {
+        Kit: { count: number }[];
+        Asset: { count: number }[];
+        children: { count: number }[];
+        parent: {
+          id: string;
+          name: string;
+          parentId: string | null;
+          children: { count: number }[];
+        } | null;
+        image: { updatedAt: string }[] | null;
+      };
+
+      const parent = rawParent
+        ? {
+            id: rawParent.id,
+            name: rawParent.name,
+            parentId: rawParent.parentId,
+            _count: {
+              children: rawParent.children?.[0]?.count ?? 0,
+            },
+          }
+        : null;
+
+      const imageRow =
+        Array.isArray(rawImage) && rawImage.length > 0
+          ? { updatedAt: new Date(rawImage[0].updatedAt) }
+          : null;
+
+      return {
+        ...rest,
+        _count: {
+          kits: kitCount?.[0]?.count ?? 0,
+          assets: assetCount?.[0]?.count ?? 0,
+          children: children?.[0]?.count ?? 0,
+        },
+        parent,
+        image: imageRow,
+        // Cast date strings to Date objects for downstream compatibility
+        createdAt: new Date(rest.createdAt as unknown as string),
+        updatedAt: new Date(rest.updatedAt as unknown as string),
+      };
+    });
+
+    return { locations, totalLocations: totalLocations ?? 0 };
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -432,12 +504,26 @@ export async function getLocationTotalValuation({
 }: {
   locationId: Location["id"];
 }) {
-  const result = await db.asset.aggregate({
-    _sum: { valuation: true },
-    where: { locationId },
-  });
+  const { data, error } = await sbDb
+    .from("Asset")
+    .select("value")
+    .eq("locationId", locationId);
 
-  return result._sum.valuation ?? 0;
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Something went wrong while fetching the location valuation",
+      additionalData: { locationId },
+      label,
+    });
+  }
+
+  const total = data.reduce(
+    (sum, asset) => sum + (asset.value ? Number(asset.value) : 0),
+    0
+  );
+
+  return total;
 }
 
 /**
@@ -468,12 +554,14 @@ async function validateParentLocation({
     });
   }
 
-  const parentLocation = await db.location.findFirst({
-    where: { id: parentId, organizationId },
-    select: { id: true },
-  });
+  const { data: parentLocation, error: parentLocationError } = await sbDb
+    .from("Location")
+    .select("id")
+    .eq("id", parentId)
+    .eq("organizationId", organizationId)
+    .single();
 
-  if (!parentLocation) {
+  if (parentLocationError || !parentLocation) {
     throw new ShelfError({
       cause: null,
       message: "Parent location not found.",
@@ -557,32 +645,30 @@ export async function createLocation({
       parentId,
     });
 
-    return await db.location.create({
-      data: {
+    const { data: location, error: createError } = await sbDb
+      .from("Location")
+      .insert({
         name: name.trim(),
         description,
         address,
         latitude: coordinates?.lat || null,
         longitude: coordinates?.lon || null,
-        user: {
-          connect: {
-            id: userId,
-          },
-        },
-        organization: {
-          connect: {
-            id: organizationId,
-          },
-        },
-        ...(validatedParentId && {
-          parent: {
-            connect: {
-              id: validatedParentId,
-            },
-          },
-        }),
-      },
-    });
+        userId,
+        organizationId,
+        ...(validatedParentId && { parentId: validatedParentId }),
+      })
+      .select()
+      .single();
+
+    if (createError || !location) {
+      throw createError || new Error("Failed to create location");
+    }
+
+    return {
+      ...location,
+      createdAt: new Date(location.createdAt),
+      updatedAt: new Date(location.updatedAt),
+    };
   } catch (cause) {
     if (isLikeShelfError(cause)) {
       throw cause;
@@ -598,14 +684,37 @@ export async function deleteLocation({
   organizationId,
 }: Pick<Location, "id" | "organizationId">) {
   try {
-    const location = await db.location.delete({
-      where: { id, organizationId },
-    });
+    const { data: location, error: deleteLocationError } = await sbDb
+      .from("Location")
+      .delete()
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .select()
+      .single();
+
+    if (deleteLocationError || !location) {
+      throw new ShelfError({
+        cause: deleteLocationError,
+        message: "Something went wrong while deleting the location",
+        additionalData: { id },
+        label,
+      });
+    }
 
     if (location.imageId) {
-      await db.image.delete({
-        where: { id: location.imageId },
-      });
+      const { error: deleteImageError } = await sbDb
+        .from("Image")
+        .delete()
+        .eq("id", location.imageId);
+
+      if (deleteImageError) {
+        throw new ShelfError({
+          cause: deleteImageError,
+          message: "Something went wrong while deleting the location image",
+          additionalData: { imageId: location.imageId },
+          label,
+        });
+      }
     }
 
     return location;
@@ -633,18 +742,38 @@ export async function updateLocation(payload: {
 
   try {
     // Get the current location to check for changes
-    const currentLocation = await db.location.findUniqueOrThrow({
-      where: { id, organizationId },
-      select: {
-        name: true,
-        description: true,
-        address: true,
-        latitude: true,
-        longitude: true,
-        parentId: true,
-        parent: { select: { id: true, name: true } },
-      },
-    });
+    const { data: locationRow, error: fetchError } = await sbDb
+      .from("Location")
+      .select("name, description, address, latitude, longitude, parentId")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (fetchError || !locationRow) {
+      throw new ShelfError({
+        cause: fetchError,
+        message: "Location not found",
+        additionalData: { id, organizationId },
+        label,
+        status: 404,
+      });
+    }
+
+    // Fetch parent separately if parentId exists
+    let parentData: { id: string; name: string } | null = null;
+    if (locationRow.parentId) {
+      const { data: parent } = await sbDb
+        .from("Location")
+        .select("id, name")
+        .eq("id", locationRow.parentId)
+        .single();
+      parentData = parent;
+    }
+
+    const currentLocation = {
+      ...locationRow,
+      parent: parentData,
+    };
 
     // Check if address has changed and geocode if necessary
     let coordinates: { lat: number; lon: number } | null = null;
@@ -669,27 +798,30 @@ export async function updateLocation(payload: {
             currentLocationId: id,
           });
 
-    const updatedLocation = await db.location.update({
-      where: { id, organizationId },
-      data: {
-        name: name?.trim(),
-        description,
-        address,
-        ...(shouldUpdateCoordinates && {
-          latitude: coordinates?.lat || null,
-          longitude: coordinates?.lon || null,
-        }),
-        ...(validatedParentId !== undefined && {
-          parent: validatedParentId
-            ? {
-                connect: {
-                  id: validatedParentId,
-                },
-              }
-            : { disconnect: true },
-        }),
-      },
-    });
+    const updateData: Record<string, unknown> = {
+      name: name?.trim(),
+      description,
+      address,
+      ...(shouldUpdateCoordinates && {
+        latitude: coordinates?.lat || null,
+        longitude: coordinates?.lon || null,
+      }),
+      ...(validatedParentId !== undefined && {
+        parentId: validatedParentId || null,
+      }),
+    };
+
+    const { data: updatedLocation, error: updateError } = await sbDb
+      .from("Location")
+      .update(updateData)
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .select()
+      .single();
+
+    if (updateError || !updatedLocation) {
+      throw updateError || new Error("Failed to update location");
+    }
 
     // Create location activity notes for changed fields
     await createLocationEditNotes({
@@ -781,10 +913,20 @@ async function createLocationEditNotes({
 
     let newParentDisplay = "*none*";
     if (next.parentId) {
-      const newParent = await db.location.findUnique({
-        where: { id: next.parentId },
-        select: { id: true, name: true },
-      });
+      const { data: newParent, error: newParentError } = await sbDb
+        .from("Location")
+        .select("id, name")
+        .eq("id", next.parentId)
+        .single();
+
+      if (newParentError) {
+        throw new ShelfError({
+          cause: newParentError,
+          message: "Something went wrong while fetching the parent location",
+          additionalData: { parentId: next.parentId },
+          label,
+        });
+      }
       newParentDisplay = newParent
         ? wrapLinkForNote(`/locations/${newParent.id}`, newParent.name)
         : "*unknown*";
@@ -795,10 +937,21 @@ async function createLocationEditNotes({
 
   if (changes.length === 0) return;
 
-  const user = await db.user.findFirst({
-    where: { id: userId },
-    select: { firstName: true, lastName: true },
-  });
+  const { data: user, error: userError } = await sbDb
+    .from("User")
+    .select("firstName, lastName")
+    .eq("id", userId)
+    .single();
+
+  if (userError) {
+    throw new ShelfError({
+      cause: userError,
+      message: "Something went wrong while fetching the user",
+      additionalData: { userId },
+      label,
+    });
+  }
+
   const userLink = wrapUserLinkForNote({
     id: userId,
     firstName: user?.firstName,
@@ -834,30 +987,39 @@ export async function createLocationsIfNotExists({
     // now we loop through the locations and check if they exist
     for (const [location, _] of locations) {
       const trimmedLocation = (location as string).trim();
-      const existingLocation = await db.location.findFirst({
-        where: {
-          name: { equals: trimmedLocation, mode: "insensitive" },
-          organizationId,
-        },
-      });
+      const { data: existingLocation, error: existingLocationError } =
+        await sbDb
+          .from("Location")
+          .select("*")
+          .ilike("name", trimmedLocation)
+          .eq("organizationId", organizationId)
+          .maybeSingle();
+
+      if (existingLocationError) {
+        throw new ShelfError({
+          cause: existingLocationError,
+          message: "Something went wrong while checking for existing location",
+          additionalData: { trimmedLocation, organizationId },
+          label,
+        });
+      }
 
       if (!existingLocation) {
         // if the location doesn't exist, we create a new one
-        const newLocation = await db.location.create({
-          data: {
+        const { data: newLocation, error: createLocError } = await sbDb
+          .from("Location")
+          .insert({
             name: trimmedLocation,
-            user: {
-              connect: {
-                id: userId,
-              },
-            },
-            organization: {
-              connect: {
-                id: organizationId,
-              },
-            },
-          },
-        });
+            userId,
+            organizationId,
+          })
+          .select("id")
+          .single();
+
+        if (createLocError || !newLocation) {
+          throw createLocError || new Error("Failed to create location");
+        }
+
         locations.set(location, newLocation.id);
       } else {
         // if the location exists, we just update the id
@@ -888,34 +1050,28 @@ export async function bulkDeleteLocations({
 }) {
   try {
     /** We have to delete the images of locations if any */
-    const locations = await db.location.findMany({
-      where: locationIds.includes(ALL_SELECTED_KEY)
-        ? { organizationId }
-        : { id: { in: locationIds }, organizationId },
-      select: { id: true, imageId: true },
-    });
+    let query = sbDb
+      .from("Location")
+      .select("id, imageId")
+      .eq("organizationId", organizationId);
 
-    return await db.$transaction(async (tx) => {
-      /** Deleting all locations */
-      await tx.location.deleteMany({
-        where: { id: { in: locations.map((location) => location.id) } },
-      });
+    if (!locationIds.includes(ALL_SELECTED_KEY)) {
+      query = query.in("id", locationIds);
+    }
 
-      /** Deleting images of locations */
-      const locationWithImages = locations.filter(
-        (location) => !!location.imageId
-      );
-      await tx.image.deleteMany({
-        where: {
-          id: {
-            in: locationWithImages.map((location) => {
-              invariant(location.imageId, "Image not found to delete");
-              return location.imageId;
-            }),
-          },
-        },
-      });
+    const { data: locations, error: fetchError } = await query;
+    if (fetchError) throw fetchError;
+
+    const locationIdList = (locations ?? []).map((l) => l.id);
+    const imageIdList = (locations ?? [])
+      .filter((l): l is typeof l & { imageId: string } => !!l.imageId)
+      .map((l) => l.imageId);
+
+    const { error: rpcError } = await sbDb.rpc("shelf_location_bulk_delete", {
+      p_location_ids: locationIdList,
+      p_image_ids: imageIdList,
     });
+    if (rpcError) throw rpcError;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -991,13 +1147,23 @@ export async function updateLocationImage({
       thumbnailPublicUrl = publicUrl;
     }
 
-    await db.location.update({
-      where: { id: locationId, organizationId },
-      data: {
+    const { error: updateImageError } = await sbDb
+      .from("Location")
+      .update({
         imageUrl: imagePublicUrl,
-        thumbnailUrl: thumbnailPublicUrl ? thumbnailPublicUrl : undefined,
-      },
-    });
+        ...(thumbnailPublicUrl ? { thumbnailUrl: thumbnailPublicUrl } : {}),
+      })
+      .eq("id", locationId)
+      .eq("organizationId", organizationId);
+
+    if (updateImageError) {
+      throw new ShelfError({
+        cause: updateImageError,
+        message: "Something went wrong while updating the location image",
+        additionalData: { locationId, organizationId },
+        label,
+      });
+    }
 
     if (prevImageUrl) {
       await removePublicFile({ publicUrl: prevImageUrl });
@@ -1031,40 +1197,40 @@ export async function generateLocationWithImages({
 }) {
   try {
     for (let i = 1; i <= numberOfLocations; i++) {
-      const imageCreated = await db.image.create({
-        data: {
-          blob: Buffer.from(await image.arrayBuffer()),
+      const { data: imageCreated, error: imageError } = await sbDb
+        .from("Image")
+        .insert({
+          blob: Buffer.from(await image.arrayBuffer()).toString("base64"),
           contentType: image.type,
-          ownerOrg: { connect: { id: organizationId } },
-          user: { connect: { id: userId } },
-        },
+          ownerOrgId: organizationId,
+          userId,
+        })
+        .select("id")
+        .single();
+
+      if (imageError || !imageCreated) {
+        throw imageError || new Error("Failed to create image");
+      }
+
+      const { error: locError } = await sbDb.from("Location").insert({
+        /**
+         * We are using id() for names because location names are unique.
+         * This location is going to be created for testing purposes only so the name in this case
+         * doesn't matter.
+         */
+        name: id(),
+        /**
+         * This approach is @deprecated and will not be used in the future.
+         * Instead, we will store images in supabase storage and use the public URL.
+         */
+        imageId: imageCreated.id,
+        userId,
+        organizationId,
       });
 
-      await db.location.create({
-        data: {
-          /**
-           * We are using id() for names because location names are unique.
-           * This location is going to be created for testing purposes only so the name in this case
-           * doesn't matter.
-           */
-          name: id(),
-          /**
-           * This approach is @deprecated and will not be used in the future.
-           * Instead, we will store images in supabase storage and use the public URL.
-           */
-          image: { connect: { id: imageCreated.id } },
-          user: {
-            connect: {
-              id: userId,
-            },
-          },
-          organization: {
-            connect: {
-              id: organizationId,
-            },
-          },
-        },
-      });
+      if (locError) {
+        throw locError;
+      }
     }
   } catch (cause) {
     throw new ShelfError({
@@ -1161,6 +1327,13 @@ export async function getLocationKits(
       };
     }
 
+    /**
+     * KEPT AS PRISMA: `kitWhere` uses complex nested OR conditions that
+     * PostgREST cannot express — specifically `assets.some.bookings.some`
+     * (multi-level existence checks through relations) and
+     * `custody.custodian.userId` (nested relation filtering). These
+     * require Prisma's join-based query engine.
+     */
     const [kits, totalKits] = await Promise.all([
       db.kit.findMany({
         where: kitWhere,
@@ -1256,49 +1429,36 @@ async function createBulkLocationChangeNotes({
   userId,
   location,
 }: {
-  modifiedAssets: Prisma.AssetGetPayload<{
-    select: {
-      title: true;
-      id: true;
-      location: {
-        select: {
-          name: true;
-          id: true;
-        };
-      };
-      user: {
-        select: {
-          firstName: true;
-          lastName: true;
-          id: true;
-        };
-      };
-    };
-  }>[];
+  modifiedAssets: Array<{
+    title: string;
+    id: string;
+    location: { name: string; id: string } | null;
+    user: {
+      firstName: string | null;
+      lastName: string | null;
+      id: string;
+    } | null;
+  }>;
   assetIds: Asset["id"][];
   removedAssetIds: Asset["id"][];
   userId: User["id"];
   location: Pick<Location, "id" | "name">;
 }) {
   try {
-    const user = await db.user
-      .findFirstOrThrow({
-        where: {
-          id: userId,
-        },
-        select: {
-          firstName: true,
-          lastName: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "User not found",
-          additionalData: { userId },
-          label,
-        });
+    const { data: user, error: userError } = await sbDb
+      .from("User")
+      .select("firstName, lastName")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      throw new ShelfError({
+        cause: userError,
+        message: "User not found",
+        additionalData: { userId },
+        label,
       });
+    }
 
     const addedAssets: Array<{ id: string; title: string }> = [];
     const removedAssetsSummary: Array<{ id: string; title: string }> = [];
@@ -1432,25 +1592,43 @@ export async function updateLocationAssets({
   removedAssetIds: Asset["id"][];
 }) {
   try {
-    const location = await db.location
-      .findUniqueOrThrow({
-        where: {
-          id: locationId,
-          organizationId,
-        },
-        include: {
-          assets: true,
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Location not found",
-          additionalData: { locationId, userId, organizationId },
-          status: 404,
-          label: "Location",
-        });
+    // Fetch the location
+    const { data: locationRow, error: locFetchError } = await sbDb
+      .from("Location")
+      .select("id, name")
+      .eq("id", locationId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (locFetchError || !locationRow) {
+      throw new ShelfError({
+        cause: locFetchError,
+        message: "Location not found",
+        additionalData: { locationId, userId, organizationId },
+        status: 404,
+        label: "Location",
       });
+    }
+
+    // Fetch assets currently at this location
+    const { data: currentAssets, error: currentAssetsError } = await sbDb
+      .from("Asset")
+      .select("id")
+      .eq("locationId", locationId);
+
+    if (currentAssetsError) {
+      throw new ShelfError({
+        cause: currentAssetsError,
+        message: "Failed to fetch current location assets",
+        additionalData: { locationId },
+        label: "Location",
+      });
+    }
+
+    const location = {
+      ...locationRow,
+      assets: currentAssets ?? [],
+    };
 
     /**
      * If user has selected all assets, then we have to get ids of all those assets
@@ -1464,6 +1642,12 @@ export async function updateLocationAssets({
         currentSearchParams: searchParams.toString(),
       });
 
+      /**
+       * KEPT AS PRISMA: `assetsWhere` comes from `getAssetsWhereInput()`
+       * which returns a `Prisma.AssetWhereInput` with complex nested OR
+       * conditions (tags some/none, bookings, custody relations).
+       * Converting this requires rewriting the shared utility.
+       */
       const allAssets = await db.asset.findMany({
         where: assetsWhere,
         select: { id: true },
@@ -1496,94 +1680,108 @@ export async function updateLocationAssets({
      * We need to query all the modified assets so we know their location before the change
      * That way we can later create notes for all the location changes
      */
-    const modifiedAssets = await db.asset
-      .findMany({
-        where: {
-          id: {
-            in: [...actuallyNewAssetIds, ...removedAssetIds],
-          },
-          organizationId,
-        },
-        select: {
-          title: true,
-          id: true,
-          location: {
-            select: {
-              name: true,
-              id: true,
-            },
-          },
-          user: {
-            select: {
-              firstName: true,
-              lastName: true,
-              id: true,
-            },
-          },
-        },
-      })
-      .catch((cause) => {
+    const modifiedAssetIds = [...actuallyNewAssetIds, ...removedAssetIds];
+    let modifiedAssets: Array<{
+      title: string;
+      id: string;
+      location: { name: string; id: string } | null;
+      user: {
+        firstName: string | null;
+        lastName: string | null;
+        id: string;
+      } | null;
+    }> = [];
+
+    if (modifiedAssetIds.length > 0) {
+      const { data: assetRows, error: assetFetchError } = await sbDb
+        .from("Asset")
+        .select("title, id, locationId, userId")
+        .in("id", modifiedAssetIds)
+        .eq("organizationId", organizationId);
+
+      if (assetFetchError) {
         throw new ShelfError({
-          cause,
+          cause: assetFetchError,
           message:
             "Something went wrong while fetching the assets. Please try again or contact support.",
           additionalData: { assetIds, removedAssetIds, userId, locationId },
           label: "Assets",
         });
-      });
+      }
+
+      // Fetch related locations and users
+      const locIds = [
+        ...new Set(
+          (assetRows ?? [])
+            .map((a) => a.locationId)
+            .filter((lid): lid is string => !!lid)
+        ),
+      ];
+      const userIds = [
+        ...new Set(
+          (assetRows ?? [])
+            .map((a) => a.userId)
+            .filter((uid): uid is string => !!uid)
+        ),
+      ];
+
+      const [locResult, userResult] = await Promise.all([
+        locIds.length > 0
+          ? sbDb.from("Location").select("id, name").in("id", locIds)
+          : { data: [], error: null },
+        userIds.length > 0
+          ? sbDb
+              .from("User")
+              .select("id, firstName, lastName")
+              .in("id", userIds)
+          : { data: [], error: null },
+      ]);
+
+      const locMap = new Map((locResult.data ?? []).map((l) => [l.id, l]));
+      const userMap = new Map((userResult.data ?? []).map((u) => [u.id, u]));
+
+      modifiedAssets = (assetRows ?? []).map((a) => ({
+        title: a.title,
+        id: a.id,
+        location: a.locationId ? locMap.get(a.locationId) ?? null : null,
+        user: a.userId ? userMap.get(a.userId) ?? null : null,
+      }));
+    }
 
     if (assetIds.length > 0) {
-      /** We update the location with the new assets */
-      await db.location
-        .update({
-          where: {
-            id: locationId,
-            organizationId,
-          },
-          data: {
-            assets: {
-              connect: assetIds.map((id) => ({
-                id,
-              })),
-            },
-          },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message:
-              "Something went wrong while adding the assets to the location. Please try again or contact support.",
-            additionalData: { assetIds, userId, locationId },
-            label: "Location",
-          });
+      /** We update the assets to set their locationId to this location */
+      const { error: connectError } = await sbDb
+        .from("Asset")
+        .update({ locationId })
+        .in("id", assetIds);
+
+      if (connectError) {
+        throw new ShelfError({
+          cause: connectError,
+          message:
+            "Something went wrong while adding the assets to the location. Please try again or contact support.",
+          additionalData: { assetIds, userId, locationId },
+          label: "Location",
         });
+      }
     }
 
     /** If some assets were removed, we also need to handle those */
     if (removedAssetIds.length > 0) {
-      await db.location
-        .update({
-          where: {
-            organizationId,
-            id: locationId,
-          },
-          data: {
-            assets: {
-              disconnect: removedAssetIds.map((id) => ({
-                id,
-              })),
-            },
-          },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message:
-              "Something went wrong while removing the assets from the location. Please try again or contact support.",
-            additionalData: { removedAssetIds, userId, locationId },
-            label: "Location",
-          });
+      const { error: disconnectError } = await sbDb
+        .from("Asset")
+        .update({ locationId: null })
+        .in("id", removedAssetIds);
+
+      if (disconnectError) {
+        throw new ShelfError({
+          cause: disconnectError,
+          message:
+            "Something went wrong while removing the assets from the location. Please try again or contact support.",
+          additionalData: { removedAssetIds, userId, locationId },
+          label: "Location",
         });
+      }
     }
 
     /** Creates the relevant notes for all the changed assets */
@@ -1620,27 +1818,66 @@ export async function updateLocationKits({
   request: Request;
 }) {
   try {
-    const location = await db.location
-      .findUniqueOrThrow({
-        where: { id: locationId, organizationId },
-        include: {
-          kits: {
-            select: {
-              id: true,
-              assets: { select: { id: true } },
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Location not found",
-          additionalData: { locationId, userId, organizationId },
-          status: 404,
-          label: "Location",
-        });
+    // Fetch location
+    const { data: locRow, error: locErr } = await sbDb
+      .from("Location")
+      .select("id, name")
+      .eq("id", locationId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (locErr || !locRow) {
+      throw new ShelfError({
+        cause: locErr,
+        message: "Location not found",
+        additionalData: { locationId, userId, organizationId },
+        status: 404,
+        label: "Location",
       });
+    }
+
+    // Fetch kits currently at this location, with their asset IDs
+    const { data: currentKitRows, error: kitsErr } = await sbDb
+      .from("Kit")
+      .select("id")
+      .eq("locationId", locationId);
+
+    if (kitsErr) {
+      throw new ShelfError({
+        cause: kitsErr,
+        message: "Failed to fetch location kits",
+        additionalData: { locationId },
+        label: "Location",
+      });
+    }
+
+    // Fetch asset IDs for those kits
+    const currentKitIds = (currentKitRows ?? []).map((k) => k.id);
+    let kitAssetsMap: Array<{ id: string; assets: Array<{ id: string }> }> = [];
+    if (currentKitIds.length > 0) {
+      const { data: kitAssetRows } = await sbDb
+        .from("Asset")
+        .select("id, kitId")
+        .in("kitId", currentKitIds);
+
+      // Group by kitId
+      const grouped = new Map<string, Array<{ id: string }>>();
+      for (const row of kitAssetRows ?? []) {
+        if (!row.kitId) continue;
+        const arr = grouped.get(row.kitId) ?? [];
+        arr.push({ id: row.id });
+        grouped.set(row.kitId, arr);
+      }
+      kitAssetsMap = currentKitIds.map((kid) => ({
+        id: kid,
+        assets: grouped.get(kid) ?? [],
+      }));
+    }
+
+    const location = {
+      ...locRow,
+      kits: kitAssetsMap,
+    };
 
     /**
      * If user has selected all kits, then we have to get ids of all those kits
@@ -1654,12 +1891,14 @@ export async function updateLocationKits({
         currentSearchParams: searchParams.toString(),
       });
 
+      /**
+       * KEPT AS PRISMA: `kitWhere` comes from `getKitsWhereInput()`
+       * which returns a `Prisma.KitWhereInput`. Converting requires
+       * rewriting the shared utility.
+       */
       const allKits = await db.kit.findMany({
         where: kitWhere,
-        select: {
-          id: true,
-          assets: { select: { id: true } },
-        },
+        select: { id: true },
       });
 
       const locationKits = location.kits.map((kit) => kit.id);
@@ -1692,57 +1931,119 @@ export async function updateLocationKits({
     );
 
     if (kitIds.length > 0) {
-      // Get all asset IDs from the kits that are being added to this location
-      const kitsToAdd = await db.kit.findMany({
-        where: { id: { in: kitIds }, organizationId },
-        select: {
-          id: true,
-          name: true,
-          locationId: true,
-          location: { select: { id: true, name: true } },
-          assets: {
-            select: {
-              id: true,
-              title: true,
-              location: { select: { id: true, name: true } },
-            },
-          },
-        },
-      });
+      // Get all kits being added to this location
+      const { data: kitRows, error: kitFetchErr } = await sbDb
+        .from("Kit")
+        .select("id, name, locationId")
+        .in("id", kitIds)
+        .eq("organizationId", organizationId);
+
+      if (kitFetchErr) {
+        throw new ShelfError({
+          cause: kitFetchErr,
+          message: "Failed to fetch kits",
+          additionalData: { kitIds },
+          label: "Location",
+        });
+      }
+
+      // Fetch kit locations
+      const kitLocIds = [
+        ...new Set(
+          (kitRows ?? [])
+            .map((k) => k.locationId)
+            .filter((lid): lid is string => !!lid)
+        ),
+      ];
+      const { data: kitLocRows } =
+        kitLocIds.length > 0
+          ? await sbDb.from("Location").select("id, name").in("id", kitLocIds)
+          : { data: [] };
+      const kitLocMap = new Map((kitLocRows ?? []).map((l) => [l.id, l]));
+
+      // Fetch assets belonging to these kits
+      const { data: kitAssetRows } = await sbDb
+        .from("Asset")
+        .select("id, title, kitId, locationId")
+        .in("kitId", kitIds);
+
+      // Fetch asset locations
+      const assetLocIds = [
+        ...new Set(
+          (kitAssetRows ?? [])
+            .map((a) => a.locationId)
+            .filter((lid): lid is string => !!lid)
+        ),
+      ];
+      const { data: assetLocRows } =
+        assetLocIds.length > 0
+          ? await sbDb.from("Location").select("id, name").in("id", assetLocIds)
+          : { data: [] };
+      const assetLocMap = new Map((assetLocRows ?? []).map((l) => [l.id, l]));
+
+      // Build kitsToAdd structure
+      const assetsByKit = new Map<
+        string,
+        Array<{
+          id: string;
+          title: string;
+          location: { id: string; name: string } | null;
+        }>
+      >();
+      for (const a of kitAssetRows ?? []) {
+        if (!a.kitId) continue;
+        const arr = assetsByKit.get(a.kitId) ?? [];
+        arr.push({
+          id: a.id,
+          title: a.title,
+          location: a.locationId ? assetLocMap.get(a.locationId) ?? null : null,
+        });
+        assetsByKit.set(a.kitId, arr);
+      }
+
+      const kitsToAdd = (kitRows ?? []).map((k) => ({
+        ...k,
+        location: k.locationId ? kitLocMap.get(k.locationId) ?? null : null,
+        assets: assetsByKit.get(k.id) ?? [],
+      }));
 
       const assetIds = kitsToAdd.flatMap((kit) =>
         kit.assets.map((asset) => asset.id)
       );
 
-      /** We update the location with the new kits and their assets */
-      await db.location
-        .update({
-          where: {
-            id: locationId,
-            organizationId,
-          },
-          data: {
-            kits: {
-              connect: kitIds.map((id) => ({
-                id,
-              })),
-            },
-            assets: {
-              connect: assetIds.map((id) => ({
-                id,
-              })),
-            },
-          },
-        })
-        .catch((cause) => {
+      /** Update kits to point to this location */
+      const { error: kitConnectErr } = await sbDb
+        .from("Kit")
+        .update({ locationId })
+        .in("id", kitIds);
+
+      if (kitConnectErr) {
+        throw new ShelfError({
+          cause: kitConnectErr,
+          message:
+            "Something went wrong while adding the kits to the location. Please try again or contact support.",
+          additionalData: { kitIds, userId, locationId },
+          label: "Location",
+        });
+      }
+
+      /** Update assets to point to this location */
+      if (assetIds.length > 0) {
+        const { error: assetConnectErr } = await sbDb
+          .from("Asset")
+          .update({ locationId })
+          .in("id", assetIds);
+
+        if (assetConnectErr) {
           throw new ShelfError({
-            cause,
+            cause: assetConnectErr,
             message:
-              "Something went wrong while adding the kits to the location. Please try again or contact support.",
-            additionalData: { kitIds, userId, locationId },
+              "Something went wrong while adding the kit assets to the location. Please try again or contact support.",
+            additionalData: { assetIds, userId, locationId },
             label: "Location",
           });
-        });
+        }
+      }
 
       const user = await getUserByID(userId, {
         select: {
@@ -1858,48 +2159,82 @@ export async function updateLocationKits({
 
     /** If some kits were removed, we also need to handle those */
     if (removedKitIds.length > 0) {
-      // Get asset IDs from the kits being removed
-      const kitsBeingRemoved = await db.kit.findMany({
-        where: { id: { in: removedKitIds }, organizationId },
-        select: {
-          id: true,
-          name: true,
-          assets: { select: { id: true, title: true } },
-        },
-      });
+      // Get kits being removed with their assets
+      const { data: removedKitRows, error: removedKitErr } = await sbDb
+        .from("Kit")
+        .select("id, name")
+        .in("id", removedKitIds)
+        .eq("organizationId", organizationId);
+
+      if (removedKitErr) {
+        throw new ShelfError({
+          cause: removedKitErr,
+          message: "Failed to fetch kits being removed",
+          additionalData: { removedKitIds },
+          label: "Location",
+        });
+      }
+
+      // Fetch assets belonging to removed kits
+      const { data: removedKitAssetRows } = await sbDb
+        .from("Asset")
+        .select("id, title, kitId")
+        .in("kitId", removedKitIds);
+
+      // Group assets by kit
+      const removedAssetsByKit = new Map<
+        string,
+        Array<{ id: string; title: string }>
+      >();
+      for (const a of removedKitAssetRows ?? []) {
+        if (!a.kitId) continue;
+        const arr = removedAssetsByKit.get(a.kitId) ?? [];
+        arr.push({ id: a.id, title: a.title });
+        removedAssetsByKit.set(a.kitId, arr);
+      }
+
+      const kitsBeingRemoved = (removedKitRows ?? []).map((k) => ({
+        ...k,
+        assets: removedAssetsByKit.get(k.id) ?? [],
+      }));
 
       const removedAssetIds = kitsBeingRemoved.flatMap((kit) =>
         kit.assets.map((asset) => asset.id)
       );
 
-      await db.location
-        .update({
-          where: {
-            organizationId,
-            id: locationId,
-          },
-          data: {
-            kits: {
-              disconnect: removedKitIds.map((id) => ({
-                id,
-              })),
-            },
-            assets: {
-              disconnect: removedAssetIds.map((id) => ({
-                id,
-              })),
-            },
-          },
-        })
-        .catch((cause) => {
+      /** Disconnect kits from location */
+      const { error: kitDisconnectErr } = await sbDb
+        .from("Kit")
+        .update({ locationId: null })
+        .in("id", removedKitIds);
+
+      if (kitDisconnectErr) {
+        throw new ShelfError({
+          cause: kitDisconnectErr,
+          message:
+            "Something went wrong while removing the kits from the location. Please try again or contact support.",
+          additionalData: { removedKitIds, userId, locationId },
+          label: "Location",
+        });
+      }
+
+      /** Disconnect assets from location */
+      if (removedAssetIds.length > 0) {
+        const { error: assetDisconnectErr } = await sbDb
+          .from("Asset")
+          .update({ locationId: null })
+          .in("id", removedAssetIds);
+
+        if (assetDisconnectErr) {
           throw new ShelfError({
-            cause,
+            cause: assetDisconnectErr,
             message:
-              "Something went wrong while removing the kits from the location. Please try again or contact support.",
-            additionalData: { removedKitIds, userId, locationId },
+              "Something went wrong while removing the kit assets from the location. Please try again or contact support.",
+            additionalData: { removedAssetIds, userId, locationId },
             label: "Location",
           });
-        });
+        }
+      }
 
       // Add notes to the assets that their location was removed via their parent kit
       if (removedAssetIds.length > 0) {

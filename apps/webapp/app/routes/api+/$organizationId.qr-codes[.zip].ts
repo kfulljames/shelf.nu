@@ -1,6 +1,6 @@
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, getParams } from "~/utils/http.server";
 import { requireAdmin } from "~/utils/roles.server";
@@ -23,38 +23,34 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const onlyOrphaned = url.searchParams.get("orphaned");
 
-    const codes = await db.qr
-      .findMany({
-        where: {
-          organizationId,
-          ...(onlyOrphaned
-            ? { assetId: null, kitId: null }
-            : {
-                OR: [
-                  {
-                    assetId: {
-                      not: null,
-                    },
-                  },
-                  {
-                    kitId: {
-                      not: null,
-                    },
-                  },
-                ],
-              }),
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "Something went wrong fetching the QR codes.",
-          additionalData: { userId, organizationId },
-          label: "QR",
-        });
-      });
+    let query;
+    if (onlyOrphaned) {
+      query = sbDb
+        .from("Qr")
+        .select("*")
+        .eq("organizationId", organizationId)
+        .is("assetId", null)
+        .is("kitId", null);
+    } else {
+      query = sbDb
+        .from("Qr")
+        .select("*")
+        .eq("organizationId", organizationId)
+        .or("assetId.not.is.null,kitId.not.is.null");
+    }
 
-    const zipBlob = await createQrCodesZip(codes);
+    const { data: codes, error: qrError } = await query;
+
+    if (qrError) {
+      throw new ShelfError({
+        cause: qrError,
+        message: "Something went wrong fetching the QR codes.",
+        additionalData: { userId, organizationId },
+        label: "QR",
+      });
+    }
+
+    const zipBlob = await createQrCodesZip(codes || []);
 
     return new Response(zipBlob, {
       headers: { "content-type": "application/zip" },

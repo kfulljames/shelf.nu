@@ -1,5 +1,5 @@
 import { data, type LoaderFunctionArgs } from "react-router";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { makeShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import {
@@ -36,24 +36,18 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       return data(payload({ images: [] }));
     }
 
-    const images = await db.auditImage.findMany({
-      where: {
-        id: { in: imageIds },
-        organizationId, // Ensure user can only see images from their organization
-      },
-      select: {
-        id: true,
-        imageUrl: true,
-        thumbnailUrl: true,
-        description: true,
-        createdAt: true,
-      },
-      orderBy: {
-        createdAt: "asc",
-      },
-    });
+    const { data: images, error: imgError } = await sbDb
+      .from("AuditImage")
+      .select("id, imageUrl, thumbnailUrl, description, createdAt")
+      .in("id", imageIds)
+      .eq("organizationId", organizationId)
+      .order("createdAt", { ascending: true });
 
-    return data(payload({ images }));
+    if (imgError) {
+      throw imgError;
+    }
+
+    return data(payload({ images: images ?? [] }));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });

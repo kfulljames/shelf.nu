@@ -1,3 +1,4 @@
+import type { Asset, Category } from "@prisma/client";
 import type {
   MetaFunction,
   LoaderFunctionArgs,
@@ -20,7 +21,11 @@ import UpcomingBookings from "~/components/home/upcoming-bookings";
 import UpcomingReminders from "~/components/home/upcoming-reminders";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
+// KEPT AS PRISMA: aggregate, groupBy, $queryRaw, _count includes,
+// nested `some` filter, orderBy with _count, findMany with _count select
+// — not convertible to Supabase
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getUpcomingRemindersForHomePage } from "~/modules/asset-reminder/service.server";
 import { getBookings } from "~/modules/booking/service.server";
 
@@ -111,9 +116,22 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
 
       // 1a. Count of assets with known valuation
-      db.asset.count({
-        where: { organizationId, valuation: { not: null } },
-      }),
+      sbDb
+        .from("Asset")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .not("valuation", "is", null)
+        .then(({ count, error: countErr }) => {
+          if (countErr) {
+            throw new ShelfError({
+              cause: countErr,
+              message: "Failed to count assets with known valuation",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return count ?? 0;
+        }),
 
       // 1b. Assets grouped by status
       db.asset.groupBy({
@@ -133,9 +151,22 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         ORDER BY 1`,
 
       // 1c. Baseline count (assets before the 12-month window)
-      db.asset.count({
-        where: { organizationId, createdAt: { lt: twelveMonthsAgo } },
-      }),
+      sbDb
+        .from("Asset")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .lt("createdAt", twelveMonthsAgo.toISOString())
+        .then(({ count, error: countErr }) => {
+          if (countErr) {
+            throw new ShelfError({
+              cause: countErr,
+              message: "Failed to count baseline assets",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return count ?? 0;
+        }),
 
       // 1d. Team members with direct custody counts
       db.teamMember.findMany({
@@ -215,44 +246,66 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       }),
 
       // 1e. Newest 5 assets
-      db.asset
-        .findMany({
-          where: { organizationId },
-          orderBy: { createdAt: "desc" },
-          take: 5,
-          include: { category: true },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "Failed to load newest assets",
-            additionalData: { userId, organizationId },
-            label: "Dashboard",
-          });
+      sbDb
+        .from("Asset")
+        .select("*, category:Category(*)")
+        .eq("organizationId", organizationId)
+        .order("createdAt", { ascending: false })
+        .limit(5)
+        .then(({ data: assets, error: assetsErr }) => {
+          if (assetsErr) {
+            throw new ShelfError({
+              cause: assetsErr,
+              message: "Failed to load newest assets",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return (assets ?? []) as unknown as (Asset & {
+            category: Category | null;
+          })[];
         }),
 
       // Upcoming reminders
       getUpcomingRemindersForHomePage({ organizationId }),
 
       // Announcement
-      db.announcement
-        .findFirst({
-          where: { published: true },
-          orderBy: { createdAt: "desc" },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "Failed to load announcement",
-            additionalData: { userId, organizationId },
-            label: "Dashboard",
-          });
+      sbDb
+        .from("Announcement")
+        .select("*")
+        .eq("published", true)
+        .order("createdAt", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+        .then(({ data: ann, error: annErr }) => {
+          if (annErr) {
+            throw new ShelfError({
+              cause: annErr,
+              message: "Failed to load announcement",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return ann;
         }),
 
       // KPI: team members
-      db.teamMember.count({
-        where: { organizationId, deletedAt: null },
-      }),
+      sbDb
+        .from("TeamMember")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .is("deletedAt", null)
+        .then(({ count, error: countErr }) => {
+          if (countErr) {
+            throw new ShelfError({
+              cause: countErr,
+              message: "Failed to count team members",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return count ?? 0;
+        }),
 
       // Location distribution (top 5)
       db.location
@@ -277,14 +330,38 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         ),
 
       // KPI: total locations
-      db.location.count({
-        where: { organizationId },
-      }),
+      sbDb
+        .from("Location")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .then(({ count, error: countErr }) => {
+          if (countErr) {
+            throw new ShelfError({
+              cause: countErr,
+              message: "Failed to count locations",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return count ?? 0;
+        }),
 
       // KPI: total categories
-      db.category.count({
-        where: { organizationId },
-      }),
+      sbDb
+        .from("Category")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .then(({ count, error: countErr }) => {
+          if (countErr) {
+            throw new ShelfError({
+              cause: countErr,
+              message: "Failed to count categories",
+              additionalData: { userId, organizationId },
+              label: "Dashboard",
+            });
+          }
+          return count ?? 0;
+        }),
 
       // Cookie
       userPrefs.parse(request.headers.get("Cookie")).then((c: any) => c || {}),

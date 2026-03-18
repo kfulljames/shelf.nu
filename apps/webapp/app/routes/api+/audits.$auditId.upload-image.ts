@@ -1,7 +1,7 @@
 import { data } from "react-router";
 import type { ActionFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { createAuditAssetImagesAddedNote } from "~/modules/audit/helpers.server";
 import { uploadAuditImage } from "~/modules/audit/image.service.server";
 import { requireAuditAssigneeForBaseSelfService } from "~/modules/audit/service.server";
@@ -31,16 +31,21 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     });
 
     // Enforce assignee access for BASE/SELF_SERVICE roles on audit mutations.
-    const audit = await db.auditSession.findUnique({
-      where: { id: auditId },
-      select: {
-        id: true,
-        organizationId: true,
-        assignments: {
-          select: { userId: true },
-        },
-      },
-    });
+    const { data: auditData } = await sbDb
+      .from("AuditSession")
+      .select("id, organizationId")
+      .eq("id", auditId)
+      .single();
+
+    // Fetch assignments separately
+    const { data: assignments } = await sbDb
+      .from("AuditAssignment")
+      .select("userId")
+      .eq("auditSessionId", auditId);
+
+    const audit = auditData
+      ? { ...auditData, assignments: assignments ?? [] }
+      : null;
 
     if (!audit || audit.organizationId !== organizationId) {
       throw new ShelfError({
@@ -72,15 +77,12 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     });
 
     if (auditAssetId && result?.id) {
-      // Mirror the details flow by creating an automatic activity note.
-      await db.$transaction(async (tx) => {
-        await createAuditAssetImagesAddedNote({
-          auditSessionId: auditId,
-          auditAssetId,
-          userId,
-          imageIds: [result.id],
-          tx,
-        });
+      // Create an automatic activity note for the image upload
+      await createAuditAssetImagesAddedNote({
+        auditSessionId: auditId,
+        auditAssetId,
+        userId,
+        imageIds: [result.id],
       });
     }
 

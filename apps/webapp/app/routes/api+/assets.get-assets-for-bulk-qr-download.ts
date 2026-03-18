@@ -1,3 +1,4 @@
+// KEPT AS PRISMA: uses Prisma.AssetWhereInput type and getAssetsWhereInput helper
 import type { Prisma } from "@prisma/client";
 import { data, type ActionFunctionArgs } from "react-router";
 import { db } from "~/database/db.server";

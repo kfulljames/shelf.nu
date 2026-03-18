@@ -1,9 +1,9 @@
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { requireAuditAssigneeForBaseSelfService } from "~/modules/audit/service.server";
 import { exportAuditNotesToCsv } from "~/utils/csv.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, getParams } from "~/utils/http.server";
 import {
   PermissionAction,
@@ -48,18 +48,38 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     });
 
-    const audit = await db.auditSession.findFirstOrThrow({
-      where: { id: auditId, organizationId },
-      select: {
-        name: true,
-        assignments: {
-          select: { userId: true },
-        },
-      },
-    });
+    const { data: audit, error: auditError } = await sbDb
+      .from("AuditSession")
+      .select("name")
+      .eq("id", auditId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (auditError) {
+      throw new ShelfError({
+        cause: auditError,
+        title: "Audit not found",
+        message:
+          "The audit you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { userId, auditId },
+        status: 404,
+        label: "Audit",
+      });
+    }
+
+    const { data: assignments } = await sbDb
+      .from("AuditAssignment")
+      .select("userId")
+      .eq("auditSessionId", auditId);
+
+    // Reconstruct the shape expected by requireAuditAssigneeForBaseSelfService
+    const auditWithAssignments = {
+      ...audit,
+      assignments: assignments || [],
+    };
 
     requireAuditAssigneeForBaseSelfService({
-      audit,
+      audit: auditWithAssignments,
       userId,
       isSelfServiceOrBase,
       auditId,

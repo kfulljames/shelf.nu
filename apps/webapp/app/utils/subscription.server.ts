@@ -1,7 +1,7 @@
-import type { Prisma, Organization } from "@prisma/client";
+import type { Organization, Prisma } from "@prisma/client";
 import { OrganizationType } from "@prisma/client";
 import { config } from "~/config/shelf.config";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { countActiveCustomFields } from "~/modules/custom-field/service.server";
 import {
   getOrganizationTierLimit,
@@ -383,22 +383,20 @@ export async function assertUserCanInviteUsersToWorkspace({
   organizationId: Organization["id"];
 }) {
   /** Get the tier limit and check if they can export */
-  // const tierLimit = await getUserTierLimit(userId);
-  const org = await db.organization
-    .findUniqueOrThrow({
-      where: { id: organizationId },
-      select: {
-        type: true,
-      },
-    })
-    .catch((cause) => {
-      throw new ShelfError({
-        cause,
-        message: "Failed to get organization",
-        additionalData: { organizationId },
-        label,
-      });
+  const { data: org, error: orgError } = await sbDb
+    .from("Organization")
+    .select("type")
+    .eq("id", organizationId)
+    .single();
+
+  if (orgError || !org) {
+    throw new ShelfError({
+      cause: orgError,
+      message: "Failed to get organization",
+      additionalData: { organizationId },
+      label,
     });
+  }
 
   if (isPersonalOrg(org)) {
     throw new ShelfError({

@@ -45,7 +45,7 @@ import {
 } from "~/components/shared/tabs";
 import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import type { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { getPaginatedAndFilterableAssets } from "~/modules/asset/service.server";
 import { updateLocationAssets } from "~/modules/location/service.server";
@@ -83,30 +83,29 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       action: PermissionAction.update,
     });
 
-    const location = await db.location
-      .findUniqueOrThrow({
-        where: {
-          id: locationId,
-          organizationId,
-        },
-        include: {
-          kits: { select: { id: true } },
-          assets: {
-            select: { id: true },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          title: "Location not found",
-          message:
-            "The location you are trying to access does not exist or you do not have permission to access it.",
-          additionalData: { locationId, userId, organizationId },
-          status: 404,
-          label: "Location",
-        });
+    const { data: locationRaw, error: locationError } = await sbDb
+      .from("Location")
+      .select("*, kits:Kit(id), assets:Asset(id)")
+      .eq("id", locationId)
+      .eq("organizationId", organizationId)
+      .single();
+
+    if (locationError || !locationRaw) {
+      throw new ShelfError({
+        cause: locationError,
+        title: "Location not found",
+        message:
+          "The location you are trying to access does not exist or you do not have permission to access it.",
+        additionalData: { locationId, userId, organizationId },
+        status: 404,
+        label: "Location",
       });
+    }
+
+    const location = locationRaw as unknown as typeof locationRaw & {
+      kits: { id: string }[];
+      assets: { id: string }[];
+    };
 
     const {
       search,

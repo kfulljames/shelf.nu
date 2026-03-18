@@ -51,7 +51,7 @@ import {
 } from "~/components/shared/tooltip";
 import { Td, Th } from "~/components/table";
 import When from "~/components/when/when";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getPaginatedAndFilterableAssets } from "~/modules/asset/service.server";
 import type { AssetsFromViewItem } from "~/modules/asset/types";
 import { updateKitAssets } from "~/modules/kit/service.server";
@@ -110,26 +110,32 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         perPage,
       },
     ] = await Promise.all([
-      db.kit
-        .findFirstOrThrow({
-          where: { id: kitId, organizationId },
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            location: { select: { id: true, name: true } },
-            assets: { select: { id: true } },
-          },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            title: "Kit not found!",
-            message:
-              "The kit you are trying to access does not exists or you do not have permission to asset it.",
-            status: 404,
-            label: "Kit",
-          });
+      sbDb
+        .from("Kit")
+        .select(
+          "id, name, status, location:Location(id, name), assets:Asset(id)"
+        )
+        .eq("id", kitId)
+        .eq("organizationId", organizationId)
+        .single()
+        .then(({ data: kitData, error: kitError }) => {
+          if (kitError || !kitData) {
+            throw new ShelfError({
+              cause: kitError,
+              title: "Kit not found!",
+              message:
+                "The kit you are trying to access does not exists or you do not have permission to asset it.",
+              status: 404,
+              label: "Kit",
+            });
+          }
+          return kitData as unknown as {
+            id: string;
+            name: string;
+            status: string;
+            location: { id: string; name: string } | null;
+            assets: { id: string }[];
+          };
         }),
       getPaginatedAndFilterableAssets({
         request,

@@ -52,7 +52,10 @@ import {
 import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
 import When from "~/components/when/when";
+// KEPT AS PRISMA: booking findUniqueOrThrow with nested assets include,
+// removedKits findMany with nested assets select — not convertible to Supabase
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { sendBookingUpdatedEmail } from "~/modules/booking/email-helpers";
 import {
@@ -312,15 +315,27 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       } satisfies Prisma.UserSelect,
     });
 
-    const selectedKits = await db.kit.findMany({
-      where: { id: { in: kitIds } },
-      select: {
-        id: true,
-        name: true,
-        status: true,
-        assets: { select: { id: true, status: true } },
-      },
-    });
+    const { data: selectedKits, error: kitsErr } = (await sbDb
+      .from("Kit")
+      .select("id, name, status, assets:Asset(id, status)")
+      .in("id", kitIds)) as unknown as {
+      data: Array<{
+        id: string;
+        name: string;
+        status: string;
+        assets: Array<{ id: string; status: string }>;
+      }> | null;
+      error: any;
+    };
+
+    if (kitsErr || !selectedKits) {
+      throw new ShelfError({
+        cause: kitsErr,
+        message: "Failed to load selected kits",
+        additionalData: { userId, bookingId, kitIds },
+        label: "Kit",
+      });
+    }
 
     const allSelectedAssetIds = selectedKits.flatMap((k) =>
       k.assets.map((a) => a.id)

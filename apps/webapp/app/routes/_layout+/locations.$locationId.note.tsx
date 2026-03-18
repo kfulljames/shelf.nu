@@ -2,7 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, redirect } from "react-router";
 import { z } from "zod";
 import { MarkdownNoteSchema } from "~/components/notes/markdown-note-form";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   createLocationNote,
   deleteLocationNote,
@@ -129,10 +129,11 @@ async function assertLocationBelongsToOrganization({
   locationId: string;
   organizationId: string;
 }) {
-  const location = await db.location.findUnique({
-    where: { id: locationId },
-    select: { organizationId: true },
-  });
+  const { data: location } = await sbDb
+    .from("Location")
+    .select("organizationId")
+    .eq("id", locationId)
+    .maybeSingle();
 
   if (!location || location.organizationId !== organizationId) {
     throw new ShelfError({

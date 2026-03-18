@@ -27,6 +27,7 @@ import { DateS } from "~/components/shared/date";
 import { UserBadge } from "~/components/shared/user-badge";
 import { Td, Th } from "~/components/table";
 import { TeamMemberBadge } from "~/components/user/team-member-badge";
+// KEPT AS PRISMA: tag findMany with isEmpty/has filters on useFor array field
 import { db } from "~/database/db.server";
 import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";

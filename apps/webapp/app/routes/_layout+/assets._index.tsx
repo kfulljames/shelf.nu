@@ -12,7 +12,7 @@ import { ImportButton } from "~/components/assets/import-button";
 import Header from "~/components/layout/header";
 import { Button } from "~/components/shared/button";
 import When from "~/components/when/when";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 
 import { useAssetIndexViewState } from "~/hooks/use-asset-index-view-state";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
@@ -81,23 +81,22 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         entity: PermissionEntity.asset,
         action: PermissionAction.read,
       }),
-      db.user
-        .findUniqueOrThrow({
-          where: {
-            id: userId,
-          },
-          select: {
-            firstName: true,
-          },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message:
-              "We can't find your user data. Please try again or contact support.",
-            additionalData: { userId },
-            label: "Assets",
-          });
+      sbDb
+        .from("User")
+        .select("firstName")
+        .eq("id", userId)
+        .single()
+        .then(({ data: userData, error: userError }) => {
+          if (userError || !userData) {
+            throw new ShelfError({
+              cause: userError,
+              message:
+                "We can't find your user data. Please try again or contact support.",
+              additionalData: { userId },
+              label: "Assets",
+            });
+          }
+          return userData;
         }),
     ]);
 

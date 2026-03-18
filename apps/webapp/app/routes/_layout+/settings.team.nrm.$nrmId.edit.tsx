@@ -13,12 +13,12 @@ import { Form } from "~/components/custom-form";
 import Input from "~/components/forms/input";
 import { UserIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { getTeamMember } from "~/modules/team-member/service.server";
 import styles from "~/styles/layout/custom-modal.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { isFormProcessing } from "~/utils/form";
 import { payload, error, getParams, parseData } from "~/utils/http.server";
 import {
@@ -72,10 +72,20 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     const { name } = parseData(await request.formData(), NewOrEditMemberSchema);
 
-    await db.teamMember.update({
-      where: { id: nrmId, organizationId },
-      data: { name: name.trim() },
-    });
+    const { error: updateError } = await sbDb
+      .from("TeamMember")
+      .update({ name: name.trim() })
+      .eq("id", nrmId)
+      .eq("organizationId", organizationId);
+
+    if (updateError) {
+      throw new ShelfError({
+        cause: updateError,
+        message: "Failed to update team member",
+        additionalData: { nrmId, userId, organizationId },
+        label: "Team",
+      });
+    }
 
     sendNotification({
       title: "Success",

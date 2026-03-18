@@ -3,7 +3,7 @@ import {
   assetStatusColorMap,
   userFriendlyAssetStatus,
 } from "~/components/assets/asset-status-badge";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { defaultUserCategories } from "~/modules/user/service.server";
 import { ShelfError } from "./error";
 
@@ -242,44 +242,86 @@ export async function checklistOptions({
   organizationId: string;
 }) {
   try {
+    const defaultCategoryNames = defaultUserCategories
+      .map((uc) => uc.name)
+      .join(",");
+
     const [
-      categoriesCount,
-      tagsCount,
-      teamMembersCount,
-      custodiesCount,
-      customFieldsCount,
+      categoriesResult,
+      tagsResult,
+      teamMembersResult,
+      custodiesResult,
+      customFieldsResult,
     ] = await Promise.all([
-      db.category.count({
-        where: {
-          organizationId,
-          name: {
-            notIn: defaultUserCategories.map((uc) => uc.name),
-          },
-        },
-      }),
+      sbDb
+        .from("Category")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .not("name", "in", `(${defaultCategoryNames})`),
 
-      db.tag.count({
-        where: { organizationId },
-      }),
+      sbDb
+        .from("Tag")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId),
 
-      db.teamMember.count({
-        where: { organizationId },
-      }),
+      sbDb
+        .from("TeamMember")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId),
 
-      db.teamMember.count({
-        where: {
-          organizationId,
-          custodies: { some: {} },
-        },
-      }),
+      sbDb
+        .from("TeamMember")
+        .select("id, Custody!inner(id)", { count: "exact", head: true })
+        .eq("organizationId", organizationId),
 
-      db.customField.count({
-        where: {
-          organizationId,
-          deletedAt: null,
-        },
-      }),
+      sbDb
+        .from("CustomField")
+        .select("*", { count: "exact", head: true })
+        .eq("organizationId", organizationId)
+        .is("deletedAt", null),
     ]);
+
+    if (categoriesResult.error) {
+      throw new ShelfError({
+        cause: categoriesResult.error,
+        message: "Failed to count categories",
+        label: "Dashboard",
+      });
+    }
+    if (tagsResult.error) {
+      throw new ShelfError({
+        cause: tagsResult.error,
+        message: "Failed to count tags",
+        label: "Dashboard",
+      });
+    }
+    if (teamMembersResult.error) {
+      throw new ShelfError({
+        cause: teamMembersResult.error,
+        message: "Failed to count team members",
+        label: "Dashboard",
+      });
+    }
+    if (custodiesResult.error) {
+      throw new ShelfError({
+        cause: custodiesResult.error,
+        message: "Failed to count custodies",
+        label: "Dashboard",
+      });
+    }
+    if (customFieldsResult.error) {
+      throw new ShelfError({
+        cause: customFieldsResult.error,
+        message: "Failed to count custom fields",
+        label: "Dashboard",
+      });
+    }
+
+    const categoriesCount = categoriesResult.count ?? 0;
+    const tagsCount = tagsResult.count ?? 0;
+    const teamMembersCount = teamMembersResult.count ?? 0;
+    const custodiesCount = custodiesResult.count ?? 0;
+    const customFieldsCount = customFieldsResult.count ?? 0;
 
     return {
       hasAssets,

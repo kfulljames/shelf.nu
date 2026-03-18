@@ -1,195 +1,228 @@
 # Prisma → Supabase Migration Progress
 
-**Branch:** `claude/review-and-plan-4zie9`
-**Date:** 2026-03-18
-**Status:** Typecheck ✅ | Lint ✅ | All pre-commit hooks passing ✅
-
-## Summary
-
-Migrating database access from Prisma ORM (`db.*`) to Supabase PostgREST
-client (`sbDb.*`) across the webapp's module services. The Supabase client
-is exported from `~/database/supabase.server` as `sbDb`.
-
-**65 files changed, 4,631 insertions, 3,619 deletions** across 2 commits
-on top of a previously merged PR (#1).
+**Branch:** `claude/review-migration-plan-wYjw6`
+**Last Updated:** 2026-03-18
+**Status:** ~88% complete — ready to merge, remaining work tracked below
 
 ---
 
-## Commits on this branch
+## Overall Progress
 
-```
-14fec59 refactor: migrate audit, invite, and user modules to Supabase and fix all type errors
-9aee6b9 refactor: migrate module services from Prisma to Supabase
-```
+| Area                         | Total `db.` calls | Converted | Remaining | % Done |
+| ---------------------------- | ----------------- | --------- | --------- | ------ |
+| **Modules** (`app/modules/`) | ~245              | ~215      | 30        | 88%    |
+| **Routes** (`app/routes/`)   | ~260              | ~222      | 38        | 85%    |
+| **Utils** (`app/utils/`)     | ~33               | ~28       | 5         | 85%    |
+| **Grand Total**              | ~538              | ~465      | ~73       | 86%    |
 
-Previous work (already merged to main via PR #1):
-
-```
-6cc440d feat: migrate asset data queries and filter presets from Prisma to Supabase
-bc93b52 feat: migrate barcode CRUD operations from Prisma to Supabase
-eb78ae0 refactor: migrate user/utils and asset-reminder to Supabase
-90d22d3 refactor: eliminate all db.assetIndexSettings Prisma calls
-e0451ad refactor(asset-index-settings): complete Supabase migration
-3a94347 refactor: migrate raw SQL queries to Postgres RPC functions
-d2dba94 refactor: migrate more simple functions to Supabase across 6 modules
-76a64f5 refactor(asset-index-settings,audit): migrate simple functions to Supabase
-... and more (see git log)
-```
+Test files (`.test.ts`) contain 32 additional `db.` references
+(mock setups) to clean up when Prisma is fully removed.
 
 ---
 
-## Modules Fully Migrated to Supabase (47 files)
+## Completed Work (8 commits)
 
-These files import from `~/database/supabase.server` and have no remaining
-`db.` (Prisma) calls:
+### Infrastructure Created
 
-| Module                   | Files                                                                                                                                                                                             |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **asset-filter-presets** | `service.server.ts`                                                                                                                                                                               |
-| **asset-index-settings** | `service.server.ts`                                                                                                                                                                               |
-| **asset-reminder**       | `scheduler.server.ts`, `service.server.ts`, `worker.server.ts`                                                                                                                                    |
-| **asset**                | `data.server.ts`, `sequential-id.server.ts`                                                                                                                                                       |
-| **audit**                | `addon.server.ts`, `asset-details.service.server.ts`, `context-helpers.server.ts`, `image.service.server.ts`, `note-service.server.ts`, `pdf-helpers.ts`, `service.server.ts`, `worker.server.ts` |
-| **auth**                 | `service.server.ts`                                                                                                                                                                               |
-| **barcode**              | `service.server.ts`                                                                                                                                                                               |
-| **booking-note**         | `service.server.ts`                                                                                                                                                                               |
-| **booking-settings**     | `service.server.ts`                                                                                                                                                                               |
-| **booking**              | `email-helpers.ts`, `pdf-helpers.ts`, `worker.server.ts`                                                                                                                                          |
-| **business-intel**       | `service.server.ts`                                                                                                                                                                               |
-| **category**             | `service.server.ts`                                                                                                                                                                               |
-| **custody**              | `service.server.ts`                                                                                                                                                                               |
-| **custom-field**         | `service.server.ts`                                                                                                                                                                               |
-| **invite**               | `service.server.ts`                                                                                                                                                                               |
-| **location-note**        | `service.server.ts`                                                                                                                                                                               |
-| **location**             | `descendants.server.ts`, `service.server.ts`                                                                                                                                                      |
-| **note**                 | `load-user-for-notes.server.ts`, `service.server.ts`                                                                                                                                              |
-| **organization**         | `service.server.ts` (partially — also imports `db`)                                                                                                                                               |
-| **qr**                   | `service.server.ts`                                                                                                                                                                               |
-| **report-found**         | `service.server.ts`                                                                                                                                                                               |
-| **scan**                 | `service.server.ts`                                                                                                                                                                               |
-| **settings**             | `service.server.ts`                                                                                                                                                                               |
-| **stripe-webhook**       | `handlers.server.ts`, `helpers.server.ts`                                                                                                                                                         |
-| **tag**                  | `service.server.ts`                                                                                                                                                                               |
-| **team-member**          | `service.server.ts`                                                                                                                                                                               |
-| **tier**                 | `service.server.ts`                                                                                                                                                                               |
-| **update**               | `service.server.ts`                                                                                                                                                                               |
-| **user-contact**         | `service.server.ts`                                                                                                                                                                               |
-| **user**                 | `service.server.ts`, `utils.server.ts`                                                                                                                                                            |
-| **working-hours**        | `service.server.ts`                                                                                                                                                                               |
+- **`sbDb` client** — Supabase JS client at `app/database/supabase.server.ts`
+- **`packages/database/src/types.ts`** — Shared TypeScript types (+195 lines)
+- **21 PostgreSQL RPC functions** via migration SQL (+711 lines)
+
+### Commit History
+
+| Commit    | Description                                                | Scope     |
+| --------- | ---------------------------------------------------------- | --------- |
+| `9138586` | Migrated all 21 `db.$transaction` → Postgres RPC functions | 5 modules |
+| `41eb5e1` | Converted EASY Prisma calls to Supabase                    | 6 modules |
+| `f58ec54` | Converted MEDIUM Prisma calls to Supabase                  | 5 modules |
+| `b1cfaa3` | Converted HARD Prisma calls to Supabase                    | 5 modules |
+| `9ced224` | Migrated route and utility files                           | 32 files  |
+| `b6acabb` | Migrated 61 route and component files                      | 61 files  |
+| `7a56bb2` | Converted final simple Prisma calls                        | 4 files   |
+
+### Module Services — Completed Conversions
+
+| Module                           | Calls Converted   | Status             |
+| -------------------------------- | ----------------- | ------------------ |
+| `organization/service.server.ts` | 15/15             | **Fully migrated** |
+| `location/service.server.ts`     | 28/33             | 5 remaining        |
+| `kit/service.server.ts`          | 33/40             | 7 remaining        |
+| `asset/service.server.ts`        | 51/58             | 7 remaining        |
+| `booking/service.server.ts`      | 51/58             | 7 remaining        |
+| `user/service.server.ts`         | ~all simple calls | Fully migrated     |
+| `audit/service.server.ts`        | ~all simple calls | Fully migrated     |
+| `invite/service.server.ts`       | ~all simple calls | Fully migrated     |
+| `qr/service.server.ts`           | ~all simple calls | Fully migrated     |
+| `update/service.server.ts`       | ~all simple calls | Fully migrated     |
+
+### Routes — Completed Conversions
+
+- **API routes** (`api+/`): ~25 files converted
+- **Layout routes** (`_layout+/`): ~42 files converted
+- **QR routes** (`qr+/`): 5 files converted
+- **Auth routes** (`_auth+/`): 3 files converted
+- **Utilities**: `csv.server.ts`, `dashboard.server.ts`, `sso.server.ts`,
+  `stripe.server.ts`, `subscription.server.ts`, `permission.validator.server.ts`
+
+### Transactions → RPC Functions (all 21 migrated)
+
+| RPC Function             | Module   |
+| ------------------------ | -------- |
+| `assign_kit_custody`     | kit      |
+| `release_kit_custody`    | kit      |
+| `bulk_release_custody`   | asset    |
+| `manage_kit_assets`      | kit      |
+| `manage_location_assets` | location |
+| `manage_location_kits`   | location |
+| `manage_booking_assets`  | booking  |
+| `manage_booking_kits`    | booking  |
+| `checkin_booking_assets` | booking  |
+| `start_audit`            | audit    |
+| `process_audit_scan`     | audit    |
+| `delete_kit`             | kit      |
+| + ~9 more                | various  |
 
 ---
 
-## Modules Still Using Prisma (8 files)
+## Outstanding Work (~29 distinct operations, 16 files)
 
-These files still import `db` from `~/database/db.server`:
+Every remaining call is tagged with `// KEPT AS PRISMA` explaining
+the specific Prisma feature that prevents simple migration.
 
-| File                                       | `db.` calls | Notes                                             |
-| ------------------------------------------ | ----------- | ------------------------------------------------- |
-| **asset/service.server.ts**                | ~46         | Largest file. Reverted from incomplete migration. |
-| **asset/bulk-operations-helper.server.ts** | several     | Untouched                                         |
-| **kit/service.server.ts**                  | ~127        | Reverted from incomplete migration.               |
-| **booking/service.server.ts**              | many        | Untouched                                         |
-| **location/service.server.ts**             | some        | Also imports sbDb (partial)                       |
-| **location/bulk-select.server.ts**         | some        | Untouched                                         |
-| **organization/service.server.ts**         | some        | Also imports sbDb (partial)                       |
-| **audit/helpers.server.ts**                | some        | Uses `db` as fallback when `tx` not passed        |
+### 1. Aggregation & GroupBy (4 calls)
+
+**File:** `app/routes/_layout+/home.tsx`
+
+| Call                                   | Feature                         | Suggested Approach       |
+| -------------------------------------- | ------------------------------- | ------------------------ |
+| `db.asset.aggregate()`                 | `_count._all`, `_sum.valuation` | RPC function             |
+| `db.asset.groupBy({ by: ["status"] })` | `groupBy` + `_count`            | RPC function             |
+| `db.$queryRaw` (monthly growth)        | Raw SQL `date_trunc`            | Already SQL, wrap in RPC |
+
+### 2. `_count` in Select & OrderBy (7 calls)
+
+| File                                  | Feature                                             |
+| ------------------------------------- | --------------------------------------------------- |
+| `home.tsx`                            | `orderBy: { custodies: { _count: "desc" } }`        |
+| `home.tsx`                            | `orderBy: { assets: { _count: "desc" } }`           |
+| `bookings.$bookingId.overview.tsx`    | `_count: { select: { assets: true } }` on kits      |
+| `bookings.$bookingId.overview.tsx`    | `db.asset.count()` with nested `some`               |
+| `account-details.workspace.index.tsx` | `_count` on nested org (assets, members, locations) |
+
+### 3. Nested `some`/`every` Relation Filters (5 calls)
+
+| File                                               | Filter                                                |
+| -------------------------------------------------- | ----------------------------------------------------- |
+| `bookings.$bookingId.overview.tsx`                 | `bookings: { some: { ... } }` with OR date conditions |
+| `bookings.overview.manage-assets.tsx`              | `bookings: { some: { id: bookingId } }`               |
+| `bookings.overview.checkin-assets.tsx`             | `bookings: { some: { id: booking.id } }`              |
+| `admin-dashboard+/org.$organizationId.members.tsx` | `userOrganizations: { some: { organizationId } }`     |
+| `utils/roles.server.ts` (x2)                       | Nested many-to-many role checks                       |
+
+### 4. Deep Nested Includes — 3+ levels (6 calls)
+
+| File                                                | Depth                                            |
+| --------------------------------------------------- | ------------------------------------------------ |
+| `account-details.workspace.index.tsx`               | user → userOrgs → org → owner/\_count            |
+| `settings.general.tsx`                              | user → userOrgs → org → ssoDetails/\_count/owner |
+| `admin-dashboard+/org.$organizationId.tsx`          | org → qrCodes → asset + owner/sso/hours          |
+| `admin-dashboard+/org.$organizationId.qr-codes.tsx` | org → qrCodes → asset/kit + owner                |
+| `admin-dashboard+/$userId.tsx`                      | 3+ levels + customTierLimit upsert               |
+| `utils/sso.server.ts`                               | user → userOrgs → org → ssoDetails               |
+
+### 5. Relation Writes — connect/disconnect/upsert (4 calls)
+
+| File                                              | Operation                                         |
+| ------------------------------------------------- | ------------------------------------------------- |
+| `kits.$kitId.assets.assign-custody.tsx`           | `custody: { create: { custodian: { connect } } }` |
+| `admin-dashboard+/move-location-images.tsx`       | `image: { disconnect: true }`                     |
+| `account-details.workspace.$workspaceId.edit.tsx` | `ssoDetails: { upsert: { create, update } }`      |
+| `kits.$kitId.tsx`                                 | `custody: { disconnect, delete }`                 |
+
+### 6. Dynamic Where Inputs & Model Access (3 calls)
+
+| File                                             | Feature                                                    |
+| ------------------------------------------------ | ---------------------------------------------------------- |
+| `bookings.overview.manage-assets.tsx`            | `getAssetsWhereInput()` → dynamic `Prisma.AssetWhereInput` |
+| `api+/assets.get-assets-for-bulk-qr-download.ts` | Same `getAssetsWhereInput` pattern                         |
+| `api+/model-filters.ts`                          | Dynamic model access `db[name].dynamicFindMany()`          |
+
+### 7. Array Field Filters — isEmpty/has (2 calls)
+
+| File                               | Filter                                                         |
+| ---------------------------------- | -------------------------------------------------------------- |
+| `bookings._index.tsx`              | `tag.useFor: { isEmpty: true }` / `{ has: TagUseFor.BOOKING }` |
+| `bookings.$bookingId.overview.tsx` | Same pattern                                                   |
+
+### 8. Unmigrated Transaction (1 call)
+
+| File                       | Details                                                                 |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `audits.$auditId.scan.tsx` | Multi-step audit scan removal (find → update → delete → count → update) |
+
+### 9. Raw SQL on Auth Schema (2 calls)
+
+| File                       | Details                                         |
+| -------------------------- | ----------------------------------------------- |
+| `utils/sso.server.ts` (x2) | `$queryRaw` on `auth.users` / `auth.identities` |
+
+---
+
+## Recommended Follow-Up PRs
+
+### PR 1: Dashboard Aggregation RPCs
+
+**Scope:** Categories 1 + 2 (11 calls)
+**Approach:** Create 3-4 RPC functions for dashboard stats
+(`aggregate`, `groupBy`, monthly growth, `_count` orderBy).
+
+### PR 2: Relation Filters → Views or RPCs
+
+**Scope:** Category 3 (5 calls)
+**Approach:** Create PostgreSQL views or RPCs for
+`some`/`every` patterns. Most are booking-asset joins.
+
+### PR 3: Deep Includes → Targeted Queries
+
+**Scope:** Category 4 (6 calls)
+**Approach:** Replace deep includes with multiple focused
+Supabase queries joined in app code, or create flattening views.
+
+### PR 4: Relation Writes + Remaining Transaction → RPCs
+
+**Scope:** Categories 5 + 8 (5 calls)
+**Approach:** Create RPC functions for connect/disconnect/upsert
+and the audit scan transaction.
+
+### PR 5: Dynamic Where & Array Filters
+
+**Scope:** Categories 6 + 7 (5 calls)
+**Approach:** Refactor `getAssetsWhereInput` to build Supabase
+filter chains. Replace `isEmpty`/`has` with PostgREST array ops.
+
+### PR 6: Auth Schema Raw SQL
+
+**Scope:** Category 9 (2 calls)
+**Approach:** Use Supabase Admin API or security-definer RPCs.
+
+---
+
+## Final Cleanup (after all calls migrated)
+
+- Remove `~/database/db.server` (Prisma client wrapper)
+- Remove Prisma as a runtime dependency
+- Remove `@prisma/client` from `package.json`
+- Update vite config to remove Prisma browser alias
+- Update 32 test file mocks from `db` to `sbDb`
 
 ---
 
 ## Known Type Patterns / Gotchas
 
-### Supabase SelectQueryError for relations
-
-Supabase's typed client doesn't resolve foreign-key relations in
-`.select()` strings. Queries like:
-
-```ts
-sbDb.from("User").select("*, userOrganizations:UserOrganization(*)");
-```
-
-Return `SelectQueryError<"could not find the relation...">` for the
-relation field. Fix with `as unknown as Type[]` casts in consumers.
-
-### Dynamic select strings lose types
-
-If the `.select()` argument is a `string` variable (not a literal),
-Supabase returns `{}` for all fields. Use string literals or add
-explicit return types.
-
-### Dates return as strings
-
-Supabase returns date columns as ISO strings, not `Date` objects.
-Cast with `new Date(field as string)` where `Date` type is expected.
-
-### Enum types return as strings
-
-Prisma enum types (e.g., `AuditStatus`) come back as plain `string`
-from Supabase. Cast with `as AuditStatus` where the enum type is
-expected.
-
-### `Awaited<ReturnType<>>` pattern
-
-When a Prisma function was sync-returning a typed payload and is now
-async via Supabase, consumers using `ReturnType<typeof fn>` need to
-switch to `Awaited<ReturnType<typeof fn>>`.
-
----
-
-## Route/Component Files Modified
-
-These consumer files were updated with type casts to work with Supabase
-return types:
-
-- `routes/_layout+/_layout.tsx`
-- `routes/_layout+/admin-dashboard+/users.tsx`
-- `routes/_layout+/audits.$auditId.overview.tsx`
-- `routes/_layout+/audits._index.tsx`
-- `routes/_layout+/bookings.$bookingId.overview.manage-kits.tsx`
-- `routes/_layout+/settings.team.users.$userId.tsx`
-- `routes/_welcome+/onboarding.tsx`
-- `routes/qr+/_private+/$qrId_.link.kit.tsx`
-- `components/assets/assets-index/use-kit-availability-data.ts`
-- `components/audit/audit-receipt-pdf.tsx`
-- `components/audit/notes/index.tsx`
-- `components/settings/transfer-ownership-card.tsx`
-- `components/user/details-form.tsx`
-- `components/user/user-contact-form.tsx`
-- `components/user/user-subheading.tsx`
-- `utils/subscription.server.ts`
-
----
-
-## To Merge
-
-The branch is ready to merge. All checks pass:
-
-- `pnpm turbo typecheck` — 0 errors
-- `pnpm turbo lint` — 0 errors (2 pre-existing warnings)
-- All pre-commit hooks (eslint, prettier, typecheck, commitlint) pass
-
-```bash
-git checkout master
-git merge claude/review-and-plan-4zie9
-git push origin master
-```
-
----
-
-## Next Steps (Future Work)
-
-Priority order for remaining Prisma → Supabase migrations:
-
-1. **asset/service.server.ts** (~46 `db.` calls) — largest and most
-   impactful module
-2. **kit/service.server.ts** (~127 `db.` calls) — second largest
-3. **booking/service.server.ts** — untouched, moderate size
-4. **location/service.server.ts** + **bulk-select.server.ts** — partial
-5. **asset/bulk-operations-helper.server.ts** — asset bulk ops
-6. **organization/service.server.ts** — partially done
-7. **audit/helpers.server.ts** — uses `db` as fallback for `tx` param
-
-After all modules are migrated, the final cleanup would be:
-
-- Remove `~/database/db.server` (Prisma client wrapper)
-- Remove Prisma as a runtime dependency
-- Update any remaining route files that directly use `db`
+| Issue                                        | Fix                                            |
+| -------------------------------------------- | ---------------------------------------------- |
+| Supabase `SelectQueryError` for FK relations | Cast with `as unknown as Type[]`               |
+| Dynamic `.select()` string loses types       | Use string literals or explicit return types   |
+| Dates return as ISO strings, not `Date`      | Cast with `new Date(field as string)`          |
+| Enum types return as plain `string`          | Cast with `as EnumType`                        |
+| Prisma implicit M2M join tables              | Query explicitly via `sbDb.from("_JoinTable")` |

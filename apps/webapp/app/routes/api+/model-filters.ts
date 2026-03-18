@@ -1,3 +1,6 @@
+// KEPT AS PRISMA: uses dynamic model access (db[name].dynamicFindMany), nested
+// relation filters (isNot, some, hasSome, isEmpty), and complex OR/AND conditions
+// that are not directly translatable to Supabase PostgREST.
 import { TagUseFor } from "@prisma/client";
 import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";

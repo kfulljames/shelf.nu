@@ -26,7 +26,9 @@ import {
   EditWorkspaceSSOSettingsFormSchema,
   WorkspaceEditForms,
 } from "~/components/workspace/edit-form";
+// KEPT AS PRISMA: Complex nested includes (3+ levels: user -> userOrganizations -> organization -> ssoDetails/_count/owner)
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   getOrganizationAdmins,
   transferOwnership,
@@ -135,13 +137,23 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         user.tierId === "tier_1");
 
     // Count owner's other team workspaces (for warning about tier downgrade)
-    const ownerOtherTeamWorkspacesCount = await db.organization.count({
-      where: {
-        userId: currentOrganization.userId,
-        type: OrganizationType.TEAM,
-        id: { not: currentOrganization.id },
-      },
-    });
+    const { count: ownerOtherTeamWorkspacesCount } = await sbDb
+      .from("Organization")
+      .select("*", { count: "exact", head: true })
+      .eq("userId", currentOrganization.userId)
+      .eq("type", OrganizationType.TEAM)
+      .neq("id", currentOrganization.id)
+      .then(({ count, error: countError }) => {
+        if (countError) {
+          throw new ShelfError({
+            cause: countError,
+            message: "Failed to count owner's other team workspaces",
+            additionalData: { userId },
+            label: "Settings",
+          });
+        }
+        return { count: count ?? 0 };
+      });
 
     return payload({
       header,
@@ -191,10 +203,22 @@ export async function action({ context, request }: ActionFunctionArgs) {
         organizationId,
         organizations,
       }),
-      db.user.findUniqueOrThrow({
-        where: { id: userId },
-        select: { tierId: true },
-      }),
+      sbDb
+        .from("User")
+        .select("tierId")
+        .eq("id", userId)
+        .single()
+        .then(({ data: userData, error: userError }) => {
+          if (userError || !userData) {
+            throw new ShelfError({
+              cause: userError,
+              message: "User not found",
+              additionalData: { userId },
+              label: "Settings",
+            });
+          }
+          return userData;
+        }),
     ]);
 
     const canHideBranding = canHideShelfBranding(tierLimit);

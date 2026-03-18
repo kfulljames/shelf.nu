@@ -24,7 +24,7 @@ import { MapPlaceholder } from "~/components/location/map-placeholder";
 import { Button } from "~/components/shared/button";
 import { Card } from "~/components/shared/card";
 import TextualDivider from "~/components/shared/textual-divider";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   deleteLocation,
   getLocation,
@@ -109,13 +109,13 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
       mapData = await geolocate(location.address);
       if (mapData) {
         // Update the database with the geocoded coordinates
-        await db.location.update({
-          where: { id: location.id },
-          data: {
+        await sbDb
+          .from("Location")
+          .update({
             latitude: mapData.lat,
             longitude: mapData.lon,
-          },
-        });
+          })
+          .eq("id", location.id);
       }
     }
 

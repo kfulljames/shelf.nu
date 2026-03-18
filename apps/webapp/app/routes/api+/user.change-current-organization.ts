@@ -1,6 +1,7 @@
 import { type ActionFunctionArgs, redirect, data } from "react-router";
 import { z } from "zod";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { setCookie } from "~/utils/cookies.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
@@ -21,22 +22,23 @@ export async function action({ context, request }: ActionFunctionArgs) {
     );
 
     // Verify the user is a member of the target organization
-    const membership = await db.userOrganization.findUnique({
-      where: {
-        userId_organizationId: { userId, organizationId },
-      },
-      select: { id: true },
-    });
+    const { data: membership, error: membershipError } = await sbDb
+      .from("UserOrganization")
+      .select("id")
+      .eq("userId", userId)
+      .eq("organizationId", organizationId)
+      .single();
 
-    if (!membership) {
+    if (membershipError || !membership) {
       throw new ShelfError({
-        cause: null,
+        cause: membershipError,
         message: "You are not a member of this organization.",
         status: 403,
         label: "Organization",
       });
     }
 
+    // KEPT AS PRISMA: $executeRaw for raw SQL update
     // Best-effort persist to database for cross-device workspace persistence.
     // Uses raw SQL to avoid bumping the User.updatedAt timestamp.
     try {

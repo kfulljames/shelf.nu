@@ -22,7 +22,9 @@ import DynamicSelect from "~/components/dynamic-select/dynamic-select";
 import { UserIcon } from "~/components/icons/library";
 import { Button } from "~/components/shared/button";
 import { WarningBox } from "~/components/shared/warning-box";
+// KEPT AS PRISMA: Nested relation writes (create custody with connect for kit and assets)
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { AssignCustodySchema } from "~/modules/custody/schema";
 import { getKit } from "~/modules/kit/service.server";
@@ -129,23 +131,50 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       userId: role === OrganizationRoles.SELF_SERVICE ? userId : undefined,
     } satisfies Prisma.TeamMemberWhereInput;
 
-    const teamMembers = await db.teamMember
-      .findMany({
-        where,
-        include: { user: true },
-        orderBy: { userId: "asc" },
-        take: searchParams.get("getAll") === "teamMember" ? undefined : 12,
-      })
-      .catch((cause) => {
+    const teamMembers = await (async () => {
+      let query = sbDb
+        .from("TeamMember")
+        .select("*, user:User!TeamMember_userId_fkey(*)")
+        .is("deletedAt", null)
+        .eq("organizationId", organizationId)
+        .order("userId", { ascending: true });
+
+      if (role === OrganizationRoles.SELF_SERVICE) {
+        query = query.eq("userId", userId);
+      }
+
+      if (searchParams.get("getAll") !== "teamMember") {
+        query = query.limit(12);
+      }
+
+      const { data: tmData, error: tmError } = await query;
+
+      if (tmError) {
         throw new ShelfError({
-          cause,
+          cause: tmError,
           message:
             "Something went wrong while fetching team members. Please try again or contact support.",
           label: "Kit",
         });
-      });
+      }
 
-    const totalTeamMembers = await db.teamMember.count({ where });
+      return (tmData ?? []) as any[];
+    })();
+
+    const totalTeamMembers = await (async () => {
+      let query = sbDb
+        .from("TeamMember")
+        .select("*", { count: "exact", head: true })
+        .is("deletedAt", null)
+        .eq("organizationId", organizationId);
+
+      if (role === OrganizationRoles.SELF_SERVICE) {
+        query = query.eq("userId", userId);
+      }
+
+      const { count } = await query;
+      return count ?? 0;
+    })();
 
     return payload({
       showModal: true,

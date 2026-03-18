@@ -33,7 +33,7 @@ import {
 } from "~/components/shared/modal";
 import { Td } from "~/components/table";
 import When from "~/components/when/when";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 
 import { useViewportHeight } from "~/hooks/use-viewport-height";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
@@ -108,23 +108,41 @@ export const loader = async ({
           },
         },
       }),
-      db.teamMember
-        .findMany({
-          where: { deletedAt: null, organizationId },
-          include: { user: true },
-          orderBy: { userId: "asc" },
-          take: searchParams.get("getAll") === "teamMember" ? undefined : 12,
-        })
-        .catch((cause) => {
+      (async () => {
+        const take =
+          searchParams.get("getAll") === "teamMember" ? undefined : 12;
+
+        let tmQuery = sbDb
+          .from("TeamMember")
+          .select("*, user:User!userId(*)")
+          .is("deletedAt", null)
+          .eq("organizationId", organizationId)
+          .order("userId", { ascending: true });
+
+        if (take !== undefined) {
+          tmQuery = tmQuery.limit(take);
+        }
+
+        const { data: tmData, error: tmError } = await tmQuery;
+
+        if (tmError) {
           throw new ShelfError({
-            cause,
+            cause: tmError,
             message:
               "Something went wrong while fetching team members. Please try again or contact support.",
             additionalData: { userId, organizationId },
             label: "Assets",
           });
-        }),
-      db.teamMember.count({ where: { deletedAt: null, organizationId } }),
+        }
+
+        return tmData as any;
+      })(),
+      sbDb
+        .from("TeamMember")
+        .select("*", { count: "exact", head: true })
+        .is("deletedAt", null)
+        .eq("organizationId", organizationId)
+        .then(({ count }) => count ?? 0),
     ]);
 
     if (totalPages !== 0 && page > totalPages) {

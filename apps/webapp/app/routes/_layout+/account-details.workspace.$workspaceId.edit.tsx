@@ -23,7 +23,10 @@ import {
   EditWorkspaceSSOSettingsFormSchema,
   WorkspaceEditForms,
 } from "~/components/workspace/edit-form";
+// KEPT AS PRISMA: organization findUniqueOrThrow with nested `owner.is`
+// filter and ssoDetails include
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import {
   getOrganizationAdmins,
   updateOrganization,
@@ -101,7 +104,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         });
       });
 
-    const [admins, tierLimit, user] = await Promise.all([
+    const [admins, tierLimit, { data: user }] = await Promise.all([
       getOrganizationAdmins({
         organizationId: organization.id,
       }),
@@ -109,11 +112,17 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         organizationId: organization.id,
         organizations,
       }),
-      db.user.findUniqueOrThrow({
-        where: { id: userId },
-        select: { tierId: true },
-      }),
+      sbDb.from("User").select("tierId").eq("id", userId).single(),
     ]);
+
+    if (!user) {
+      throw new ShelfError({
+        cause: null,
+        message: "User not found",
+        additionalData: { userId },
+        label: "Organization",
+      });
+    }
 
     const canHideBranding = canHideShelfBranding(tierLimit);
 
@@ -130,13 +139,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     );
 
     // Count owner's other team workspaces (for warning about tier downgrade)
-    const ownerOtherTeamWorkspacesCount = await db.organization.count({
-      where: {
-        userId: organization.userId,
-        type: OrganizationType.TEAM,
-        id: { not: organization.id },
-      },
-    });
+    const { count: ownerOtherTeamWorkspacesCount } = await sbDb
+      .from("Organization")
+      .select("*", { count: "exact", head: true })
+      .eq("userId", organization.userId)
+      .eq("type", OrganizationType.TEAM)
+      .neq("id", organization.id);
 
     const header: HeaderData = {
       title: `Edit | ${organization.name}`,
@@ -150,7 +158,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       admins,
       canHideShelfBranding: canHideBrandingForThisWorkspace,
       ownerSubscriptionInfo,
-      ownerOtherTeamWorkspacesCount,
+      ownerOtherTeamWorkspacesCount: ownerOtherTeamWorkspacesCount ?? 0,
       premiumIsEnabled,
     });
   } catch (cause) {
@@ -219,16 +227,22 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         });
       });
 
-    const [tierLimit, user] = await Promise.all([
+    const [tierLimit, { data: user }] = await Promise.all([
       getOrganizationTierLimit({
         organizationId: organization.id,
         organizations,
       }),
-      db.user.findUniqueOrThrow({
-        where: { id: userId },
-        select: { tierId: true },
-      }),
+      sbDb.from("User").select("tierId").eq("id", userId).single(),
     ]);
+
+    if (!user) {
+      throw new ShelfError({
+        cause: null,
+        message: "User not found",
+        additionalData: { userId },
+        label: "Organization",
+      });
+    }
 
     const canHideBranding = canHideShelfBranding(tierLimit);
 

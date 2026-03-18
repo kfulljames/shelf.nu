@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { data } from "react-router";
 import { z } from "zod";
 import { MarkdownNoteSchema } from "~/components/notes/markdown-note-form";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { createAuditNote } from "~/modules/audit/note-service.server";
 import { requireAuditAssigneeForBaseSelfService } from "~/modules/audit/service.server";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
@@ -38,20 +38,21 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     const { organizationId, isSelfServiceOrBase } = permissionResult;
 
     // Validate that the audit belongs to the user's organization
-    const audit = await db.auditSession.findUnique({
-      where: { id: auditId },
-      select: {
-        id: true,
-        organizationId: true,
-        assignments: {
-          select: { userId: true },
-        },
-      },
-    });
+    const { data: auditRaw, error: auditError } = await sbDb
+      .from("AuditSession")
+      .select("id, organizationId, assignments:AuditAssignment(userId)")
+      .eq("id", auditId)
+      .single();
 
-    if (!audit || audit.organizationId !== organizationId) {
+    const audit = auditRaw as unknown as {
+      id: string;
+      organizationId: string;
+      assignments: { userId: string }[];
+    } | null;
+
+    if (auditError || !audit || audit.organizationId !== organizationId) {
       throw new ShelfError({
-        cause: null,
+        cause: auditError,
         message: "Audit not found or access denied",
         additionalData: { userId, auditId },
         label: "Audit",
@@ -112,12 +113,20 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           senderId: authSession.userId,
         });
 
-        await db.auditNote.delete({
-          where: {
-            id: noteId,
-            userId, // Ensure user can only delete their own notes
-          },
-        });
+        const { error: deleteError } = await sbDb
+          .from("AuditNote")
+          .delete()
+          .eq("id", noteId)
+          .eq("userId", userId); // Ensure user can only delete their own notes
+
+        if (deleteError) {
+          throw new ShelfError({
+            cause: deleteError,
+            message: "Failed to delete audit note",
+            additionalData: { noteId, userId, auditId },
+            label: "Audit",
+          });
+        }
 
         return data(payload(null));
       }

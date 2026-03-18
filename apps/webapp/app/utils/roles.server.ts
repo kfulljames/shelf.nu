@@ -11,6 +11,7 @@ import { validatePermission } from "./permissions/permission.validator.server";
 
 export async function requireUserWithPermission(name: Roles, userId: string) {
   try {
+    // KEPT AS PRISMA: nested many-to-many role check
     return await db.user.findFirstOrThrow({
       where: { id: userId, roles: { some: { name } } },
       select: { id: true },
@@ -33,6 +34,7 @@ export async function requireAdmin(userId: string) {
 export async function isAdmin(context: Record<string, any>) {
   const authSession = context.getSession();
 
+  // KEPT AS PRISMA: nested many-to-many role check
   const user = await db.user.findFirst({
     where: {
       id: authSession.userId,

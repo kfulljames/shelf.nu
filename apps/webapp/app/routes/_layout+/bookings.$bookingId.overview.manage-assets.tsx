@@ -60,7 +60,9 @@ import { Td, Th } from "~/components/table";
 import UnsavedChangesAlert from "~/components/unsaved-changes-alert";
 
 import When from "~/components/when/when";
+// KEPT AS PRISMA: booking findUniqueOrThrow with nested assets include
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { LOCATION_WITH_HIERARCHY } from "~/modules/asset/fields";
 import { getPaginatedAndFilterableAssets } from "~/modules/asset/service.server";
 import type { AssetsFromViewItem } from "~/modules/asset/types";
@@ -268,10 +270,12 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         currentSearchParams: searchParams.toString(),
       });
 
+      // KEPT AS PRISMA: assetsWhere is a complex Prisma where input from getAssetsWhereInput
       const allAssets = await db.asset.findMany({
         where: assetsWhere,
         select: { id: true },
       });
+      // KEPT AS PRISMA: nested `some` filter on bookings relation
       const bookingAssets = await db.asset.findMany({
         where: {
           id: { notIn: removedAssetIds },
@@ -356,17 +360,15 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       await getDetailedPartialCheckinData(bookingId);
 
     // Query to get potentially checked out assets
-    const potentiallyCheckedOutAssets = await db.asset.findMany({
-      where: {
-        id: { in: newAssetIds },
-        status: AssetStatus.CHECKED_OUT,
-      },
-      select: { id: true, title: true, status: true },
-    });
+    const { data: potentiallyCheckedOutAssets } = await sbDb
+      .from("Asset")
+      .select("id, title, status")
+      .in("id", newAssetIds.length > 0 ? newAssetIds : ["__none__"])
+      .eq("status", AssetStatus.CHECKED_OUT);
 
     // Filter out assets that are partially checked in within this booking context using centralized helper
     // These are effectively available for other bookings
-    const checkedOutAssets = potentiallyCheckedOutAssets.filter(
+    const checkedOutAssets = (potentiallyCheckedOutAssets ?? []).filter(
       (asset) =>
         !isAssetPartiallyCheckedIn(asset, partialCheckinDetails, booking.status)
     );
@@ -414,13 +416,11 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     /** If some assets were removed, we also need to handle those */
     if (removedAssetIds.length > 0) {
       // Get the removed assets with their titles for proper note generation
-      const removedAssets = await db.asset.findMany({
-        where: {
-          id: { in: removedAssetIds },
-          organizationId,
-        },
-        select: { id: true, title: true },
-      });
+      const { data: removedAssets } = await sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", removedAssetIds)
+        .eq("organizationId", organizationId);
 
       await removeAssets({
         booking: { id: bookingId, assetIds: removedAssetIds },
@@ -428,7 +428,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         lastName: user?.lastName || "",
         userId: authSession.userId,
         organizationId,
-        assets: removedAssets,
+        assets: removedAssets ?? undefined,
       });
     }
 

@@ -1,7 +1,7 @@
 import { OrganizationRoles } from "@prisma/client";
 import { data, type ActionFunctionArgs } from "react-router";
 import { BulkReleaseCustodySchema } from "~/components/assets/bulk-release-custody-dialog";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { bulkCheckInAssets } from "~/modules/asset/service.server";
 import { CurrentSearchParamsSchema } from "~/modules/asset/utils.server";
 import { getAssetIndexSettings } from "~/modules/asset-index-settings/service.server";
@@ -44,15 +44,39 @@ export async function action({ request, context }: ActionFunctionArgs) {
     );
 
     if (role === OrganizationRoles.SELF_SERVICE) {
-      const custodies = await db.custody.findMany({
-        where: {
-          assetId: { in: assetIds },
-          asset: { organizationId },
-        },
-        select: { custodian: { select: { id: true, userId: true } } },
-      });
+      const { data: custodies } = await sbDb
+        .from("Custody")
+        .select("assetId, teamMemberId")
+        .in("assetId", assetIds);
 
-      if (custodies.some((custody) => custody.custodian.userId !== userId)) {
+      // Fetch team member userId for each custodian
+      const custodianIds = [
+        ...new Set(
+          (custodies || []).map((c: { teamMemberId: string }) => c.teamMemberId)
+        ),
+      ];
+      const { data: teamMembers } = await sbDb
+        .from("TeamMember")
+        .select("id, userId")
+        .in("id", custodianIds);
+
+      const tmMap = new Map(
+        (teamMembers || []).map((tm) => [tm.id, tm] as const)
+      );
+
+      // Reconstruct the shape
+      const custodiesWithTm = (custodies || []).map(
+        (c: { teamMemberId: string }) => ({
+          custodian: {
+            id: c.teamMemberId,
+            userId: tmMap.get(c.teamMemberId)?.userId ?? null,
+          },
+        })
+      );
+
+      if (
+        custodiesWithTm.some((custody) => custody.custodian.userId !== userId)
+      ) {
         throw new ShelfError({
           cause: null,
           title: "Action not allowed",

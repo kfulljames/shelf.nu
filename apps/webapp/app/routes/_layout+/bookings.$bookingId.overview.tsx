@@ -27,7 +27,11 @@ import ContextualModal from "~/components/layout/contextual-modal";
 import ContextualSidebar from "~/components/layout/contextual-sidebar";
 import type { HeaderData } from "~/components/layout/header/types";
 
+// KEPT AS PRISMA: tag findMany with isEmpty/has, asset findMany with complex
+// nested bookings include, kit findMany with _count, asset count with nested some,
+// kit findUniqueOrThrow with nested assets include
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { sendBookingUpdatedEmail } from "~/modules/booking/email-helpers";
 import { groupAndSortAssetsByKit } from "~/modules/booking/helpers";
@@ -649,7 +653,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         content: `${actor} deleted booking ${deletedBookingLink}.`,
         type: "UPDATE",
         userId: userId,
-        assetIds: deletedBooking.assets.map((a) => a.id),
+        assetIds: deletedBooking.assets.map((a: { id: string }) => a.id),
       });
 
       sendNotification({
@@ -665,10 +669,20 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     }
 
     // Form data is already extracted above and will be reused
-    const basicBookingInfo = await db.booking.findUniqueOrThrow({
-      where: { id },
-      select: { id: true, status: true, from: true, to: true },
-    });
+    const { data: basicBookingInfo, error: basicBookingError } = await sbDb
+      .from("Booking")
+      .select("id, status, from, to")
+      .eq("id", id)
+      .single();
+
+    if (basicBookingError || !basicBookingInfo) {
+      throw new ShelfError({
+        cause: basicBookingError,
+        message: "Booking not found",
+        additionalData: { userId, id },
+        label: "Booking",
+      });
+    }
     const workingHours = await getWorkingHoursForOrganization(organizationId);
     const bookingSettings =
       await getBookingSettingsForOrganization(organizationId);
@@ -798,8 +812,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           organizationId,
           hints: getClientHint(request),
           intentChoice: checkoutIntentChoice,
-          from: basicBookingInfo.from,
-          to: basicBookingInfo.to,
+          from: basicBookingInfo.from ? new Date(basicBookingInfo.from) : null,
+          to: basicBookingInfo.to ? new Date(basicBookingInfo.to) : null,
           userId: user.id,
         });
 
@@ -816,7 +830,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           content: `${actor} checked out asset with ${bookingLink}.`,
           type: "UPDATE",
           userId: user.id,
-          assetIds: booking.assets.map((a) => a.id),
+          assetIds: booking.assets.map((a: { id: string }) => a.id),
         });
 
         sendNotification({
@@ -887,7 +901,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           content: `${actor} checked in asset with ${bookingLink}.`,
           type: "UPDATE",
           userId: user.id,
-          assetIds: booking.assets.map((a) => a.id),
+          assetIds: booking.assets.map((a: { id: string }) => a.id),
         });
 
         sendNotification({
@@ -923,10 +937,12 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         );
 
         // Get the asset data for proper note generation
-        const asset = await db.asset.findUnique({
-          where: { id: assetId, organizationId },
-          select: { id: true, title: true },
-        });
+        const { data: asset } = await sbDb
+          .from("Asset")
+          .select("id, title")
+          .eq("id", assetId)
+          .eq("organizationId", organizationId)
+          .maybeSingle();
 
         const b = await removeAssets({
           booking: { id, assetIds: [assetId as string] },
@@ -1001,7 +1017,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           }`,
           type: "UPDATE",
           userId,
-          assetIds: cancelledBooking.assets.map((a) => a.id),
+          assetIds: cancelledBooking.assets.map((a: { id: string }) => a.id),
         });
 
         sendNotification({
@@ -1125,10 +1141,19 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
          * From frontend, we get both assetIds and kitIds,
          * here we are separating them and excluding assets that belong to kits
          * */
-        const assets = await db.asset.findMany({
-          where: { id: { in: assetOrKitIds } },
-          select: { id: true, title: true },
-        });
+        const { data: assets } = await sbDb
+          .from("Asset")
+          .select("id, title")
+          .in("id", assetOrKitIds);
+
+        if (!assets) {
+          throw new ShelfError({
+            cause: null,
+            message: "Failed to fetch assets for bulk removal",
+            additionalData: { userId, id, assetOrKitIds },
+            label: "Booking",
+          });
+        }
 
         const kits = await db.kit.findMany({
           where: { id: { in: assetOrKitIds } },

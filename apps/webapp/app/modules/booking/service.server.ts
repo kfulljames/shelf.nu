@@ -21,6 +21,7 @@ import type { HeaderData } from "~/components/layout/header/types";
 import type { SortingDirection } from "~/components/list/filters/sort-by";
 import { partialCheckinAssetsSchema } from "~/components/scanner/drawer/uses/partial-checkin-drawer";
 import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
 import { validateBookingOwnership } from "~/utils/booking-authorization.server";
@@ -101,6 +102,113 @@ import { TAG_WITH_COLOR_SELECT } from "../tag/constants";
 import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Booking";
+
+/**
+ * Helper: Re-fetch a booking with data equivalent to BOOKING_INCLUDE_FOR_EMAIL
+ * (custodianTeamMember, custodianUser, organization.owner.email, _count.assets)
+ * and optionally all assets.
+ */
+async function fetchBookingWithEmailIncludes(
+  bookingId: string,
+  opts?: { includeAssets?: boolean }
+) {
+  const { data: row, error: fetchErr } = await sbDb
+    .from("Booking")
+    .select("*")
+    .eq("id", bookingId)
+    .single();
+  if (fetchErr || !row) {
+    throw new ShelfError({
+      cause: fetchErr,
+      message: "Failed to re-fetch booking.",
+      label,
+    });
+  }
+
+  // Fetch related data in parallel
+  const [tmResult, cuResult, orgResult, assetCountResult, assetsResult] =
+    await Promise.all([
+      row.custodianTeamMemberId
+        ? sbDb
+            .from("TeamMember")
+            .select("*")
+            .eq("id", row.custodianTeamMemberId)
+            .single()
+        : Promise.resolve({ data: null, error: null }),
+      row.custodianUserId
+        ? sbDb.from("User").select("*").eq("id", row.custodianUserId).single()
+        : Promise.resolve({ data: null, error: null }),
+      sbDb
+        .from("Organization")
+        .select("*")
+        .eq("id", row.organizationId)
+        .single(),
+      sbDb
+        .from("_AssetToBooking")
+        .select("A", { count: "exact", head: true })
+        .eq("B", bookingId),
+      opts?.includeAssets
+        ? sbDb.from("_AssetToBooking").select("A").eq("B", bookingId)
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
+  // Fetch organization owner email
+  let ownerEmail: string | null = null;
+  if (orgResult.data) {
+    const { data: ownerRow } = await sbDb
+      .from("User")
+      .select("email")
+      .eq("id", (orgResult.data as any).userId)
+      .single();
+    ownerEmail = ownerRow?.email ?? null;
+  }
+
+  // Fetch full asset rows if requested
+  let assets: Array<Pick<Asset, "id"> & Record<string, unknown>> = [];
+  if (opts?.includeAssets && assetsResult.data) {
+    const assetIds = assetsResult.data.map((r) => r.A);
+    if (assetIds.length > 0) {
+      const { data: assetRows } = await sbDb
+        .from("Asset")
+        .select("*")
+        .in("id", assetIds);
+      assets = (assetRows ?? []).map((a) => ({
+        ...a,
+        createdAt: new Date(a.createdAt),
+        updatedAt: new Date(a.updatedAt),
+      })) as any;
+    }
+  }
+
+  const organization = orgResult.data
+    ? {
+        ...orgResult.data,
+        createdAt: new Date((orgResult.data as any).createdAt),
+        updatedAt: new Date((orgResult.data as any).updatedAt),
+        owner: { email: ownerEmail ?? "" },
+      }
+    : null;
+
+  const result = {
+    ...row,
+    from: row.from ? new Date(row.from) : null,
+    to: row.to ? new Date(row.to) : null,
+    createdAt: new Date(row.createdAt),
+    updatedAt: new Date(row.updatedAt),
+    originalFrom: row.originalFrom ? new Date(row.originalFrom) : null,
+    originalTo: row.originalTo ? new Date(row.originalTo) : null,
+    autoArchivedAt: row.autoArchivedAt ? new Date(row.autoArchivedAt) : null,
+    status: row.status as BookingStatus,
+    custodianTeamMember: tmResult.data ?? null,
+    custodianUser: cuResult.data ?? null,
+    organization,
+    _count: { assets: assetCountResult.count ?? 0 },
+    assets,
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return result as any;
+}
 
 async function cancelScheduler(
   booking: Pick<Booking, "id" | "activeSchedulerReference">
@@ -249,10 +357,18 @@ export async function scheduleNextBookingJob({
       {},
       when
     );
-    await db.booking.update({
-      where: { id: data.id },
-      data: { activeSchedulerReference: id },
-    });
+    const { error: updateError } = await sbDb
+      .from("Booking")
+      .update({ activeSchedulerReference: id })
+      .eq("id", data.id);
+    if (updateError) {
+      throw new ShelfError({
+        cause: updateError,
+        message: "Failed to update booking scheduler reference.",
+        additionalData: { bookingId: data.id },
+        label,
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -268,13 +384,23 @@ async function updateBookingAssetStates(
   status: AssetStatus
 ) {
   try {
-    return await db.asset.updateMany({
-      where: {
-        status: { not: status },
-        id: { in: booking.assets.map((a) => a.id) },
-      },
-      data: { status },
-    });
+    const { error } = await sbDb
+      .from("Asset")
+      .update({ status })
+      .in(
+        "id",
+        booking.assets.map((a) => a.id)
+      )
+      .neq("status", status);
+    if (error) {
+      throw new ShelfError({
+        cause: error,
+        message:
+          "Something went wrong while updating the booking asset states.",
+        additionalData: { booking, status },
+        label,
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -293,10 +419,18 @@ async function updateBookingKitStates({
   status: KitStatus;
 }) {
   try {
-    return await db.kit.updateMany({
-      where: { id: { in: kitIds } },
-      data: { status },
-    });
+    const { error } = await sbDb
+      .from("Kit")
+      .update({ status })
+      .in("id", kitIds);
+    if (error) {
+      throw new ShelfError({
+        cause: error,
+        message: "Something went wrong while updating the booking kit states.",
+        additionalData: { kitIds, status },
+        label,
+      });
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -383,10 +517,119 @@ export async function createBooking({
       };
     }
 
-    return await db.booking.create({
-      data: dataToCreate,
-      include: { ...BOOKING_COMMON_INCLUDE, organization: true },
-    });
+    // Insert booking via Supabase
+    const { data: createdRow, error: createError } = await sbDb
+      .from("Booking")
+      .insert({
+        name: booking.name,
+        from: booking.from?.toISOString() ?? null,
+        to: booking.to?.toISOString() ?? null,
+        description: booking.description,
+        status: BookingStatus.DRAFT,
+        creatorId: booking.creatorId,
+        organizationId: booking.organizationId,
+        originalFrom: booking.from?.toISOString() ?? null,
+        originalTo: booking.to?.toISOString() ?? null,
+        custodianTeamMemberId: booking.custodianTeamMemberId,
+        custodianUserId: booking.custodianUserId || null,
+      })
+      .select()
+      .single();
+    if (createError || !createdRow) {
+      throw new ShelfError({
+        cause: createError,
+        message: "Failed to create booking.",
+        label,
+      });
+    }
+
+    // Connect assets via join table
+    if (assetIds.length > 0) {
+      const { error: assetJoinError } = await sbDb
+        .from("_AssetToBooking")
+        .insert(assetIds.map((assetId) => ({ A: assetId, B: createdRow.id })));
+      if (assetJoinError) {
+        throw new ShelfError({
+          cause: assetJoinError,
+          message: "Failed to connect assets to booking.",
+          label,
+        });
+      }
+    }
+
+    // Connect tags via join table
+    if (booking.tags.length > 0) {
+      const { error: tagJoinError } = await sbDb
+        .from("_BookingToTag")
+        .insert(booking.tags.map((tag) => ({ A: createdRow.id, B: tag.id })));
+      if (tagJoinError) {
+        throw new ShelfError({
+          cause: tagJoinError,
+          message: "Failed to connect tags to booking.",
+          label,
+        });
+      }
+    }
+
+    // Fetch related data to match BOOKING_COMMON_INCLUDE + organization
+    const [
+      custodianTeamMemberResult,
+      custodianUserResult,
+      orgResult,
+      tagsResult,
+    ] = await Promise.all([
+      createdRow.custodianTeamMemberId
+        ? sbDb
+            .from("TeamMember")
+            .select("*")
+            .eq("id", createdRow.custodianTeamMemberId)
+            .single()
+        : Promise.resolve({ data: null, error: null }),
+      createdRow.custodianUserId
+        ? sbDb
+            .from("User")
+            .select("*")
+            .eq("id", createdRow.custodianUserId)
+            .single()
+        : Promise.resolve({ data: null, error: null }),
+      sbDb
+        .from("Organization")
+        .select("*")
+        .eq("id", createdRow.organizationId)
+        .single(),
+      sbDb.from("_BookingToTag").select("B").eq("A", createdRow.id),
+    ]);
+
+    let tags: Array<{ id: string; name: string; color: string | null }> = [];
+    if (tagsResult.data && tagsResult.data.length > 0) {
+      const tagIds = tagsResult.data.map((r) => r.B);
+      const { data: tagRows } = await sbDb
+        .from("Tag")
+        .select("id, name, color")
+        .in("id", tagIds);
+      tags = tagRows ?? [];
+    }
+
+    return {
+      ...createdRow,
+      from: createdRow.from ? new Date(createdRow.from) : null,
+      to: createdRow.to ? new Date(createdRow.to) : null,
+      createdAt: new Date(createdRow.createdAt),
+      updatedAt: new Date(createdRow.updatedAt),
+      originalFrom: createdRow.originalFrom
+        ? new Date(createdRow.originalFrom)
+        : null,
+      originalTo: createdRow.originalTo
+        ? new Date(createdRow.originalTo)
+        : null,
+      autoArchivedAt: createdRow.autoArchivedAt
+        ? new Date(createdRow.autoArchivedAt)
+        : null,
+      custodianTeamMember: custodianTeamMemberResult.data ?? null,
+      custodianUser: custodianUserResult.data ?? null,
+      organization: orgResult.data ?? null,
+      tags,
+    } as any;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -435,68 +678,110 @@ export async function updateBasicBooking({
     hints?: ClientHint;
   }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: {
-          id: true,
-          status: true,
-          custodianUserId: true,
-          custodianTeamMemberId: true,
-          name: true,
-          description: true,
-          from: true,
-          to: true,
-          custodianTeamMember: {
-            select: {
-              id: true,
-              name: true,
-              user: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                },
-              },
-            },
-          },
-          custodianUser: {
-            select: {
-              id: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          tags: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          status: 404,
-          message:
-            "Could not find booking or the booking exists in another workspace.",
-          label,
-        });
+    // Fetch booking via Supabase
+    const { data: bookingRow, error: bookingFetchErr } = await sbDb
+      .from("Booking")
+      .select(
+        "id, status, custodianUserId, custodianTeamMemberId, name, description, from, to"
+      )
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingFetchErr || !bookingRow) {
+      throw new ShelfError({
+        cause: bookingFetchErr,
+        status: 404,
+        message:
+          "Could not find booking or the booking exists in another workspace.",
+        label,
       });
+    }
+
+    // Fetch custodianTeamMember with nested user
+    let ubCustodianTm: {
+      id: string;
+      name: string;
+      user: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+      } | null;
+    } | null = null;
+    if (bookingRow.custodianTeamMemberId) {
+      const { data: tmRow } = await sbDb
+        .from("TeamMember")
+        .select("id, name, userId")
+        .eq("id", bookingRow.custodianTeamMemberId)
+        .single();
+      if (tmRow) {
+        let tmUser: {
+          id: string;
+          firstName: string | null;
+          lastName: string | null;
+        } | null = null;
+        if (tmRow.userId) {
+          const { data: uRow } = await sbDb
+            .from("User")
+            .select("id, firstName, lastName")
+            .eq("id", tmRow.userId)
+            .single();
+          tmUser = uRow;
+        }
+        ubCustodianTm = { id: tmRow.id, name: tmRow.name, user: tmUser };
+      }
+    }
+
+    // Fetch custodianUser
+    let ubCustodianUser: {
+      id: string;
+      email: string;
+      firstName: string | null;
+      lastName: string | null;
+    } | null = null;
+    if (bookingRow.custodianUserId) {
+      const { data: cuRow } = await sbDb
+        .from("User")
+        .select("id, email, firstName, lastName")
+        .eq("id", bookingRow.custodianUserId)
+        .single();
+      ubCustodianUser = cuRow;
+    }
+
+    // Fetch tags
+    const { data: ubTagJoinRows } = await sbDb
+      .from("_BookingToTag")
+      .select("B")
+      .eq("A", bookingRow.id);
+    let ubBookingTags: Array<{ id: string; name: string }> = [];
+    if (ubTagJoinRows && ubTagJoinRows.length > 0) {
+      const { data: tagRows } = await sbDb
+        .from("Tag")
+        .select("id, name")
+        .in(
+          "id",
+          ubTagJoinRows.map((r) => r.B)
+        );
+      ubBookingTags = tagRows ?? [];
+    }
+
+    const booking = {
+      ...bookingRow,
+      from: bookingRow.from ? new Date(bookingRow.from) : null,
+      to: bookingRow.to ? new Date(bookingRow.to) : null,
+      status: bookingRow.status as BookingStatus,
+      custodianTeamMember: ubCustodianTm,
+      custodianUser: ubCustodianUser,
+      tags: ubBookingTags,
+    };
 
     // Capture old custodian email before the update
     // (for custodian change scenarios)
     const oldCustodianEmail = booking.custodianUser?.email;
 
-    const dataToUpdate: Prisma.BookingUpdateInput = {
+    // Build flat update object for Supabase
+    const sbUpdateData: Record<string, unknown> = {
       name,
       description,
-      tags: {
-        set: [],
-        connect: tags,
-      },
     };
 
     /** Booking update is not allowed for these type of status */
@@ -519,16 +804,13 @@ export async function updateBasicBooking({
      * Changing of booking dates and custodian is only allowed for DRAFT status
      */
     if (booking.status === BookingStatus.DRAFT) {
-      dataToUpdate.from = from;
-      dataToUpdate.to = to;
-
-      // Also update the original dates to new ones
       if (from) {
-        dataToUpdate.originalFrom = from;
+        sbUpdateData.from = from.toISOString();
+        sbUpdateData.originalFrom = from.toISOString();
       }
-
       if (to) {
-        dataToUpdate.originalTo = to;
+        sbUpdateData.to = to.toISOString();
+        sbUpdateData.originalTo = to.toISOString();
       }
 
       /**
@@ -537,26 +819,20 @@ export async function updateBasicBooking({
        * However, just in case we need to check it. If its not passed, we need to throw an error to prevent silent failure and corrupted data
        */
       if (custodianTeamMemberId) {
-        dataToUpdate.custodianTeamMember = {
-          connect: { id: custodianTeamMemberId },
-        };
+        sbUpdateData.custodianTeamMemberId = custodianTeamMemberId;
 
         /**
-         * If a userId is passed, meaning the team member is connected to a user, we connct to it.
-         * This will override the value if there were any previous custodians`
+         * If a userId is passed, meaning the team member is connected to a user, we connect to it.
+         * This will override the value if there were any previous custodians
          */
         if (custodianUserId) {
-          dataToUpdate.custodianUser = {
-            connect: { id: custodianUserId },
-          };
+          sbUpdateData.custodianUserId = custodianUserId;
         } else if (booking.custodianUserId) {
           /**
            * If previous booking custodian had a user, we need to remove it
            * because we are now connecting to an NRM. If we dont do this the teamMemberID and the userId will be connected to different entities
            */
-          dataToUpdate.custodianUser = {
-            disconnect: true,
-          };
+          sbUpdateData.custodianUserId = null;
         }
       } else {
         throw new ShelfError({
@@ -569,10 +845,53 @@ export async function updateBasicBooking({
       }
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: dataToUpdate,
-    });
+    // Update booking flat fields via Supabase
+    const { data: updatedRow, error: updateErr } = await sbDb
+      .from("Booking")
+      .update(sbUpdateData)
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateErr || !updatedRow) {
+      throw new ShelfError({
+        cause: updateErr,
+        message: "Failed to update booking.",
+        label,
+      });
+    }
+
+    // Update tags: clear existing, then re-connect
+    await sbDb.from("_BookingToTag").delete().eq("A", booking.id);
+    if (tags.length > 0) {
+      const { error: tagConnErr } = await sbDb
+        .from("_BookingToTag")
+        .insert(tags.map((tag) => ({ A: booking.id, B: tag.id })));
+      if (tagConnErr) {
+        throw new ShelfError({
+          cause: tagConnErr,
+          message: "Failed to update booking tags.",
+          label,
+        });
+      }
+    }
+
+    const updatedBooking = {
+      ...updatedRow,
+      from: updatedRow.from ? new Date(updatedRow.from) : null,
+      to: updatedRow.to ? new Date(updatedRow.to) : null,
+      createdAt: new Date(updatedRow.createdAt),
+      updatedAt: new Date(updatedRow.updatedAt),
+      originalFrom: updatedRow.originalFrom
+        ? new Date(updatedRow.originalFrom)
+        : null,
+      originalTo: updatedRow.originalTo
+        ? new Date(updatedRow.originalTo)
+        : null,
+      autoArchivedAt: updatedRow.autoArchivedAt
+        ? new Date(updatedRow.autoArchivedAt)
+        : null,
+      status: updatedRow.status as BookingStatus,
+    };
 
     // BOOKING ACTIVITY LOG: Create separate notes for each change
     // This approach creates individual notes for each field change with proper user attribution
@@ -668,20 +987,54 @@ export async function updateBasicBooking({
 
       try {
         // Fetch new custodian details
-        const newCustodian = await db.teamMember.findUnique({
-          where: { id: custodianTeamMemberId },
-          select: {
-            id: true,
-            name: true,
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
-          },
-        });
+        const { data: newCustodianRow, error: tmError } = await sbDb
+          .from("TeamMember")
+          .select("id, name, userId")
+          .eq("id", custodianTeamMemberId)
+          .single();
+        if (tmError && tmError.code !== "PGRST116") {
+          throw new ShelfError({
+            cause: tmError,
+            label,
+            message: "Failed to fetch new custodian team member.",
+          });
+        }
+        let newCustodian: {
+          id: string;
+          name: string;
+          user: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+          } | null;
+        } | null = null;
+        if (newCustodianRow) {
+          let userRelation: {
+            id: string;
+            firstName: string | null;
+            lastName: string | null;
+          } | null = null;
+          if (newCustodianRow.userId) {
+            const { data: userData, error: userError } = await sbDb
+              .from("User")
+              .select("id, firstName, lastName")
+              .eq("id", newCustodianRow.userId)
+              .single();
+            if (userError) {
+              throw new ShelfError({
+                cause: userError,
+                label,
+                message: "Failed to fetch custodian user data.",
+              });
+            }
+            userRelation = userData;
+          }
+          newCustodian = {
+            id: newCustodianRow.id,
+            name: newCustodianRow.name,
+            user: userRelation,
+          };
+        }
 
         if (newCustodian) {
           let custodianChangeMessage = `${userLink} changed booking custodian`;
@@ -732,10 +1085,17 @@ export async function updateBasicBooking({
         booking.tags.map((tag) => tag.name).join(", ") || "(none)";
 
       // Get new tag names - we need to fetch them since we only have IDs
-      const newTags = await db.tag.findMany({
-        where: { id: { in: newTagIds } },
-        select: { name: true },
-      });
+      const { data: newTags, error: newTagsError } = await sbDb
+        .from("Tag")
+        .select("name")
+        .in("id", newTagIds);
+      if (newTagsError) {
+        throw new ShelfError({
+          cause: newTagsError,
+          message: "Failed to fetch tag names.",
+          label,
+        });
+      }
       const newTagNames = newTags.map((tag) => tag.name).join(", ") || "(none)";
 
       await createSystemBookingNote({
@@ -812,6 +1172,9 @@ export async function reserveBooking({
     userId?: User["id"];
   }) {
   try {
+    // KEPT AS PRISMA: This query uses createBookingConflictConditions which
+    // performs deeply nested relational filtering (asset.bookings with date
+    // range overlap). Converting to Supabase would require raw SQL or an RPC.
     const bookingFound = await db.booking
       .findUniqueOrThrow({
         where: { id, organizationId },
@@ -892,21 +1255,16 @@ export async function reserveBooking({
       });
     }
 
-    const dataToUpdate: Prisma.BookingUpdateInput = {
+    // Build flat update data for Supabase
+    const reserveUpdateData: Record<string, unknown> = {
       status: BookingStatus.RESERVED,
       name,
       description,
-      tags: {
-        set: [],
-        connect: tags,
-      },
+      from: from!.toISOString(),
+      originalFrom: from!.toISOString(),
+      to: to!.toISOString(),
+      originalTo: to!.toISOString(),
     };
-
-    dataToUpdate.from = from;
-    dataToUpdate.originalFrom = from;
-
-    dataToUpdate.to = to;
-    dataToUpdate.originalTo = to;
 
     /**
      * Custodian team member should always be passed.
@@ -914,26 +1272,20 @@ export async function reserveBooking({
      * However, just in case we need to check it. If its not passed, we need to throw an error to prevent silent failure and corrupted data
      */
     if (custodianTeamMemberId) {
-      dataToUpdate.custodianTeamMember = {
-        connect: { id: custodianTeamMemberId },
-      };
+      reserveUpdateData.custodianTeamMemberId = custodianTeamMemberId;
 
       /**
-       * If a userId is passed, meaning the team member is connected to a user, we connct to it.
-       * This will override the value if there were any previous custodians`
+       * If a userId is passed, meaning the team member is connected to a user, we connect to it.
+       * This will override the value if there were any previous custodians
        */
       if (custodianUserId) {
-        dataToUpdate.custodianUser = {
-          connect: { id: custodianUserId },
-        };
+        reserveUpdateData.custodianUserId = custodianUserId;
       } else if (bookingFound.custodianUserId) {
         /**
          * If previous booking custodian had a user, we need to remove it
          * because we are now connecting to an NRM. If we dont do this the teamMemberID and the userId will be connected to different entities
          */
-        dataToUpdate.custodianUser = {
-          disconnect: true,
-        };
+        reserveUpdateData.custodianUserId = null;
       }
     } else {
       throw new ShelfError({
@@ -945,10 +1297,53 @@ export async function reserveBooking({
       });
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: bookingFound.id },
-      data: dataToUpdate,
-    });
+    // Update booking via Supabase
+    const { data: reserveUpdatedRow, error: reserveUpdateErr } = await sbDb
+      .from("Booking")
+      .update(reserveUpdateData)
+      .eq("id", bookingFound.id)
+      .select()
+      .single();
+    if (reserveUpdateErr || !reserveUpdatedRow) {
+      throw new ShelfError({
+        cause: reserveUpdateErr,
+        message: "Failed to update booking for reservation.",
+        label,
+      });
+    }
+
+    // Update tags: clear existing, then re-connect
+    await sbDb.from("_BookingToTag").delete().eq("A", bookingFound.id);
+    if (tags.length > 0) {
+      const { error: rsvTagErr } = await sbDb
+        .from("_BookingToTag")
+        .insert(tags.map((tag) => ({ A: bookingFound.id, B: tag.id })));
+      if (rsvTagErr) {
+        throw new ShelfError({
+          cause: rsvTagErr,
+          message: "Failed to update booking tags.",
+          label,
+        });
+      }
+    }
+
+    const updatedBooking = {
+      ...reserveUpdatedRow,
+      from: reserveUpdatedRow.from ? new Date(reserveUpdatedRow.from) : null,
+      to: reserveUpdatedRow.to ? new Date(reserveUpdatedRow.to) : null,
+      createdAt: new Date(reserveUpdatedRow.createdAt),
+      updatedAt: new Date(reserveUpdatedRow.updatedAt),
+      originalFrom: reserveUpdatedRow.originalFrom
+        ? new Date(reserveUpdatedRow.originalFrom)
+        : null,
+      originalTo: reserveUpdatedRow.originalTo
+        ? new Date(reserveUpdatedRow.originalTo)
+        : null,
+      autoArchivedAt: reserveUpdatedRow.autoArchivedAt
+        ? new Date(reserveUpdatedRow.autoArchivedAt)
+        : null,
+      status: reserveUpdatedRow.status as BookingStatus,
+    };
 
     /** Calculate the time difference between the booking.to and the current time */
     const { hours } = calcTimeDifference(updatedBooking.from!, new Date());
@@ -1082,6 +1477,8 @@ export async function checkoutBooking({
   userId?: string;
 }) {
   try {
+    // KEPT AS PRISMA: Uses createBookingConflictConditions for deeply nested
+    // relational filtering (asset.bookings with date range overlap).
     const bookingFound = await db.booking
       .findUniqueOrThrow({
         where: { id, organizationId },
@@ -1170,7 +1567,6 @@ export async function checkoutBooking({
      * Get the kitIds because we need them to update their status later on
      */
     const kitIds = getKitIdsByAssets(bookingFound.assets);
-    const hasKits = kitIds.length > 0;
 
     const isEarlyCheckout = isBookingEarlyCheckout(bookingFound.from!);
 
@@ -1195,31 +1591,22 @@ export async function checkoutBooking({
       }).toJSDate();
     }
 
-    const updatedBooking = await db.$transaction(async (tx) => {
-      /* Updating the status of all assets inside booking */
-      await tx.asset.updateMany({
-        where: { id: { in: bookingFound.assets.map((a) => a.id) } },
-        data: { status: AssetStatus.CHECKED_OUT },
-      });
-
-      /** If there are any kits associated with the booking, then update their status */
-      if (hasKits) {
-        await tx.kit.updateMany({
-          where: { id: { in: kitIds } },
-          data: { status: KitStatus.CHECKED_OUT },
-        });
-      }
-
-      /** Finally update the booking */
-      return tx.booking.update({
-        where: { id: bookingFound.id },
-        data: dataToUpdate,
-        include: {
-          ...BOOKING_INCLUDE_FOR_EMAIL,
-          assets: true,
-        },
-      });
+    /** Atomically checkout via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_checkout", {
+      p_asset_ids: bookingFound.assets.map((a) => a.id),
+      p_kit_ids: kitIds,
+      p_booking_id: bookingFound.id,
+      p_new_status: isExpired ? BookingStatus.OVERDUE : BookingStatus.ONGOING,
+      p_new_from: (dataToUpdate.from as Date | undefined)?.toISOString(),
+      p_new_to: undefined,
     });
+    if (rpcError) throw rpcError;
+
+    /** Re-fetch updated booking with includes via Supabase */
+    const updatedBooking = await fetchBookingWithEmailIncludes(
+      bookingFound.id,
+      { includeAssets: true }
+    );
 
     // Create status transition note
     if (userId) {
@@ -1317,36 +1704,121 @@ export async function checkinBooking({
   specificAssetIds?: string[];
 }) {
   try {
-    const bookingFound = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        include: {
-          assets: {
-            select: {
-              id: true,
-              kitId: true,
-              status: true,
-              bookings: {
-                select: { id: true, status: true },
-                where: {
-                  status: {
-                    in: [BookingStatus.ONGOING, BookingStatus.OVERDUE],
-                  },
-                },
-              },
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          status: 404,
-          label,
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    // Fetch booking via Supabase
+    const { data: ciBookingRow, error: ciBookingErr } = await sbDb
+      .from("Booking")
+      .select("*")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (ciBookingErr || !ciBookingRow) {
+      throw new ShelfError({
+        cause: ciBookingErr,
+        status: 404,
+        label,
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
+
+    // Fetch assets for this booking
+    const { data: ciAssetJoinRows, error: ciJoinErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", id);
+    if (ciJoinErr) {
+      throw new ShelfError({
+        cause: ciJoinErr,
+        label,
+        message: "Failed to fetch booking assets.",
+      });
+    }
+    const ciAssetIds = ciAssetJoinRows?.map((r) => r.A) ?? [];
+    let ciAssets: Array<{
+      id: string;
+      kitId: string | null;
+      status: string;
+      bookings: Array<{ id: string; status: string }>;
+    }> = [];
+    if (ciAssetIds.length > 0) {
+      const { data: ciAssetRows, error: ciAssetErr } = await sbDb
+        .from("Asset")
+        .select("id, kitId, status")
+        .in("id", ciAssetIds);
+      if (ciAssetErr) {
+        throw new ShelfError({
+          cause: ciAssetErr,
+          label,
+          message: "Failed to fetch asset details.",
+        });
+      }
+
+      // For each asset, find its ONGOING/OVERDUE bookings
+      const { data: allActiveBookingJoins, error: activeJoinErr } = await sbDb
+        .from("_AssetToBooking")
+        .select("A, B")
+        .in("A", ciAssetIds);
+      if (activeJoinErr) {
+        throw new ShelfError({
+          cause: activeJoinErr,
+          label,
+          message: "Failed to fetch asset booking joins.",
+        });
+      }
+
+      // Get unique booking IDs and fetch their statuses
+      const relatedBookingIds = [
+        ...new Set(allActiveBookingJoins?.map((r) => r.B) ?? []),
+      ];
+      let bookingStatusMap = new Map<string, string>();
+      if (relatedBookingIds.length > 0) {
+        const { data: bookingRows } = await sbDb
+          .from("Booking")
+          .select("id, status")
+          .in("id", relatedBookingIds)
+          .in("status", [BookingStatus.ONGOING, BookingStatus.OVERDUE]);
+        (bookingRows ?? []).forEach((b) =>
+          bookingStatusMap.set(b.id, b.status)
+        );
+      }
+
+      // Build asset -> bookings map
+      const assetBookingsMap = new Map<
+        string,
+        Array<{ id: string; status: string }>
+      >();
+      (allActiveBookingJoins ?? []).forEach((join) => {
+        const bStatus = bookingStatusMap.get(join.B);
+        if (bStatus) {
+          if (!assetBookingsMap.has(join.A)) assetBookingsMap.set(join.A, []);
+          assetBookingsMap.get(join.A)!.push({ id: join.B, status: bStatus });
+        }
+      });
+
+      ciAssets = (ciAssetRows ?? []).map((a) => ({
+        ...a,
+        bookings: assetBookingsMap.get(a.id) ?? [],
+      }));
+    }
+
+    const bookingFound = {
+      ...ciBookingRow,
+      from: ciBookingRow.from ? new Date(ciBookingRow.from) : null,
+      to: ciBookingRow.to ? new Date(ciBookingRow.to) : null,
+      createdAt: new Date(ciBookingRow.createdAt),
+      updatedAt: new Date(ciBookingRow.updatedAt),
+      originalFrom: ciBookingRow.originalFrom
+        ? new Date(ciBookingRow.originalFrom)
+        : null,
+      originalTo: ciBookingRow.originalTo
+        ? new Date(ciBookingRow.originalTo)
+        : null,
+      autoArchivedAt: ciBookingRow.autoArchivedAt
+        ? new Date(ciBookingRow.autoArchivedAt)
+        : null,
+      status: ciBookingRow.status as BookingStatus,
+      assets: ciAssets,
+    };
 
     const dataToUpdate: Prisma.BookingUpdateInput = {
       status: BookingStatus.COMPLETE,
@@ -1412,12 +1884,21 @@ export async function checkinBooking({
     // Pre-fetch partial check-ins for linked bookings outside the transaction
     const partialCheckinsForLinkedBookings =
       linkedActiveBookingIds.size > 0
-        ? await db.partialBookingCheckin.findMany({
-            where: {
-              bookingId: { in: Array.from(linkedActiveBookingIds) },
-            },
-            select: { bookingId: true, assetIds: true },
-          })
+        ? await (async () => {
+            const { data, error } = await sbDb
+              .from("PartialBookingCheckin")
+              .select("bookingId, assetIds")
+              .in("bookingId", Array.from(linkedActiveBookingIds));
+            if (error) {
+              throw new ShelfError({
+                cause: error,
+                label,
+                message:
+                  "Failed to fetch partial check-ins for linked bookings.",
+              });
+            }
+            return data;
+          })()
         : [];
 
     // Build a map of bookingId -> Set of asset IDs that were partially checked in
@@ -1482,35 +1963,20 @@ export async function checkinBooking({
         })
       : [];
 
-    const updatedBooking = await db.$transaction(
-      async (tx) => {
-        if (assetsToCheckin.length > 0) {
-          await tx.asset.updateMany({
-            where: { id: { in: assetsToCheckin } },
-            data: { status: AssetStatus.AVAILABLE },
-          });
-        }
-        /* If there are any kits associated with the booking, then update their status */
-        if (hasKits) {
-          if (kitsToCheckin.length > 0) {
-            await tx.kit.updateMany({
-              where: { id: { in: kitsToCheckin } },
-              data: { status: KitStatus.AVAILABLE },
-            });
-          }
-        }
+    /** Atomically checkin via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_checkin", {
+      p_asset_ids: assetsToCheckin,
+      p_kit_ids: kitsToCheckin,
+      p_booking_id: bookingFound.id,
+      p_new_status: BookingStatus.COMPLETE,
+      p_new_to: (dataToUpdate.to as Date | undefined)?.toISOString(),
+    });
+    if (rpcError) throw rpcError;
 
-        /** Finally update the booking */
-        return tx.booking.update({
-          where: { id: bookingFound.id },
-          data: dataToUpdate,
-          include: {
-            ...BOOKING_INCLUDE_FOR_EMAIL,
-            assets: true,
-          },
-        });
-      },
-      { timeout: 15000 }
+    /** Re-fetch updated booking with includes via Supabase */
+    const updatedBooking = await fetchBookingWithEmailIncludes(
+      bookingFound.id,
+      { includeAssets: true }
     );
 
     // Create status transition note
@@ -1526,19 +1992,50 @@ export async function checkinBooking({
         });
 
         // Get asset and kit data for consistent formatting
-        const assetsWithKitInfo = await db.asset.findMany({
-          where: { id: { in: specificAssetIds } },
-          select: {
-            id: true,
-            title: true,
-            kit: { select: { id: true, name: true } },
-          },
-        });
+        const { data: assetRows, error: assetError } = await sbDb
+          .from("Asset")
+          .select("id, title, kitId")
+          .in("id", specificAssetIds);
+        if (assetError) {
+          throw new ShelfError({
+            cause: assetError,
+            label,
+            message: "Failed to fetch assets for check-in notes.",
+          });
+        }
+        // Fetch kit data for assets that belong to kits
+        const assetKitIds = [
+          ...new Set(
+            assetRows
+              .map((a) => a.kitId)
+              .filter((id): id is string => id != null)
+          ),
+        ];
+        const kitMap = new Map<string, { id: string; name: string }>();
+        if (assetKitIds.length > 0) {
+          const { data: kitRows, error: kitError } = await sbDb
+            .from("Kit")
+            .select("id, name")
+            .in("id", assetKitIds);
+          if (kitError) {
+            throw new ShelfError({
+              cause: kitError,
+              label,
+              message: "Failed to fetch kits for check-in notes.",
+            });
+          }
+          kitRows.forEach((k) => kitMap.set(k.id, { id: k.id, name: k.name }));
+        }
+        const assetsWithKitInfo = assetRows.map((a) => ({
+          id: a.id,
+          title: a.title,
+          kit: a.kitId ? kitMap.get(a.kitId) ?? null : null,
+        }));
 
         // Separate complete kits from individual assets
         const kitIds = getKitIdsByAssets(
           (updatedBooking.assets || []).filter(
-            (a) => specificAssetIds?.includes(a.id)
+            (a: Pick<Asset, "id" | "kitId">) => specificAssetIds?.includes(a.id)
           )
         );
         const completeKits: Array<{ id: string; name: string }> = [];
@@ -1625,13 +2122,18 @@ export async function checkinBooking({
      * Check if auto-archive is enabled for this organization
      * and schedule the auto-archive job if needed
      */
-    const bookingSettings = await db.bookingSettings.findUnique({
-      where: { organizationId: updatedBooking.organizationId },
-      select: {
-        autoArchiveBookings: true,
-        autoArchiveDays: true,
-      },
-    });
+    const { data: bookingSettings, error: bookingSettingsError } = await sbDb
+      .from("BookingSettings")
+      .select("autoArchiveBookings, autoArchiveDays")
+      .eq("organizationId", updatedBooking.organizationId)
+      .maybeSingle();
+    if (bookingSettingsError) {
+      throw new ShelfError({
+        cause: bookingSettingsError,
+        message: "Failed to fetch booking settings.",
+        label,
+      });
+    }
 
     if (bookingSettings?.autoArchiveBookings) {
       const when = new Date();
@@ -1712,28 +2214,71 @@ export async function partialCheckinBooking({
         lastName: true,
       } satisfies Prisma.UserSelect,
     });
-    // First, validate the booking exists and get its current assets
-    const bookingFound = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        include: { assets: { select: { id: true, kitId: true } } },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          status: 404,
-          label,
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    // First, validate the booking exists and get its current assets via Supabase
+    const { data: pcBookingRow, error: pcBookingErr } = await sbDb
+      .from("Booking")
+      .select("*")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (pcBookingErr || !pcBookingRow) {
+      throw new ShelfError({
+        cause: pcBookingErr,
+        status: 404,
+        label,
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
+    // Fetch assets via join table
+    const { data: pcAssetJoins } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", id);
+    const pcAssetIds = pcAssetJoins?.map((r) => r.A) ?? [];
+    let pcAssets: Array<{ id: string; kitId: string | null }> = [];
+    if (pcAssetIds.length > 0) {
+      const { data: pcAssetRows } = await sbDb
+        .from("Asset")
+        .select("id, kitId")
+        .in("id", pcAssetIds);
+      pcAssets = pcAssetRows ?? [];
+    }
+    const bookingFound = {
+      ...pcBookingRow,
+      from: pcBookingRow.from ? new Date(pcBookingRow.from) : null,
+      to: pcBookingRow.to ? new Date(pcBookingRow.to) : null,
+      createdAt: new Date(pcBookingRow.createdAt),
+      updatedAt: new Date(pcBookingRow.updatedAt),
+      originalFrom: pcBookingRow.originalFrom
+        ? new Date(pcBookingRow.originalFrom)
+        : null,
+      originalTo: pcBookingRow.originalTo
+        ? new Date(pcBookingRow.originalTo)
+        : null,
+      autoArchivedAt: pcBookingRow.autoArchivedAt
+        ? new Date(pcBookingRow.autoArchivedAt)
+        : null,
+      status: pcBookingRow.status as BookingStatus,
+      assets: pcAssets,
+    };
 
     // Early exit: If we're checking in all remaining CHECKED_OUT assets, do a complete check-in instead
     // First, get the current status of all assets in the booking
-    const currentAssetStatuses = await db.asset.findMany({
-      where: { id: { in: bookingFound.assets.map((a) => a.id) } },
-      select: { id: true, status: true },
-    });
+    const { data: currentAssetStatuses, error: assetStatusError } = await sbDb
+      .from("Asset")
+      .select("id, status")
+      .in(
+        "id",
+        bookingFound.assets.map((a) => a.id)
+      );
+    if (assetStatusError) {
+      throw new ShelfError({
+        cause: assetStatusError,
+        message: "Failed to fetch asset statuses.",
+        label,
+      });
+    }
 
     // Find assets that are still CHECKED_OUT (not yet checked in)
     const checkedOutAssets = currentAssetStatuses.filter(
@@ -1821,168 +2366,192 @@ export async function partialCheckinBooking({
       }
     }
 
-    const updatedBooking = await db.$transaction(async (tx) => {
-      // Update the status of checked-in assets to AVAILABLE
-      await tx.asset.updateMany({
-        where: { id: { in: assetIds } },
-        data: { status: AssetStatus.AVAILABLE },
-      });
-
-      // Only update kit status for kits that are completely checked in
-      if (completeKitIds.length > 0) {
-        await tx.kit.updateMany({
-          where: { id: { in: completeKitIds } },
-          data: { status: KitStatus.AVAILABLE },
-        });
+    // RPC handles atomic writes: asset status, kit status, partial checkin record
+    const { error: rpcError } = await sbDb.rpc(
+      "shelf_booking_partial_checkin",
+      {
+        p_asset_ids: assetIds,
+        p_kit_ids: completeKitIds,
+        p_booking_id: id,
+        p_user_id: userId,
+        p_checkin_count: assetIds.length,
       }
+    );
 
-      // Create partial check-in record for tracking
-      await tx.partialBookingCheckin.create({
-        data: {
-          bookingId: id,
-          checkedInById: userId,
-          assetIds,
-          checkinCount: assetIds.length,
-        },
+    if (rpcError) {
+      throw new ShelfError({
+        cause: rpcError,
+        message: rpcError.message,
+        label,
       });
+    }
 
-      // Create audit notes for each checked-in asset using createNotes
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user?.firstName,
-        lastName: user?.lastName,
-      });
-      const noteContent = `${actor} checked in via partial check-in.`;
-      await createNotes({
-        content: noteContent,
-        type: "UPDATE",
-        userId,
-        assetIds,
-      });
-
-      // BOOKING ACTIVITY LOG: Log partial check-in activity
-      // Get the kit and standalone asset data for consistent formatting
-      const assetsWithKitInfo = await tx.asset.findMany({
-        where: { id: { in: assetIds } },
-        select: {
-          id: true,
-          title: true,
-          kit: { select: { id: true, name: true } },
-        },
-      });
-
-      // Separate complete kits from individual assets
-      const completeKits: Array<{ id: string; name: string }> = [];
-      const standaloneAssets: Array<{ id: string; title: string }> = [];
-      const processedKitIds = new Set<string>();
-
-      for (const asset of assetsWithKitInfo) {
-        if (
-          asset.kit &&
-          completeKitIds.includes(asset.kit.id) &&
-          !processedKitIds.has(asset.kit.id)
-        ) {
-          completeKits.push({ id: asset.kit.id, name: asset.kit.name });
-          processedKitIds.add(asset.kit.id);
-        } else if (!asset.kit) {
-          standaloneAssets.push({ id: asset.id, title: asset.title });
-        }
-      }
-
-      const hasKits = completeKits.length > 0;
-      const hasAssets = standaloneAssets.length > 0;
-
-      let itemsDescription = "";
-      if (hasKits && hasAssets) {
-        const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
-        const assetContent = wrapAssetsWithDataForNote(
-          standaloneAssets,
-          "checked in"
-        );
-        itemsDescription = `${assetContent} and ${kitContent}`;
-      } else if (hasKits) {
-        const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
-        itemsDescription = kitContent;
-      } else if (hasAssets) {
-        const assetContent = wrapAssetsWithDataForNote(
-          standaloneAssets,
-          "checked in"
-        );
-        itemsDescription = assetContent;
-      }
-
-      // Get the updated booking with all original assets first to calculate remaining count
-      const updatedBookingForNote = await tx.booking.findUniqueOrThrow({
-        where: { id },
-        include: {
-          assets: true,
-          custodianUser: true,
-          custodianTeamMember: true,
-          _count: { select: { assets: true } },
-        },
-      });
-
-      const remainingCount =
-        updatedBookingForNote.assets.length - assetIds.length;
-      const isCompletingBooking = remainingCount === 0;
-
-      if (isCompletingBooking) {
-        // Update booking status to COMPLETE
-        const completedBooking = await tx.booking.update({
-          where: { id },
-          data: { status: BookingStatus.COMPLETE },
-          include: {
-            assets: true,
-            custodianUser: true,
-            custodianTeamMember: true,
-            _count: { select: { assets: true } },
-          },
-        });
-
-        // Create combined completion message
-        const fromStatusBadge = wrapBookingStatusForNote(
-          updatedBookingForNote.status,
-          completedBooking.custodianUserId || undefined
-        );
-        const toStatusBadge = wrapBookingStatusForNote(
-          BookingStatus.COMPLETE,
-          completedBooking.custodianUserId || undefined
-        );
-
-        await createSystemBookingNote({
-          bookingId: id,
-          content: `${wrapUserLinkForNote(
-            user!
-          )} performed a partial check-in: ${itemsDescription} and completed the booking. Status changed from ${fromStatusBadge} to ${toStatusBadge}`,
-        });
-
-        return {
-          booking: completedBooking,
-          checkedInAssetCount: assetIds.length,
-          remainingAssetCount: 0,
-          isComplete: true,
-        };
-      } else {
-        // Regular partial check-in
-        const remainingText = ` (Remaining: ${remainingCount})`;
-
-        await createSystemBookingNote({
-          bookingId: id,
-          content: `${wrapUserLinkForNote(
-            user!
-          )} performed a partial check-in: ${itemsDescription}${remainingText}.`,
-        });
-
-        return {
-          booking: updatedBookingForNote,
-          checkedInAssetCount: assetIds.length,
-          remainingAssetCount: remainingCount,
-          isComplete: false,
-        };
-      }
+    // Create audit notes for each checked-in asset
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user?.firstName,
+      lastName: user?.lastName,
+    });
+    const noteContent = `${actor} checked in via partial check-in.`;
+    await createNotes({
+      content: noteContent,
+      type: "UPDATE",
+      userId,
+      assetIds,
     });
 
-    return updatedBooking;
+    // BOOKING ACTIVITY LOG: Log partial check-in activity
+    const { data: partialAssetRows, error: partialAssetError } = await sbDb
+      .from("Asset")
+      .select("id, title, kitId")
+      .in("id", assetIds);
+    if (partialAssetError) {
+      throw new ShelfError({
+        cause: partialAssetError,
+        label,
+        message: "Failed to fetch assets for partial check-in notes.",
+      });
+    }
+    // Fetch kit data for assets that belong to kits
+    const partialKitIds = [
+      ...new Set(
+        partialAssetRows
+          .map((a) => a.kitId)
+          .filter((id): id is string => id != null)
+      ),
+    ];
+    const partialKitMap = new Map<string, { id: string; name: string }>();
+    if (partialKitIds.length > 0) {
+      const { data: partialKitRows, error: partialKitError } = await sbDb
+        .from("Kit")
+        .select("id, name")
+        .in("id", partialKitIds);
+      if (partialKitError) {
+        throw new ShelfError({
+          cause: partialKitError,
+          label,
+          message: "Failed to fetch kits for partial check-in notes.",
+        });
+      }
+      partialKitRows.forEach((k) =>
+        partialKitMap.set(k.id, { id: k.id, name: k.name })
+      );
+    }
+    const assetsWithKitInfo = partialAssetRows.map((a) => ({
+      id: a.id,
+      title: a.title,
+      kit: a.kitId ? partialKitMap.get(a.kitId) ?? null : null,
+    }));
+
+    // Separate complete kits from individual assets
+    const completeKits: Array<{ id: string; name: string }> = [];
+    const standaloneAssets: Array<{ id: string; title: string }> = [];
+    const processedKitIds = new Set<string>();
+
+    for (const asset of assetsWithKitInfo) {
+      if (
+        asset.kit &&
+        completeKitIds.includes(asset.kit.id) &&
+        !processedKitIds.has(asset.kit.id)
+      ) {
+        completeKits.push({ id: asset.kit.id, name: asset.kit.name });
+        processedKitIds.add(asset.kit.id);
+      } else if (!asset.kit) {
+        standaloneAssets.push({ id: asset.id, title: asset.title });
+      }
+    }
+
+    const hasKits = completeKits.length > 0;
+    const hasAssets = standaloneAssets.length > 0;
+
+    let itemsDescription = "";
+    if (hasKits && hasAssets) {
+      const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
+      const assetContent = wrapAssetsWithDataForNote(
+        standaloneAssets,
+        "checked in"
+      );
+      itemsDescription = `${assetContent} and ${kitContent}`;
+    } else if (hasKits) {
+      const kitContent = wrapKitsWithDataForNote(completeKits, "checked in");
+      itemsDescription = kitContent;
+    } else if (hasAssets) {
+      const assetContent = wrapAssetsWithDataForNote(
+        standaloneAssets,
+        "checked in"
+      );
+      itemsDescription = assetContent;
+    }
+
+    // Get the updated booking to calculate remaining count via Supabase
+    const updatedBookingForNote = await fetchBookingWithEmailIncludes(id, {
+      includeAssets: true,
+    });
+
+    const remainingCount =
+      (updatedBookingForNote.assets?.length ?? 0) - assetIds.length;
+    const isCompletingBooking = remainingCount === 0;
+
+    if (isCompletingBooking) {
+      // Update booking status to COMPLETE via Supabase
+      const { error: pcCompleteErr } = await sbDb
+        .from("Booking")
+        .update({ status: BookingStatus.COMPLETE })
+        .eq("id", id);
+      if (pcCompleteErr) {
+        throw new ShelfError({
+          cause: pcCompleteErr,
+          message: "Failed to complete booking.",
+          label,
+        });
+      }
+
+      // Re-fetch to get completed booking state
+      const completedBooking = await fetchBookingWithEmailIncludes(id, {
+        includeAssets: true,
+      });
+
+      // Create combined completion message
+      const fromStatusBadge = wrapBookingStatusForNote(
+        updatedBookingForNote.status,
+        completedBooking.custodianUserId || undefined
+      );
+      const toStatusBadge = wrapBookingStatusForNote(
+        BookingStatus.COMPLETE,
+        completedBooking.custodianUserId || undefined
+      );
+
+      await createSystemBookingNote({
+        bookingId: id,
+        content: `${wrapUserLinkForNote(
+          user!
+        )} performed a partial check-in: ${itemsDescription} and completed the booking. Status changed from ${fromStatusBadge} to ${toStatusBadge}`,
+      });
+
+      return {
+        booking: completedBooking,
+        checkedInAssetCount: assetIds.length,
+        remainingAssetCount: 0,
+        isComplete: true,
+      };
+    } else {
+      // Regular partial check-in
+      const remainingText = ` (Remaining: ${remainingCount})`;
+
+      await createSystemBookingNote({
+        bookingId: id,
+        content: `${wrapUserLinkForNote(
+          user!
+        )} performed a partial check-in: ${itemsDescription}${remainingText}.`,
+      });
+
+      return {
+        booking: updatedBookingForNote,
+        checkedInAssetCount: assetIds.length,
+        remainingAssetCount: remainingCount,
+        isComplete: false,
+      };
+    }
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -2006,103 +2575,73 @@ export async function updateBookingAssets({
   userId?: User["id"];
 }) {
   try {
-    const booking = await db.$transaction(async (tx) => {
-      // Verify booking exists before inserting into the join table,
-      // so a stale/deleted booking returns a proper 404 (P2025)
-      // instead of a FK violation (P2003)
-      const b = await tx.booking.findUniqueOrThrow({
-        where: { id, organizationId },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-        },
+    const { data: rpcResult, error: rpcError } = await sbDb.rpc(
+      "shelf_booking_update_assets",
+      {
+        p_asset_ids: assetIds,
+        p_booking_id: id,
+        p_org_id: organizationId,
+        p_kit_ids: kitIds ?? [],
+      }
+    );
+
+    if (rpcError) {
+      throw new ShelfError({
+        cause: rpcError,
+        message: rpcError.message,
+        label,
       });
+    }
 
-      // Dedupe assetIds so duplicate entries don't cause false validation failures
-      // (findMany returns unique rows, so duplicates would inflate the expected count)
-      const uniqueAssetIds = [...new Set(assetIds)];
+    const result = rpcResult as unknown as {
+      success?: boolean;
+      error?: string;
+      status?: number;
+      bookingId?: string;
+      bookingStatus?: string;
+    };
 
-      // Validate that all asset IDs exist before inserting into the join table
-      // to prevent FK violations when assets are deleted between UI load and submission
-      const validAssets = await tx.asset.findMany({
-        where: { id: { in: uniqueAssetIds }, organizationId },
-        select: { id: true },
+    if (result?.error) {
+      throw new ShelfError({
+        cause: null,
+        message: result.error,
+        label,
+        shouldBeCaptured: false,
+        status: (result.status as 400 | 500) ?? 400,
       });
-      const validAssetIds = validAssets.map((a) => a.id);
+    }
 
-      if (validAssetIds.length === 0) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "None of the selected assets exist. They may have been deleted.",
-          label,
-          shouldBeCaptured: false,
-          status: 400,
-        });
-      }
-
-      if (validAssetIds.length !== uniqueAssetIds.length) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "Some of the selected assets no longer exist. Please reload and try again.",
-          label,
-          shouldBeCaptured: false,
-          status: 400,
-        });
-      }
-
-      await Promise.all([
-        // Bulk insert into the join table in a single SQL statement instead of
-        // N individual connect operations which cause transaction timeouts
-        // for large bookings
-        tx.$executeRaw`
-          INSERT INTO "_AssetToBooking" ("A", "B")
-          SELECT unnest(${validAssetIds}::text[]), ${id}
-          ON CONFLICT ("A", "B") DO NOTHING
-        `,
-        // Touch updatedAt since the raw INSERT doesn't update the booking row
-        tx.booking.update({
-          where: { id },
-          data: { updatedAt: new Date() },
-        }),
-      ]);
-
-      /**
-       *  When adding an asset to a booking, we need to update the status of the asset to CHECKED_OUT if the booking is ONGOING or OVERDUE
-       */
-      if (
-        b.status === BookingStatus.ONGOING ||
-        b.status === BookingStatus.OVERDUE
-      ) {
-        await tx.asset.updateMany({
-          where: { id: { in: validAssetIds }, organizationId },
-          data: { status: AssetStatus.CHECKED_OUT },
-        });
-
-        /**
-         * Also update kit status to CHECKED_OUT for any kits that contain these assets
-         */
-        if (kitIds && kitIds.length > 0) {
-          await tx.kit.updateMany({
-            where: { id: { in: kitIds }, organizationId },
-            data: { status: KitStatus.CHECKED_OUT },
-          });
-        }
-      }
-      return b;
-    });
+    const { data: booking, error: bookingError } = await sbDb
+      .from("Booking")
+      .select("id, name, status")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingError || !booking) {
+      throw new ShelfError({
+        cause: bookingError,
+        message: "Booking not found.",
+        label,
+      });
+    }
 
     // BOOKING ACTIVITY LOG: Log asset addition activity
     // Creates user-attributed note when assets are added to a booking
     // Skip note creation if kits are involved - kit notes are created separately
     if (!kitIds || kitIds.length === 0) {
       // Fetch asset data to use proper wrapper for single assets
-      const assets = await db.asset.findMany({
-        where: { id: { in: assetIds }, organizationId },
-        select: { id: true, title: true },
-      });
+      const { data: assets, error: assetsError } = await sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", assetIds)
+        .eq("organizationId", organizationId);
+      if (assetsError) {
+        throw new ShelfError({
+          cause: assetsError,
+          message: "Failed to fetch assets.",
+          label,
+        });
+      }
 
       const assetContent = wrapAssetsWithDataForNote(assets, "added");
 
@@ -2189,20 +2728,21 @@ export async function archiveBooking({
   userId?: string;
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: { id: true, status: true, activeSchedulerReference: true },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          title: "Not found",
-          message:
-            "Booking not found, are you sure it exists in current workspace?",
-        });
+    const { data: booking, error: bookingFetchError } = await sbDb
+      .from("Booking")
+      .select("id, status, activeSchedulerReference")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingFetchError || !booking) {
+      throw new ShelfError({
+        cause: bookingFetchError,
+        label,
+        title: "Not found",
+        message:
+          "Booking not found, are you sure it exists in current workspace?",
       });
+    }
 
     /** Booking can be archived only if it is COMPLETE */
     if (booking.status !== BookingStatus.COMPLETE) {
@@ -2213,10 +2753,19 @@ export async function archiveBooking({
       });
     }
 
-    const updatedBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: { status: BookingStatus.ARCHIVED },
-    });
+    const { data: updatedBooking, error: updateError } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.ARCHIVED })
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateError || !updatedBooking) {
+      throw new ShelfError({
+        cause: updateError,
+        label,
+        message: "Failed to archive booking.",
+      });
+    }
 
     // Cancel any pending auto-archive job
     await cancelScheduler(booking);
@@ -2254,23 +2803,54 @@ export async function cancelBooking({
   cancellationReason?: string;
 }) {
   try {
-    const bookingFound = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: {
-          id: true,
-          status: true,
-          assets: { select: { id: true, kitId: true } },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          message:
-            "Booking not found. Are you sure it exists in current workspace?",
-        });
+    // Fetch booking
+    const { data: bookingRow, error: bookingError } = await sbDb
+      .from("Booking")
+      .select("id, status, organizationId")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingError || !bookingRow) {
+      throw new ShelfError({
+        cause: bookingError,
+        label,
+        message:
+          "Booking not found. Are you sure it exists in current workspace?",
       });
+    }
+    // Fetch assets for this booking via join table
+    const { data: assetJoinRows, error: assetJoinError } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", id);
+    if (assetJoinError) {
+      throw new ShelfError({
+        cause: assetJoinError,
+        label,
+        message: "Failed to fetch booking assets.",
+      });
+    }
+    const bookingAssetIds = assetJoinRows.map((r) => r.A);
+    let bookingAssets: Array<{ id: string; kitId: string | null }> = [];
+    if (bookingAssetIds.length > 0) {
+      const { data: assetData, error: assetDataError } = await sbDb
+        .from("Asset")
+        .select("id, kitId")
+        .in("id", bookingAssetIds);
+      if (assetDataError) {
+        throw new ShelfError({
+          cause: assetDataError,
+          label,
+          message: "Failed to fetch asset details for booking.",
+        });
+      }
+      bookingAssets = assetData;
+    }
+    const bookingFound = {
+      ...bookingRow,
+      status: bookingRow.status as BookingStatus,
+      assets: bookingAssets,
+    };
 
     const allowedStatusForCancel: BookingStatus[] = [
       BookingStatus.ONGOING,
@@ -2287,33 +2867,21 @@ export async function cancelBooking({
     }
 
     const kitIds = getKitIdsByAssets(bookingFound.assets);
-    const hasKits = kitIds.length > 0;
 
-    const booking = await db.$transaction(async (tx) => {
-      /** If booking is ONGOING or OVERDUE, we have to make the assets available */
-      if (bookingFound.status !== BookingStatus.RESERVED) {
-        await tx.asset.updateMany({
-          where: { id: { in: bookingFound.assets.map((a) => a.id) } },
-          data: { status: AssetStatus.AVAILABLE },
-        });
+    /** Atomically cancel via RPC */
+    const wasActive = bookingFound.status !== BookingStatus.RESERVED;
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_cancel", {
+      p_asset_ids: bookingFound.assets.map((a) => a.id),
+      p_kit_ids: kitIds,
+      p_booking_id: bookingFound.id,
+      p_was_active: wasActive,
+      p_cancellation_reason: cancellationReason ?? undefined,
+    });
+    if (rpcError) throw rpcError;
 
-        /** If there are any kits, then update their status as well */
-        if (hasKits) {
-          await tx.kit.updateMany({
-            where: { id: { in: kitIds } },
-            data: { status: KitStatus.AVAILABLE },
-          });
-        }
-      }
-
-      return tx.booking.update({
-        where: { id: bookingFound.id },
-        data: { status: BookingStatus.CANCELLED, cancellationReason },
-        include: {
-          assets: true,
-          ...BOOKING_INCLUDE_FOR_EMAIL,
-        },
-      });
+    /** Re-fetch updated booking with includes via Supabase */
+    const booking = await fetchBookingWithEmailIncludes(bookingFound.id, {
+      includeAssets: true,
     });
 
     /** Cancel any active schedulers */
@@ -2380,19 +2948,20 @@ export async function revertBookingToDraft({
   userId?: User["id"];
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: { id: true, status: true },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          message:
-            "Booking not found, are you sure the booking exists in current workspace?",
-        });
+    const { data: booking, error: bookingFetchError } = await sbDb
+      .from("Booking")
+      .select("id, status")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (bookingFetchError || !booking) {
+      throw new ShelfError({
+        cause: bookingFetchError,
+        label,
+        message:
+          "Booking not found, are you sure the booking exists in current workspace?",
       });
+    }
 
     /** User can only revert the booking to DRAFT from RESERVED */
     if (booking.status !== BookingStatus.RESERVED) {
@@ -2403,10 +2972,19 @@ export async function revertBookingToDraft({
       });
     }
 
-    const cancelledBooking = await db.booking.update({
-      where: { id: booking.id },
-      data: { status: BookingStatus.DRAFT },
-    });
+    const { data: cancelledBooking, error: updateError } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.DRAFT })
+      .eq("id", booking.id)
+      .select()
+      .single();
+    if (updateError || !cancelledBooking) {
+      throw new ShelfError({
+        cause: updateError,
+        label,
+        message: "Failed to revert booking to draft.",
+      });
+    }
 
     // Add activity log for booking revert to draft
     if (userId) {
@@ -2456,29 +3034,74 @@ export async function extendBooking({
   role: OrganizationRoles;
 }) {
   try {
-    const booking = await db.booking
-      .findUniqueOrThrow({
-        where: { id, organizationId },
-        select: {
-          id: true,
-          status: true,
-          to: true,
-          activeSchedulerReference: true,
-          assets: { select: { id: true, status: true } },
-          from: true,
-          creatorId: true,
-          custodianUserId: true,
-          partialCheckins: { select: { assetIds: true } },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          label,
-          message:
-            "Booking not found. Are you sure it exists in the current workspace?",
-        });
+    // Fetch booking flat fields
+    const { data: extBookingRow, error: extBookingError } = await sbDb
+      .from("Booking")
+      .select(
+        "id, status, to, activeSchedulerReference, from, creatorId, custodianUserId"
+      )
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (extBookingError || !extBookingRow) {
+      throw new ShelfError({
+        cause: extBookingError,
+        label,
+        message:
+          "Booking not found. Are you sure it exists in the current workspace?",
       });
+    }
+    // Fetch assets via join table
+    const { data: extAssetJoinRows, error: extAssetJoinError } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", id);
+    if (extAssetJoinError) {
+      throw new ShelfError({
+        cause: extAssetJoinError,
+        label,
+        message: "Failed to fetch booking assets for extend.",
+      });
+    }
+    const extAssetIds = extAssetJoinRows.map((r) => r.A);
+    let extAssets: Array<{ id: string; status: string }> = [];
+    if (extAssetIds.length > 0) {
+      const { data: extAssetData, error: extAssetDataError } = await sbDb
+        .from("Asset")
+        .select("id, status")
+        .in("id", extAssetIds);
+      if (extAssetDataError) {
+        throw new ShelfError({
+          cause: extAssetDataError,
+          label,
+          message: "Failed to fetch asset details for extend.",
+        });
+      }
+      extAssets = extAssetData;
+    }
+    // Fetch partial checkins
+    const { data: extPartialCheckins, error: extPartialError } = await sbDb
+      .from("PartialBookingCheckin")
+      .select("assetIds")
+      .eq("bookingId", id);
+    if (extPartialError) {
+      throw new ShelfError({
+        cause: extPartialError,
+        label,
+        message: "Failed to fetch partial check-ins for extend.",
+      });
+    }
+    const booking = {
+      ...extBookingRow,
+      status: extBookingRow.status as BookingStatus,
+      to: new Date(extBookingRow.to),
+      from: new Date(extBookingRow.from),
+      assets: extAssets.map((a) => ({
+        ...a,
+        status: a.status as AssetStatus,
+      })),
+      partialCheckins: extPartialCheckins,
+    };
 
     validateBookingOwnership({
       booking,
@@ -2527,53 +3150,39 @@ export async function extendBooking({
     }
 
     /** Wrap conflict detection and update in a transaction to prevent race conditions */
-    const updatedBooking = await db.$transaction(async (tx) => {
-      /** Checking if the booking period is clashing with any other booking containing the same active asset(s).*/
-      const clashingBookings: ClashingBooking[] = await tx.booking.findMany({
-        where: {
-          id: { not: booking.id },
-          organizationId,
-          status: {
-            in: [BookingStatus.RESERVED],
-          },
-          assets: { some: { id: { in: activeAssets.map((a) => a.id) } } },
-          // Check for bookings that start within the extension period
-          from: {
-            gt: booking.to,
-            lte: newEndDate,
-          },
-        },
-        select: { id: true, name: true },
-      });
-
-      if (clashingBookings?.length > 0) {
-        throw new ShelfError({
-          cause: null,
-          label,
-          message:
-            "Cannot extend booking because the extended period is overlapping with the following bookings:",
-          additionalData: {
-            clashingBookings: [...clashingBookings],
-          },
-          shouldBeCaptured: false,
-        });
+    /** Atomically check conflicts and extend booking via RPC */
+    const { data: rpcResult, error: rpcError } = await sbDb.rpc(
+      "shelf_booking_extend",
+      {
+        p_booking_id: booking.id,
+        p_org_id: organizationId,
+        p_new_end_date: newEndDate.toISOString(),
+        p_current_to: booking.to!.toISOString(),
+        p_active_asset_ids: activeAssets.map((a) => a.id),
+        p_current_status: booking.status,
       }
+    );
+    if (rpcError) throw rpcError;
 
-      return tx.booking.update({
-        where: { id: booking.id },
-        data: {
-          /**
-           * If booking is currently OVERDUE we have to make it ONGOING
-           */
-          status:
-            booking.status === BookingStatus.OVERDUE
-              ? BookingStatus.ONGOING
-              : undefined,
-          to: newEndDate,
+    const result = rpcResult as {
+      success: boolean;
+      clashingBookings?: ClashingBooking[];
+    };
+    if (!result.success) {
+      throw new ShelfError({
+        cause: null,
+        label,
+        message:
+          "Cannot extend booking because the extended period is overlapping with the following bookings:",
+        additionalData: {
+          clashingBookings: result.clashingBookings ?? [],
         },
-        include: BOOKING_INCLUDE_FOR_EMAIL,
+        shouldBeCaptured: false,
       });
-    });
+    }
+
+    /** Re-fetch the updated booking with includes for email via Supabase */
+    const updatedBooking = await fetchBookingWithEmailIncludes(booking.id);
 
     // Add activity log for booking extension
     const user = await getUserByID(userId, {
@@ -2736,12 +3345,19 @@ export async function getBookingsFilterData({
   // Only fetch team member data if the user doesn't have permission to see all bookings
   if (!canSeeAllBookings) {
     // Get the team member for the current user
-    const teamMember = await db.teamMember.findFirst({
-      where: {
-        userId,
-        organizationId,
-      },
-    });
+    const { data: teamMember, error: teamMemberError } = await sbDb
+      .from("TeamMember")
+      .select("*")
+      .eq("userId", userId)
+      .eq("organizationId", organizationId)
+      .maybeSingle();
+    if (teamMemberError) {
+      throw new ShelfError({
+        cause: teamMemberError,
+        message: "Failed to fetch team member.",
+        label: "Booking",
+      });
+    }
 
     if (!teamMember) {
       throw new ShelfError({
@@ -2998,6 +3614,11 @@ export async function getBookings(params: {
       }
     }
 
+    // KEPT AS PRISMA: This query uses deeply nested relational filtering
+    // (some/none operators, case-insensitive contains across nested relations,
+    // dynamic extraInclude, 3+ levels of nested includes on assets, and
+    // complex AND/OR where clauses). Converting to Supabase would require
+    // rebuilding a query engine and is not feasible without raw SQL/RPC.
     const [bookings, bookingCount] = await Promise.all([
       db.booking.findMany({
         ...(!takeAll && {
@@ -3097,20 +3718,33 @@ export async function removeAssets({
 }) {
   try {
     const { assetIds, id } = booking;
-    const b = await db.booking.update({
-      // First, disconnect the assets from the booking
-      where: { id, organizationId },
-      data: {
-        assets: {
-          disconnect: assetIds.map((id) => ({ id })),
-        },
-      },
-      select: {
-        id: true,
-        name: true,
-        status: true,
-      },
-    });
+    // Disconnect assets from booking via join table
+    const { error: disconnectError } = await sbDb
+      .from("_AssetToBooking")
+      .delete()
+      .eq("B", id)
+      .in("A", assetIds);
+    if (disconnectError) {
+      throw new ShelfError({
+        cause: disconnectError,
+        label,
+        message: "Failed to disconnect assets from booking.",
+      });
+    }
+    // Fetch the updated booking data
+    const { data: b, error: fetchBookingError } = await sbDb
+      .from("Booking")
+      .select("id, name, status")
+      .eq("id", id)
+      .eq("organizationId", organizationId)
+      .single();
+    if (fetchBookingError || !b) {
+      throw new ShelfError({
+        cause: fetchBookingError,
+        label,
+        message: "Failed to fetch booking after removing assets.",
+      });
+    }
     /** When removing an asset from a booking we need to make sure to set their status back to available
      * This is needed because the user is allowed to remove an asset from a booking that is ongoing, which means the asset status will be CHECKED_OUT
      * So we need to set it back to AVAILABLE
@@ -3127,16 +3761,34 @@ export async function removeAssets({
       b.status === BookingStatus.ONGOING ||
       b.status === BookingStatus.OVERDUE
     ) {
-      await db.asset.updateMany({
-        where: { id: { in: assetIds }, organizationId },
-        data: { status: AssetStatus.AVAILABLE },
-      });
+      const { error: assetUpdateError } = await sbDb
+        .from("Asset")
+        .update({ status: AssetStatus.AVAILABLE })
+        .in("id", assetIds)
+        .eq("organizationId", organizationId);
+      if (assetUpdateError) {
+        throw new ShelfError({
+          cause: assetUpdateError,
+          message:
+            "Failed to update asset statuses after removing from booking.",
+          label,
+        });
+      }
 
       if (kitIds.length > 0) {
-        await db.kit.updateMany({
-          where: { id: { in: kitIds }, organizationId },
-          data: { status: KitStatus.AVAILABLE },
-        });
+        const { error: kitUpdateError } = await sbDb
+          .from("Kit")
+          .update({ status: KitStatus.AVAILABLE })
+          .in("id", kitIds)
+          .eq("organizationId", organizationId);
+        if (kitUpdateError) {
+          throw new ShelfError({
+            cause: kitUpdateError,
+            message:
+              "Failed to update kit statuses after removing from booking.",
+            label,
+          });
+        }
       }
     }
 
@@ -3216,17 +3868,80 @@ export async function deleteBooking(
   hints: ClientHint
 ) {
   const { id, organizationId } = booking;
-  const currentBooking = await db.booking.findUnique({
-    where: { id, organizationId },
-    include: {
-      assets: {
-        select: {
-          id: true,
-          kitId: true,
-        },
-      },
-    },
-  });
+  // Fetch booking
+  const { data: delBookingRow, error: delBookingError } = await sbDb
+    .from("Booking")
+    .select("*")
+    .eq("id", id)
+    .eq("organizationId", organizationId)
+    .single();
+  if (delBookingError && delBookingError.code === "PGRST116") {
+    // No row found
+    throw new ShelfError({
+      cause: null,
+      message:
+        "The booking you are trying to delete does not exist or has already been deleted.",
+      label,
+      status: 404,
+      shouldBeCaptured: false,
+    });
+  }
+  if (delBookingError || !delBookingRow) {
+    throw new ShelfError({
+      cause: delBookingError,
+      message:
+        "The booking you are trying to delete does not exist or has already been deleted.",
+      label,
+      status: 404,
+      shouldBeCaptured: false,
+    });
+  }
+  // Fetch assets via join table
+  const { data: delAssetJoinRows, error: delAssetJoinError } = await sbDb
+    .from("_AssetToBooking")
+    .select("A")
+    .eq("B", id);
+  if (delAssetJoinError) {
+    throw new ShelfError({
+      cause: delAssetJoinError,
+      label,
+      message: "Failed to fetch booking assets for delete.",
+    });
+  }
+  const delAssetIds = delAssetJoinRows.map((r) => r.A);
+  let delAssets: Array<{ id: string; kitId: string | null }> = [];
+  if (delAssetIds.length > 0) {
+    const { data: delAssetData, error: delAssetDataError } = await sbDb
+      .from("Asset")
+      .select("id, kitId")
+      .in("id", delAssetIds);
+    if (delAssetDataError) {
+      throw new ShelfError({
+        cause: delAssetDataError,
+        label,
+        message: "Failed to fetch asset details for booking delete.",
+      });
+    }
+    delAssets = delAssetData;
+  }
+  const currentBooking = {
+    ...delBookingRow,
+    status: delBookingRow.status as BookingStatus,
+    from: delBookingRow.from ? new Date(delBookingRow.from) : new Date(),
+    to: delBookingRow.to ? new Date(delBookingRow.to) : new Date(),
+    createdAt: new Date(delBookingRow.createdAt),
+    updatedAt: new Date(delBookingRow.updatedAt),
+    originalFrom: delBookingRow.originalFrom
+      ? new Date(delBookingRow.originalFrom)
+      : null,
+    originalTo: delBookingRow.originalTo
+      ? new Date(delBookingRow.originalTo)
+      : null,
+    autoArchivedAt: delBookingRow.autoArchivedAt
+      ? new Date(delBookingRow.autoArchivedAt)
+      : null,
+    assets: delAssets,
+  };
 
   if (!currentBooking) {
     throw new ShelfError({
@@ -3253,18 +3968,24 @@ export async function deleteBooking(
     );
     const hasKits = uniqueKitIds.size > 0;
 
-    const b = await db.booking.delete({
-      where: { id, organizationId },
-      include: {
-        ...BOOKING_COMMON_INCLUDE,
-        ...BOOKING_INCLUDE_FOR_EMAIL,
-        assets: {
-          select: {
-            id: true,
-          },
-        },
-      },
+    // Fetch booking with email includes before deletion
+    const b = await fetchBookingWithEmailIncludes(id, {
+      includeAssets: true,
     });
+
+    // Delete the booking via Supabase
+    const { error: deleteErr } = await sbDb
+      .from("Booking")
+      .delete()
+      .eq("id", id)
+      .eq("organizationId", organizationId);
+    if (deleteErr) {
+      throw new ShelfError({
+        cause: deleteErr,
+        message: "Failed to delete booking.",
+        label,
+      });
+    }
 
     const email = b.custodianUser?.email;
     if (email) {
@@ -3388,6 +4109,9 @@ export async function getBooking<T extends Prisma.BookingInclude | undefined>(
       (org) => org.organizationId
     );
 
+    // KEPT AS PRISMA: Uses dynamic mergedInclude with deeply nested
+    // asset includes (category, kit.category, valuation), dynamic
+    // assetsWhere with search filtering, and cross-organization OR clauses.
     const bookingFound = (await db.booking.findFirstOrThrow({
       where: {
         OR: [
@@ -3611,6 +4335,9 @@ export async function getBookingFlags(
     assetIds: Asset["id"][];
   }
 ) {
+  // KEPT AS PRISMA: Uses deeply nested asset.bookings with date range
+  // overlap conflict detection, category/custody/kit includes, and complex
+  // OR/AND where clauses. Would require raw SQL/RPC to convert.
   const assets = await db.asset.findMany({
     where: { id: { in: booking.assetIds } },
     include: {
@@ -3723,6 +4450,9 @@ export async function bulkDeleteBookings({
       ? getBookingWhereInput({ currentSearchParams, organizationId })
       : { id: { in: bookingIds }, organizationId };
 
+    // KEPT AS PRISMA: Uses dynamic Prisma where from getBookingWhereInput
+    // (supports ALL_SELECTED_KEY pattern with complex filter conditions),
+    // and nested organization.owner.email include.
     const [bookings, user] = await Promise.all([
       db.booking.findMany({
         where,
@@ -3758,51 +4488,36 @@ export async function bulkDeleteBookings({
       (booking) => !!booking.activeSchedulerReference
     );
 
-    await db.$transaction(async (tx) => {
-      /** Deleting all selected bookings */
-      await tx.booking.deleteMany({
-        where: { id: { in: bookings.map((booking) => booking.id) } },
-      });
+    /** Pre-compute data for RPC */
+    const allActiveAssets = overdueOrOngoingBookings.flatMap(
+      (booking) => booking.assets
+    );
+    const activeAssetIds = allActiveAssets.map((a) => a.id);
+    const activeKitIds = [
+      ...new Set(
+        allActiveAssets.filter((a) => !!a.kitId).map((a) => a.kitId as string)
+      ),
+    ];
 
-      /** Making assets and kits available */
-      if (overdueOrOngoingBookings.length > 0) {
-        const allAssets = overdueOrOngoingBookings.flatMap(
-          (booking) => booking.assets
-        );
+    const noteData = bookings.flatMap((booking) =>
+      booking.assets.map((asset) => ({
+        assetId: asset.id,
+        content: `**${user?.firstName?.trim()} ${user?.lastName?.trim()}** deleted booking **${
+          booking.name
+        }**.`,
+      }))
+    );
 
-        const allKitIds = allAssets
-          .filter((asset) => !!asset.kitId)
-          .map((asset) => asset.kitId as string);
-
-        const uniqueKitIds = new Set(allKitIds);
-
-        await tx.asset.updateMany({
-          where: { id: { in: allAssets.map((asset) => asset.id) } },
-          data: { status: AssetStatus.AVAILABLE },
-        });
-
-        await tx.kit.updateMany({
-          where: { id: { in: [...uniqueKitIds] } },
-          data: { status: KitStatus.AVAILABLE },
-        });
-      }
-
-      /** Making notes for all the assets */
-      const notesData = bookings
-        .map((booking) =>
-          booking.assets.map((asset) => ({
-            userId,
-            assetId: asset.id,
-            content: `**${user?.firstName?.trim()} ${user?.lastName?.trim()}** deleted booking **${
-              booking.name
-            }**.`,
-            type: "UPDATE" as const,
-          }))
-        )
-        .flat() satisfies Prisma.NoteCreateManyInput[];
-
-      await tx.note.createMany({ data: notesData });
+    /** Atomically delete bookings, revert statuses, create notes via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_bulk_delete", {
+      p_booking_ids: bookings.map((b) => b.id),
+      p_active_asset_ids: activeAssetIds,
+      p_active_kit_ids: activeKitIds,
+      p_note_asset_ids: noteData.map((n) => n.assetId),
+      p_note_contents: noteData.map((n) => n.content),
+      p_note_user_id: userId,
     });
+    if (rpcError) throw rpcError;
 
     /** Cancelling scheduler */
     await Promise.all(
@@ -3867,6 +4582,8 @@ export async function bulkArchiveBookings({
       ? getBookingWhereInput({ currentSearchParams, organizationId })
       : { id: { in: bookingIds }, organizationId };
 
+    // KEPT AS PRISMA: Uses dynamic Prisma where from getBookingWhereInput
+    // (supports ALL_SELECTED_KEY pattern with complex filter conditions).
     const bookings = await db.booking.findMany({
       where,
       select: {
@@ -3896,23 +4613,23 @@ export async function bulkArchiveBookings({
       });
     }
 
-    await db.$transaction(async (tx) => {
-      /** Updating status of bookings to ARCHIVED  */
-      await tx.booking.updateMany({
-        where: { id: { in: bookings.map((b) => b.id) } },
-        data: { status: BookingStatus.ARCHIVED },
-      });
+    /** Updating status of bookings to ARCHIVED */
+    const bookingIdList = bookings.map((b) => b.id);
+    const { error: updateError } = await sbDb
+      .from("Booking")
+      .update({ status: BookingStatus.ARCHIVED })
+      .in("id", bookingIdList);
+    if (updateError) throw updateError;
 
-      /** Create booking status transition notes for each booking */
-      for (const booking of bookings) {
-        await createStatusTransitionNote({
-          bookingId: booking.id,
-          fromStatus: booking.status,
-          toStatus: BookingStatus.ARCHIVED,
-          custodianUserId: booking.custodianUserId || undefined,
-        });
-      }
-    });
+    /** Create booking status transition notes for each booking */
+    for (const booking of bookings) {
+      await createStatusTransitionNote({
+        bookingId: booking.id,
+        fromStatus: booking.status as BookingStatus,
+        toStatus: BookingStatus.ARCHIVED,
+        custodianUserId: booking.custodianUserId || undefined,
+      });
+    }
 
     /** Cancel any active schedulers */
     await Promise.all(bookings.map((b) => cancelScheduler(b)));
@@ -3956,6 +4673,9 @@ export async function bulkCancelBookings({
       ? getBookingWhereInput({ currentSearchParams, organizationId })
       : { id: { in: bookingIds }, organizationId };
 
+    // KEPT AS PRISMA: Uses dynamic Prisma where from getBookingWhereInput
+    // (supports ALL_SELECTED_KEY pattern with complex filter conditions),
+    // and nested organization.owner.email include.
     const [bookings, user] = await Promise.all([
       db.booking.findMany({
         where,
@@ -4017,65 +4737,48 @@ export async function bulkCancelBookings({
       (booking) => !!booking.activeSchedulerReference
     );
 
-    await db.$transaction(async (tx) => {
-      /** Updating status of bookings to CANCELLED */
-      await tx.booking.updateMany({
-        where: { id: { in: bookings.map((b) => b.id) } },
-        data: { status: BookingStatus.CANCELLED },
-      });
+    /** Pre-compute data for RPC */
+    const allActiveAssets = ongoingOrOverdueBookings.flatMap((b) => b.assets);
+    const activeAssetIds = allActiveAssets.map((a) => a.id);
+    const activeKitIds = [
+      ...new Set(
+        allActiveAssets.filter((a) => !!a.kitId).map((a) => a.kitId as string)
+      ),
+    ];
 
-      /** Updating status of assets and kits  */
-      if (ongoingOrOverdueBookings.length > 0) {
-        const allAssets = ongoingOrOverdueBookings.flatMap((b) => b.assets);
-        const allKitIds = allAssets
-          .filter((a) => !!a.kitId)
-          .map((a) => a.kitId as string);
-
-        const uniqueKitIds = new Set(allKitIds);
-
-        /** Making assets available */
-        await tx.asset.updateMany({
-          where: { id: { in: allAssets.map((a) => a.id) } },
-          data: { status: AssetStatus.AVAILABLE },
-        });
-
-        /** Making kits available */
-        await tx.kit.updateMany({
-          where: { id: { in: [...uniqueKitIds] } },
-          data: { status: KitStatus.AVAILABLE },
-        });
-      }
-
-      /** Making notes for all the assets */
-      const actor = wrapUserLinkForNote({
-        id: userId,
-        firstName: user?.firstName,
-        lastName: user?.lastName,
-      });
-      const notesData = bookings
-        .map((b) =>
-          b.assets.map((asset) => ({
-            assetId: asset.id,
-            content: `${actor} cancelled booking.`,
-            userId,
-            type: "UPDATE" as const,
-          }))
-        )
-        .flat() satisfies Prisma.NoteCreateManyInput[];
-
-      await tx.note.createMany({ data: notesData });
-
-      /** Create booking status transition notes for each booking */
-      for (const booking of bookings) {
-        await createStatusTransitionNote({
-          bookingId: booking.id,
-          fromStatus: booking.status,
-          toStatus: BookingStatus.CANCELLED,
-          userId,
-          custodianUserId: booking.custodianUserId || undefined,
-        });
-      }
+    const actor = wrapUserLinkForNote({
+      id: userId,
+      firstName: user?.firstName,
+      lastName: user?.lastName,
     });
+    const noteData = bookings.flatMap((b) =>
+      b.assets.map((asset) => ({
+        assetId: asset.id,
+        content: `${actor} cancelled booking.`,
+      }))
+    );
+
+    /** Atomically cancel bookings, revert statuses, create notes via RPC */
+    const { error: rpcError } = await sbDb.rpc("shelf_booking_bulk_cancel", {
+      p_booking_ids: bookings.map((b) => b.id),
+      p_active_asset_ids: activeAssetIds,
+      p_active_kit_ids: activeKitIds,
+      p_note_asset_ids: noteData.map((n) => n.assetId),
+      p_note_contents: noteData.map((n) => n.content),
+      p_note_user_id: userId,
+    });
+    if (rpcError) throw rpcError;
+
+    /** Create booking status transition notes (already uses sbDb) */
+    for (const booking of bookings) {
+      await createStatusTransitionNote({
+        bookingId: booking.id,
+        fromStatus: booking.status as BookingStatus,
+        toStatus: BookingStatus.CANCELLED,
+        userId,
+        custodianUserId: booking.custodianUserId || undefined,
+      });
+    }
 
     /** Cancelling scheduler */
     await Promise.all(
@@ -4147,18 +4850,70 @@ async function createNotesForScannedAssetsAndKits({
   userId: string;
 }) {
   // Fetch assets and kits in parallel for better performance
-  const [assets, kits] = await Promise.all([
-    db.asset.findMany({
-      where: { id: { in: assetIds }, organizationId },
-      select: { id: true, title: true },
-    }),
+  const [assetsResult, kitsResult] = await Promise.all([
+    sbDb
+      .from("Asset")
+      .select("id, title")
+      .in("id", assetIds)
+      .eq("organizationId", organizationId),
     kitIds.length > 0
-      ? db.kit.findMany({
-          where: { id: { in: kitIds }, organizationId },
-          select: { id: true, name: true, assets: { select: { id: true } } },
-        })
-      : Promise.resolve([]),
+      ? sbDb
+          .from("Kit")
+          .select("id, name")
+          .in("id", kitIds)
+          .eq("organizationId", organizationId)
+      : Promise.resolve({
+          data: [] as Array<{ id: string; name: string }>,
+          error: null,
+        }),
   ]);
+  if (assetsResult.error) {
+    throw new ShelfError({
+      cause: assetsResult.error,
+      label,
+      message: "Failed to fetch assets for booking notes.",
+    });
+  }
+  if (kitsResult.error) {
+    throw new ShelfError({
+      cause: kitsResult.error,
+      label,
+      message: "Failed to fetch kits for booking notes.",
+    });
+  }
+  const assets = assetsResult.data;
+  const kitRows = kitsResult.data ?? [];
+
+  // Fetch assets belonging to kits to build the map
+  let kitAssetsMap = new Map<string, Array<{ id: string }>>();
+  if (kitRows.length > 0) {
+    const { data: kitAssetRows, error: kitAssetError } = await sbDb
+      .from("Asset")
+      .select("id, kitId")
+      .in(
+        "kitId",
+        kitRows.map((k) => k.id)
+      );
+    if (kitAssetError) {
+      throw new ShelfError({
+        cause: kitAssetError,
+        label,
+        message: "Failed to fetch kit assets for booking notes.",
+      });
+    }
+    kitAssetRows.forEach((a) => {
+      if (a.kitId) {
+        if (!kitAssetsMap.has(a.kitId)) {
+          kitAssetsMap.set(a.kitId, []);
+        }
+        kitAssetsMap.get(a.kitId)!.push({ id: a.id });
+      }
+    });
+  }
+  const kits = kitRows.map((k) => ({
+    ...k,
+    assets: kitAssetsMap.get(k.id) ?? [],
+  }));
 
   // Create a map of asset ID to kit name for assets that came from kits
   const assetIdToKitName = new Map<string, string>();
@@ -4310,44 +5065,31 @@ export async function addScannedAssetsToBooking({
      * Step 1: Add assets to booking inside a transaction so we can mirror the
      * status-sync behaviour used in manage-assets.
      */
-    const updatedBooking = await db.$transaction(async (tx) => {
-      const booking = await tx.booking.update({
-        where: { id: bookingId, organizationId },
-        data: {
-          assets: {
-            connect: assetIds.map((id) => ({ id })),
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-        },
-      });
-
-      /** When booking is active, newly added items must be flagged checked out */
-      const isActiveBooking =
-        booking.status === BookingStatus.ONGOING ||
-        booking.status === BookingStatus.OVERDUE;
-
-      if (isActiveBooking) {
-        if (assetIds.length > 0) {
-          await tx.asset.updateMany({
-            where: { id: { in: assetIds }, organizationId },
-            data: { status: AssetStatus.CHECKED_OUT },
-          });
-        }
-
-        if (kitIds.length > 0) {
-          await tx.kit.updateMany({
-            where: { id: { in: kitIds }, organizationId },
-            data: { status: KitStatus.CHECKED_OUT },
-          });
-        }
+    /** Atomically connect assets and sync statuses via RPC */
+    const { error: rpcError } = await sbDb.rpc(
+      "shelf_booking_add_scanned_assets",
+      {
+        p_asset_ids: assetIds,
+        p_kit_ids: kitIds,
+        p_booking_id: bookingId,
+        p_org_id: organizationId,
       }
+    );
+    if (rpcError) throw rpcError;
 
-      return booking;
-    });
+    /** Fetch booking details for notes and return */
+    const { data: updatedBooking, error: bookingFetchError } = await sbDb
+      .from("Booking")
+      .select("id, name, status")
+      .eq("id", bookingId)
+      .single();
+    if (bookingFetchError || !updatedBooking) {
+      throw new ShelfError({
+        cause: bookingFetchError,
+        message: "Booking not found.",
+        label,
+      });
+    }
 
     /** Step 2: Create activity notes */
     await createNotesForScannedAssetsAndKits({
@@ -4376,14 +5118,51 @@ export async function addScannedAssetsToBooking({
 
 export async function getExistingBookingDetails(bookingId: string) {
   try {
-    const booking = await db.booking.findUniqueOrThrow({
-      where: { id: bookingId },
-      select: {
-        id: true,
-        status: true,
-        assets: { select: { id: true, title: true } },
-      },
-    });
+    // Fetch booking
+    const { data: detailsBookingRow, error: detailsBookingError } = await sbDb
+      .from("Booking")
+      .select("id, status")
+      .eq("id", bookingId)
+      .single();
+    if (detailsBookingError || !detailsBookingRow) {
+      throw new ShelfError({
+        cause: detailsBookingError,
+        label: "Booking",
+        message: "Booking not found.",
+      });
+    }
+    // Fetch assets via join table
+    const { data: detailsAssetJoinRows, error: detailsJoinError } = await sbDb
+      .from("_AssetToBooking")
+      .select("A")
+      .eq("B", bookingId);
+    if (detailsJoinError) {
+      throw new ShelfError({
+        cause: detailsJoinError,
+        label: "Booking",
+        message: "Failed to fetch booking assets.",
+      });
+    }
+    const detailsAssetIds = detailsAssetJoinRows.map((r) => r.A);
+    let detailsAssets: Array<{ id: string; title: string }> = [];
+    if (detailsAssetIds.length > 0) {
+      const { data: detailsAssetData, error: detailsAssetError } = await sbDb
+        .from("Asset")
+        .select("id, title")
+        .in("id", detailsAssetIds);
+      if (detailsAssetError) {
+        throw new ShelfError({
+          cause: detailsAssetError,
+          label: "Booking",
+          message: "Failed to fetch asset details for booking.",
+        });
+      }
+      detailsAssets = detailsAssetData;
+    }
+    const booking = {
+      ...detailsBookingRow,
+      assets: detailsAssets,
+    };
 
     if (!["DRAFT", "RESERVED"].includes(booking.status!)) {
       throw new ShelfError({
@@ -4410,10 +5189,17 @@ export async function getAvailableAssetsIdsForBooking(
   assetIds: Asset["id"][]
 ): Promise<string[]> {
   try {
-    const selectedAssets = await db.asset.findMany({
-      where: { id: { in: assetIds } },
-      select: { status: true, id: true, kitId: true },
-    });
+    const { data: selectedAssets, error: assetsError } = await sbDb
+      .from("Asset")
+      .select("status, id, kitId")
+      .in("id", assetIds);
+    if (assetsError) {
+      throw new ShelfError({
+        cause: assetsError,
+        message: "Failed to fetch assets.",
+        label: "Booking",
+      });
+    }
 
     if (selectedAssets.some((asset) => asset.kitId)) {
       throw new ShelfError({
@@ -4559,37 +5345,91 @@ export async function duplicateBooking({
     });
     const hints = getHints(request);
 
-    const newBooking = await db.booking.create({
-      data: {
+    // Create duplicate booking via Supabase
+    const dupFromDate = DateTime.fromFormat(
+      DateTime.fromJSDate(new Date(), { zone: hints.timeZone }).toFormat(
+        DATE_TIME_FORMAT
+      ),
+      DATE_TIME_FORMAT,
+      { zone: hints.timeZone }
+    ).toJSDate();
+    const dupToDate = DateTime.fromFormat(
+      DateTime.fromJSDate(addDays(new Date(), 1), {
+        zone: hints.timeZone,
+      }).toFormat(DATE_TIME_FORMAT),
+      DATE_TIME_FORMAT,
+      { zone: hints.timeZone }
+    ).toJSDate();
+
+    const { data: dupRow, error: dupError } = await sbDb
+      .from("Booking")
+      .insert({
         name: bookingToDuplicate.name + " (Copy)",
         description: bookingToDuplicate.description,
-        from: DateTime.fromFormat(
-          DateTime.fromJSDate(new Date(), { zone: hints.timeZone }).toFormat(
-            DATE_TIME_FORMAT
-          ),
-          DATE_TIME_FORMAT,
-          { zone: hints.timeZone }
-        ).toJSDate(),
-        to: DateTime.fromFormat(
-          DateTime.fromJSDate(addDays(new Date(), 1), {
-            zone: hints.timeZone,
-          }).toFormat(DATE_TIME_FORMAT),
-          DATE_TIME_FORMAT,
-          { zone: hints.timeZone }
-        ).toJSDate(),
+        from: dupFromDate.toISOString(),
+        to: dupToDate.toISOString(),
         organizationId,
         creatorId: userId,
         status: BookingStatus.DRAFT,
         custodianTeamMemberId: bookingToDuplicate.custodianTeamMemberId,
         custodianUserId: bookingToDuplicate.custodianUserId,
-        assets: {
-          connect: bookingToDuplicate.assets.map((asset) => ({ id: asset.id })),
-        },
-        tags: {
-          connect: bookingToDuplicate.tags.map((tag) => ({ id: tag.id })),
-        },
-      },
-    });
+      })
+      .select()
+      .single();
+    if (dupError || !dupRow) {
+      throw new ShelfError({
+        cause: dupError,
+        message: "Failed to create duplicate booking.",
+        label,
+      });
+    }
+
+    // Connect assets via join table
+    if (bookingToDuplicate.assets.length > 0) {
+      const { error: dupAssetErr } = await sbDb.from("_AssetToBooking").insert(
+        bookingToDuplicate.assets.map((asset) => ({
+          A: asset.id,
+          B: dupRow.id,
+        }))
+      );
+      if (dupAssetErr) {
+        throw new ShelfError({
+          cause: dupAssetErr,
+          message: "Failed to connect assets to duplicate booking.",
+          label,
+        });
+      }
+    }
+
+    // Connect tags via join table
+    if (bookingToDuplicate.tags.length > 0) {
+      const { error: dupTagErr } = await sbDb.from("_BookingToTag").insert(
+        bookingToDuplicate.tags.map((tag) => ({
+          A: dupRow.id,
+          B: tag.id,
+        }))
+      );
+      if (dupTagErr) {
+        throw new ShelfError({
+          cause: dupTagErr,
+          message: "Failed to connect tags to duplicate booking.",
+          label,
+        });
+      }
+    }
+
+    const newBooking = {
+      ...dupRow,
+      from: dupRow.from ? new Date(dupRow.from) : null,
+      to: dupRow.to ? new Date(dupRow.to) : null,
+      createdAt: new Date(dupRow.createdAt),
+      updatedAt: new Date(dupRow.updatedAt),
+      originalFrom: dupRow.originalFrom ? new Date(dupRow.originalFrom) : null,
+      originalTo: dupRow.originalTo ? new Date(dupRow.originalTo) : null,
+      autoArchivedAt: dupRow.autoArchivedAt
+        ? new Date(dupRow.autoArchivedAt)
+        : null,
+    };
 
     return newBooking;
   } catch (cause) {
@@ -4611,29 +5451,73 @@ export async function duplicateBooking({
  * Check if a booking has any partial check-ins
  */
 export async function hasPartialCheckins(bookingId: string): Promise<boolean> {
-  const count = await db.partialBookingCheckin.count({
-    where: { bookingId },
-  });
-  return count > 0;
+  const { count, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("id", { count: "exact", head: true })
+    .eq("bookingId", bookingId);
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to check partial check-ins.",
+      label,
+    });
+  }
+  return (count ?? 0) > 0;
 }
 
 /**
  * Get partial check-in history for a booking
  */
-export function getPartialCheckinHistory(bookingId: string) {
-  return db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    include: {
-      checkedInBy: {
-        select: {
-          firstName: true,
-          lastName: true,
-          email: true,
-        },
-      },
+export async function getPartialCheckinHistory(bookingId: string) {
+  const { data: checkins, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("*")
+    .eq("bookingId", bookingId)
+    .order("checkinTimestamp", { ascending: false });
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      label,
+      message: "Failed to fetch partial check-in history.",
+    });
+  }
+  // Fetch user data for each unique checkedInById
+  const uniqueUserIds = [...new Set(checkins.map((c) => c.checkedInById))];
+  const userMap = new Map<
+    string,
+    { firstName: string | null; lastName: string | null; email: string }
+  >();
+  if (uniqueUserIds.length > 0) {
+    const { data: users, error: userError } = await sbDb
+      .from("User")
+      .select("id, firstName, lastName, email")
+      .in("id", uniqueUserIds);
+    if (userError) {
+      throw new ShelfError({
+        cause: userError,
+        label,
+        message: "Failed to fetch users for partial check-in history.",
+      });
+    }
+    users.forEach((u) =>
+      userMap.set(u.id, {
+        firstName: u.firstName,
+        lastName: u.lastName,
+        email: u.email,
+      })
+    );
+  }
+  return checkins.map((c) => ({
+    ...c,
+    checkinTimestamp: new Date(c.checkinTimestamp),
+    createdAt: new Date(c.createdAt),
+    updatedAt: new Date(c.updatedAt),
+    checkedInBy: userMap.get(c.checkedInById) ?? {
+      firstName: null,
+      lastName: null,
+      email: "",
     },
-    orderBy: { checkinTimestamp: "desc" },
-  });
+  }));
 }
 
 /**
@@ -4642,11 +5526,18 @@ export function getPartialCheckinHistory(bookingId: string) {
 export async function getTotalPartialCheckinCount(
   bookingId: string
 ): Promise<number> {
-  const result = await db.partialBookingCheckin.aggregate({
-    where: { bookingId },
-    _sum: { checkinCount: true },
-  });
-  return result._sum.checkinCount || 0;
+  const { data, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("checkinCount")
+    .eq("bookingId", bookingId);
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      label,
+      message: "Failed to fetch partial check-in counts.",
+    });
+  }
+  return data.reduce((sum, row) => sum + (row.checkinCount || 0), 0);
 }
 
 /**
@@ -4655,13 +5546,20 @@ export async function getTotalPartialCheckinCount(
 export async function getPartiallyCheckedInAssetIds(
   bookingId: string
 ): Promise<string[]> {
-  const partialCheckins = await db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    select: { assetIds: true },
-  });
+  const { data: partialCheckins, error } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("assetIds")
+    .eq("bookingId", bookingId);
+  if (error) {
+    throw new ShelfError({
+      cause: error,
+      message: "Failed to fetch partial check-in asset IDs.",
+      label,
+    });
+  }
 
   // Flatten all asset ID arrays and get unique values
-  const allAssetIds = partialCheckins.flatMap((pc) => pc.assetIds);
+  const allAssetIds = (partialCheckins ?? []).flatMap((pc) => pc.assetIds);
   return [...new Set(allAssetIds)];
 }
 
@@ -4670,20 +5568,45 @@ export async function getPartiallyCheckedInAssetIds(
  * Returns both the asset IDs and the detailed check-in data in one query
  */
 export async function getDetailedPartialCheckinData(bookingId: string) {
-  const partialCheckins = await db.partialBookingCheckin.findMany({
-    where: { bookingId },
-    include: {
-      checkedInBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          profilePicture: true,
-        },
-      },
-    },
-    orderBy: { checkinTimestamp: "asc" },
-  });
+  const { data: detailedCheckins, error: detailedError } = await sbDb
+    .from("PartialBookingCheckin")
+    .select("*")
+    .eq("bookingId", bookingId)
+    .order("checkinTimestamp", { ascending: true });
+  if (detailedError) {
+    throw new ShelfError({
+      cause: detailedError,
+      label,
+      message: "Failed to fetch detailed partial check-in data.",
+    });
+  }
+  // Fetch user data for checkedInBy
+  const detailedUserIds = [
+    ...new Set(detailedCheckins.map((c) => c.checkedInById)),
+  ];
+  const detailedUserMap = new Map<
+    string,
+    {
+      id: string;
+      firstName: string | null;
+      lastName: string | null;
+      profilePicture: string | null;
+    }
+  >();
+  if (detailedUserIds.length > 0) {
+    const { data: detailedUsers, error: detailedUserError } = await sbDb
+      .from("User")
+      .select("id, firstName, lastName, profilePicture")
+      .in("id", detailedUserIds);
+    if (detailedUserError) {
+      throw new ShelfError({
+        cause: detailedUserError,
+        label,
+        message: "Failed to fetch users for detailed partial check-in data.",
+      });
+    }
+    detailedUsers.forEach((u) => detailedUserMap.set(u.id, u));
+  }
 
   // Create a record of asset ID to its check-in details
   const assetCheckinRecord: Record<
@@ -4702,13 +5625,19 @@ export async function getDetailedPartialCheckinData(bookingId: string) {
   // Collect all unique asset IDs
   const checkedInAssetIds: string[] = [];
 
-  partialCheckins.forEach((checkin) => {
-    checkin.assetIds.forEach((assetId) => {
+  detailedCheckins.forEach((checkin) => {
+    const checkedInByUser = detailedUserMap.get(checkin.checkedInById) ?? {
+      id: checkin.checkedInById,
+      firstName: null,
+      lastName: null,
+      profilePicture: null,
+    };
+    checkin.assetIds.forEach((assetId: string) => {
       // Only store the first (earliest) check-in for each asset
       if (!assetCheckinRecord[assetId]) {
         assetCheckinRecord[assetId] = {
-          checkinDate: checkin.checkinTimestamp,
-          checkedInBy: checkin.checkedInBy,
+          checkinDate: new Date(checkin.checkinTimestamp),
+          checkedInBy: checkedInByUser,
         };
         checkedInAssetIds.push(assetId);
       }
@@ -4806,16 +5735,82 @@ export async function getOngoingBookingForAsset({
   organizationId: Asset["organizationId"];
 }) {
   try {
-    const booking = await db.booking.findFirst({
-      where: {
-        status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
-        organizationId,
-        assets: { some: { id: assetId } },
-        partialCheckins: { none: { assetIds: { has: assetId } } }, // Exclude bookings where this asset has been partially checked in
-      },
-    });
+    // Find ONGOING/OVERDUE bookings that contain this asset via join table
+    const { data: assetBookingJoins, error: joinErr } = await sbDb
+      .from("_AssetToBooking")
+      .select("B")
+      .eq("A", assetId);
+    if (joinErr) {
+      throw new ShelfError({
+        cause: joinErr,
+        label,
+        message: "Failed to fetch asset booking joins.",
+      });
+    }
+    const candidateBookingIds = assetBookingJoins?.map((r) => r.B) ?? [];
+    if (candidateBookingIds.length === 0) return null;
 
-    return booking;
+    // Filter to ONGOING/OVERDUE bookings in this organization
+    const { data: candidateBookings, error: candidateErr } = await sbDb
+      .from("Booking")
+      .select("*")
+      .in("id", candidateBookingIds)
+      .eq("organizationId", organizationId)
+      .in("status", [BookingStatus.ONGOING, BookingStatus.OVERDUE]);
+    if (candidateErr) {
+      throw new ShelfError({
+        cause: candidateErr,
+        label,
+        message: "Failed to fetch candidate bookings.",
+      });
+    }
+    if (!candidateBookings || candidateBookings.length === 0) return null;
+
+    // Exclude bookings where this asset has been partially checked in
+    const { data: partialCheckins, error: pcErr } = await sbDb
+      .from("PartialBookingCheckin")
+      .select("bookingId, assetIds")
+      .in(
+        "bookingId",
+        candidateBookings.map((b) => b.id)
+      );
+    if (pcErr) {
+      throw new ShelfError({
+        cause: pcErr,
+        label,
+        message: "Failed to fetch partial check-ins.",
+      });
+    }
+
+    const excludedBookingIds = new Set(
+      (partialCheckins ?? [])
+        .filter((pc) => pc.assetIds.includes(assetId))
+        .map((pc) => pc.bookingId)
+    );
+
+    const matchingBooking = candidateBookings.find(
+      (b) => !excludedBookingIds.has(b.id)
+    );
+
+    if (!matchingBooking) return null;
+
+    return {
+      ...matchingBooking,
+      from: matchingBooking.from ? new Date(matchingBooking.from) : null,
+      to: matchingBooking.to ? new Date(matchingBooking.to) : null,
+      createdAt: new Date(matchingBooking.createdAt),
+      updatedAt: new Date(matchingBooking.updatedAt),
+      originalFrom: matchingBooking.originalFrom
+        ? new Date(matchingBooking.originalFrom)
+        : null,
+      originalTo: matchingBooking.originalTo
+        ? new Date(matchingBooking.originalTo)
+        : null,
+      autoArchivedAt: matchingBooking.autoArchivedAt
+        ? new Date(matchingBooking.autoArchivedAt)
+        : null,
+      status: matchingBooking.status as BookingStatus,
+    } as Booking;
   } catch (cause) {
     throw new ShelfError({
       cause,

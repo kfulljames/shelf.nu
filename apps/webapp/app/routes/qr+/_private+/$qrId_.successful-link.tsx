@@ -7,7 +7,7 @@ import { LinkIcon } from "~/components/icons/library";
 
 import { Button } from "~/components/shared/button";
 
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, getParams } from "~/utils/http.server";
@@ -19,43 +19,29 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
   const { qrId } = getParams(params, z.object({ qrId: z.string() }));
 
   try {
-    const qr = await db.qr
-      .findUniqueOrThrow({
-        where: { id: qrId },
-        select: {
-          id: true,
-          assetId: true,
-          kitId: true,
+    const { data: qr, error: qrError } = await sbDb
+      .from("Qr")
+      .select(
+        "id, assetId, kitId, asset:Asset!assetId(id, title), kit:Kit!kitId(id, name)"
+      )
+      .eq("id", qrId)
+      .single();
 
-          asset: {
-            select: {
-              id: true,
-              title: true,
-            },
-          },
-          kit: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      })
-      .catch((cause) => {
-        throw new ShelfError({
-          cause,
-          message: "The QR you are trying to access does not exist.",
-          title: "QR not found",
-          label: "QR",
-          status: 404,
-        });
+    if (qrError || !qr) {
+      throw new ShelfError({
+        cause: qrError,
+        message: "The QR you are trying to access does not exist.",
+        title: "QR not found",
+        label: "QR",
+        status: 404,
       });
+    }
 
     return payload({
       header: {
         title: "Successfully linked asset to QR code",
       },
-      qr,
+      qr: qr as any,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, qrId });

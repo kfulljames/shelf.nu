@@ -1,5 +1,5 @@
 import { OrganizationRoles } from "@prisma/client";
-import { db } from "~/database/db.server";
+import { sbDb } from "~/database/supabase.server";
 
 import {
   Role2PermissionMap,
@@ -23,9 +23,22 @@ export async function hasPermission(
 
   try {
     if (!roles || !Array.isArray(roles)) {
-      const userOrg = await db.userOrganization.findFirst({
-        where: { userId, organizationId },
-      });
+      const { data: userOrg, error: userOrgError } = await sbDb
+        .from("UserOrganization")
+        .select("*")
+        .eq("userId", userId)
+        .eq("organizationId", organizationId)
+        .limit(1)
+        .maybeSingle();
+
+      if (userOrgError) {
+        throw new ShelfError({
+          cause: userOrgError,
+          message: "Error while checking user organization membership",
+          additionalData: { userId, organizationId },
+          label: "Permission",
+        });
+      }
 
       if (!userOrg) {
         throw new ShelfError({
@@ -37,7 +50,7 @@ export async function hasPermission(
         });
       }
 
-      roles = userOrg.roles;
+      roles = userOrg.roles as OrganizationRoles[];
     }
 
     if (
