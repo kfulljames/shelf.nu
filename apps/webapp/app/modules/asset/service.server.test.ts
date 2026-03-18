@@ -1,5 +1,5 @@
 import { describe, expect, it, vitest, beforeEach } from "vitest";
-import { db } from "~/database/db.server";
+import { createSupabaseMock } from "@mocks/supabase";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { getQr } from "~/modules/qr/service.server";
 import { ShelfError } from "~/utils/error";
@@ -9,7 +9,16 @@ import {
   uploadDuplicateAssetMainImage,
 } from "./service.server";
 
-// why: isolating asset service logic from actual database operations
+const sbMock = createSupabaseMock();
+// why: testing service logic without actual Supabase HTTP calls
+vitest.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
+  },
+}));
+
+// why: relinkAssetQrCode still calls db-backed functions indirectly;
+// keep db mock for any residual Prisma paths
 vitest.mock("~/database/db.server", () => ({
   db: {
     asset: {
@@ -57,9 +66,14 @@ vitest.mock("~/modules/note/service.server", () => ({
   createNote: vitest.fn().mockResolvedValue({}),
 }));
 
+beforeEach(() => {
+  sbMock.reset();
+});
+
 describe("relinkAssetQrCode (asset)", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("throws when QR is already linked to a kit", async () => {
@@ -70,8 +84,9 @@ describe("relinkAssetQrCode (asset)", () => {
       assetId: null,
       kitId: "kit-1",
     });
-    //@ts-expect-error mock setup
-    db.asset.findFirst.mockResolvedValue({ qrCodes: [] });
+
+    // sbDb.from("Qr").select("id").eq("assetId",...) -> asset's QR codes
+    sbMock.setData([]);
 
     await expect(
       relinkAssetQrCode({
@@ -91,8 +106,15 @@ describe("relinkAssetQrCode (asset)", () => {
       assetId: null,
       kitId: null,
     });
-    //@ts-expect-error mock setup
-    db.asset.findFirst.mockResolvedValue({ qrCodes: [{ id: "old-qr" }] });
+
+    // sbDb.from("Qr").select("id").eq("assetId",...) -> asset's existing QR codes
+    sbMock.enqueueData([{ id: "old-qr" }]);
+    // sbDb.from("Qr").update({organizationId, userId}).eq("id",...) -> update QR
+    sbMock.enqueueData(null);
+    // sbDb.from("Qr").update({assetId: null}).eq("assetId",...) -> disconnect old
+    sbMock.enqueueData(null);
+    // sbDb.from("Qr").update({assetId}).eq("id",...) -> connect new
+    sbMock.enqueueData(null);
 
     await relinkAssetQrCode({
       qrId: "qr-1",
@@ -101,18 +123,10 @@ describe("relinkAssetQrCode (asset)", () => {
       userId: "user-1",
     });
 
-    expect(db.qr.update).toHaveBeenCalledWith({
-      where: { id: "qr-1" },
-      data: { organizationId: "org-1", userId: "user-1" },
-    });
-    expect(db.asset.update).toHaveBeenCalledWith({
-      where: { id: "asset-1", organizationId: "org-1" },
-      data: {
-        qrCodes: {
-          set: [],
-          connect: { id: "qr-1" },
-        },
-      },
+    expect(sbMock.calls.from).toHaveBeenCalledWith("Qr");
+    expect(sbMock.calls.update).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      userId: "user-1",
     });
   });
 });
@@ -120,6 +134,7 @@ describe("relinkAssetQrCode (asset)", () => {
 describe("uploadDuplicateAssetMainImage", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    sbMock.reset();
   });
 
   it("uploads a valid image buffer and returns a signed URL", async () => {

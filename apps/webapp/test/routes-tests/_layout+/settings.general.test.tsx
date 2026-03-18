@@ -1,8 +1,8 @@
 import { Currency, OrganizationRoles, OrganizationType } from "@prisma/client";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { createLoaderArgs, createActionArgs } from "@mocks/remix";
+import { createSupabaseMock } from "@mocks/supabase";
 
-import { db } from "~/database/db.server";
 import {
   getOrganizationAdmins,
   updateOrganization,
@@ -19,19 +19,17 @@ import {
   canHideShelfBranding,
 } from "~/utils/subscription.server";
 
+const sbMock = createSupabaseMock();
+
 // why: mock parseFormData to avoid actual file upload in tests
 vi.mock("@remix-run/form-data-parser", () => ({
   parseFormData: vi.fn(async () => new FormData()),
 }));
 
-vi.mock("~/database/db.server", () => ({
-  db: {
-    user: {
-      findUniqueOrThrow: vi.fn(),
-    },
-    organization: {
-      count: vi.fn().mockResolvedValue(0),
-    },
+// why: testing route handler without actual Supabase HTTP calls
+vi.mock("~/database/supabase.server", () => ({
+  get sbDb() {
+    return sbMock.client;
   },
 }));
 
@@ -66,14 +64,6 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
   sendNotification: vi.fn(),
 }));
 
-const dbMock = db as unknown as {
-  user: {
-    findUniqueOrThrow: ReturnType<typeof vi.fn>;
-  };
-  organization: {
-    count: ReturnType<typeof vi.fn>;
-  };
-};
 const getOrganizationTierLimitMock = vi.mocked(getOrganizationTierLimit);
 const getOrganizationAdminsMock = vi.mocked(getOrganizationAdmins);
 const updateOrganizationMock = vi.mocked(updateOrganization);
@@ -116,9 +106,24 @@ function baseOrganization() {
   };
 }
 
+/** Set up sbDb responses for the loader's RPC + organization count calls */
+function setupLoaderSbMock(overrides?: { tierId?: string }) {
+  const tierId = overrides?.tierId ?? "tier_2";
+
+  // First sbDb call: rpc("shelf_user_workspaces_with_counts")
+  sbMock.enqueueData({
+    firstName: "Carlos",
+    tierId,
+    userOrganizations: [],
+  });
+  // Second sbDb call: organization count query
+  sbMock.enqueue({ data: null, error: null, count: 0 } as any);
+}
+
 describe("settings.general loader", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
 
     requirePermissionMock.mockResolvedValue({
       organizationId: "org-1",
@@ -131,12 +136,6 @@ describe("settings.general loader", () => {
       canSeeAllCustody: true,
       canUseBarcodes: false,
     } as any);
-
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
-      firstName: "Carlos",
-      tierId: "tier_2",
-      userOrganizations: [],
-    });
 
     getOrganizationTierLimitMock.mockResolvedValue({
       id: "tier_1",
@@ -163,6 +162,8 @@ describe("settings.general loader", () => {
   });
 
   it("includes canHideShelfBranding in the loader payload", async () => {
+    setupLoaderSbMock();
+
     const result = await loader(
       createLoaderArgs({
         context: mockContext,
@@ -202,11 +203,7 @@ describe("settings.general loader", () => {
       canUseBarcodes: false,
     } as any);
 
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
-      firstName: "Carlos",
-      tierId: "tier_2", // Team tier
-      userOrganizations: [],
-    });
+    setupLoaderSbMock({ tierId: "tier_2" }); // Team tier
 
     const result = await loader(
       createLoaderArgs({
@@ -242,11 +239,7 @@ describe("settings.general loader", () => {
       canUseBarcodes: false,
     } as any);
 
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
-      firstName: "Carlos",
-      tierId: "tier_1", // Plus tier
-      userOrganizations: [],
-    });
+    setupLoaderSbMock({ tierId: "tier_1" }); // Plus tier
 
     const result = await loader(
       createLoaderArgs({
@@ -266,11 +259,7 @@ describe("settings.general loader", () => {
 
   it("allows Team tier users to hide branding on team workspaces", async () => {
     // baseOrganization() defaults to TEAM type
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
-      firstName: "Carlos",
-      tierId: "tier_2", // Team tier
-      userOrganizations: [],
-    });
+    setupLoaderSbMock({ tierId: "tier_2" }); // Team tier
 
     const result = await loader(
       createLoaderArgs({
@@ -292,6 +281,7 @@ describe("settings.general loader", () => {
 describe("settings.general action", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sbMock.reset();
 
     requirePermissionMock.mockResolvedValue({
       organizationId: "org-1",
@@ -305,7 +295,8 @@ describe("settings.general action", () => {
       canUseBarcodes: false,
     } as any);
 
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
+    // sbDb call in action: rpc for user data
+    sbMock.enqueueData({
       tierId: "tier_2",
     });
 
@@ -361,7 +352,7 @@ describe("settings.general action", () => {
       canImportAssets: true,
       canExportAssets: true,
       canImportNRM: true,
-      canHideShelfBranding: true, // ✅ Tier allows hiding
+      canHideShelfBranding: true, // Tier allows hiding
       maxCustomFields: 0,
       maxOrganizations: 1,
     } as any);
@@ -471,9 +462,9 @@ describe("settings.general action", () => {
       canUseBarcodes: false,
     } as any);
 
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
-      tierId: "tier_2", // Team tier
-    });
+    // sbDb call: rpc for user data (Team tier)
+    sbMock.reset();
+    sbMock.enqueueData({ tierId: "tier_2" });
 
     getOrganizationTierLimitMock.mockResolvedValue({
       id: "tier_2",
@@ -529,9 +520,9 @@ describe("settings.general action", () => {
       canUseBarcodes: false,
     } as any);
 
-    dbMock.user.findUniqueOrThrow.mockResolvedValue({
-      tierId: "tier_1", // Plus tier
-    });
+    // sbDb call: rpc for user data (Plus tier)
+    sbMock.reset();
+    sbMock.enqueueData({ tierId: "tier_1" });
 
     getOrganizationTierLimitMock.mockResolvedValue({
       id: "tier_1",
