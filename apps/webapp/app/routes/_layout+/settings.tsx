@@ -63,6 +63,9 @@ export default function SettingsPage() {
     ...(!_isPersonalOrg ? [{ to: "emails", content: "Emails" }] : []),
     { to: "custom-fields", content: "Custom fields" },
     { to: "team", content: "Team" },
+    ...(!_isPersonalOrg
+      ? [{ to: "integrations", content: "Integrations" }]
+      : []),
   ];
 
   const { isBaseOrSelfService } = useUserRoleHelper();
@@ -70,9 +73,14 @@ export default function SettingsPage() {
   if (isBaseOrSelfService) {
     items = items.filter(
       (item) =>
-        !["custom-fields", "team", "general", "bookings", "emails"].includes(
-          item.to
-        )
+        ![
+          "custom-fields",
+          "team",
+          "general",
+          "bookings",
+          "emails",
+          "integrations",
+        ].includes(item.to)
     );
   }
 
