@@ -1473,7 +1473,7 @@ export async function bulkReleaseKitCustody({
         custodianMap.set(tm.id, {
           id: tm.id,
           name: tm.name,
-          user: tm.userId ? userMap.get(tm.userId) ?? null : null,
+          user: tm.userId ? (userMap.get(tm.userId) ?? null) : null,
         });
       });
     }
@@ -1925,7 +1925,7 @@ export async function updateKitLocation({
       assets: (kitAssets ?? []).map((a) => ({
         id: a.id,
         title: a.title,
-        location: a.locationId ? locationMap.get(a.locationId) ?? null : null,
+        location: a.locationId ? (locationMap.get(a.locationId) ?? null) : null,
       })),
     };
 
@@ -2147,13 +2147,15 @@ export async function bulkUpdateKitLocation({
 
     const kitsWithAssets = kitRows.map((k) => ({
       ...k,
-      location: k.locationId ? kitLocMap.get(k.locationId) ?? null : null,
+      location: k.locationId ? (kitLocMap.get(k.locationId) ?? null) : null,
       assets: (kitAssetsResult.data ?? [])
         .filter((a: any) => a.kitId === k.id)
         .map((a: any) => ({
           id: a.id,
           title: a.title,
-          location: a.locationId ? assetLocMap.get(a.locationId) ?? null : null,
+          location: a.locationId
+            ? (assetLocMap.get(a.locationId) ?? null)
+            : null,
         })),
     }));
 
@@ -2582,7 +2584,7 @@ export async function updateKitAssets({
       assets: kitAssetRows.map((a) => ({
         id: a.id,
         title: a.title,
-        kit: a.kitId ? kitFullMap.get(a.kitId) ?? null : null,
+        kit: a.kitId ? (kitFullMap.get(a.kitId) ?? null) : null,
         bookings: bookingMap.get(a.id) ?? [],
       })),
       custody: custodyResult.data ? { custodian: custodianData! } : null,
@@ -2693,9 +2695,9 @@ export async function updateKitAssets({
     const allAssetsForKit = rawAssets.map((a) => ({
       id: a.id,
       title: a.title,
-      kit: a.kitId ? kitById.get(a.kitId) ?? null : null,
+      kit: a.kitId ? (kitById.get(a.kitId) ?? null) : null,
       custody: custodyByAsset.get(a.id) ?? null,
-      location: a.locationId ? locById.get(a.locationId) ?? null : null,
+      location: a.locationId ? (locById.get(a.locationId) ?? null) : null,
     }));
 
     // Identify which assets are actually new (not already in this kit)
@@ -3123,7 +3125,7 @@ export async function bulkRemoveAssetsFromKits({
       (tmRows ?? []).forEach((tm) => {
         tmCustodianMap.set(tm.id, {
           name: tm.name,
-          user: tm.userId ? tmUserMap.get(tm.userId) ?? null : null,
+          user: tm.userId ? (tmUserMap.get(tm.userId) ?? null) : null,
         });
       });
     }
@@ -3153,7 +3155,7 @@ export async function bulkRemoveAssetsFromKits({
     const assets = (rawBulkAssets ?? []).map((a) => ({
       id: a.id,
       title: a.title,
-      kit: a.kitId ? bulkKitMap.get(a.kitId) ?? null : null,
+      kit: a.kitId ? (bulkKitMap.get(a.kitId) ?? null) : null,
       custody: bulkAssetCustodyMap.get(a.id) ?? null,
     }));
 

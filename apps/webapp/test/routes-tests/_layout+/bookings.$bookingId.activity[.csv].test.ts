@@ -41,9 +41,8 @@ let loader: (typeof import("~/routes/_layout+/bookings.$bookingId.activity[.csv]
 const requirePermissionMock = vi.mocked(requirePermission);
 
 beforeAll(async () => {
-  ({ loader } = await import(
-    "~/routes/_layout+/bookings.$bookingId.activity[.csv]"
-  ));
+  ({ loader } =
+    await import("~/routes/_layout+/bookings.$bookingId.activity[.csv]"));
 });
 
 describe("app/routes/_layout+/bookings.$bookingId.activity[.csv] loader", () => {

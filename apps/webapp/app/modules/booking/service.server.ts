@@ -983,7 +983,7 @@ export async function updateBasicBooking({
       // Build custodian name helpers for the email change description
       const oldCustodianName = booking.custodianUser
         ? `${booking.custodianUser.firstName} ${booking.custodianUser.lastName}`
-        : booking.custodianTeamMember?.name ?? "Unknown";
+        : (booking.custodianTeamMember?.name ?? "Unknown");
 
       try {
         // Fetch new custodian details
@@ -1118,7 +1118,7 @@ export async function updateBasicBooking({
         changes,
         hints,
         oldCustodianEmail: custodianChanged
-          ? oldCustodianEmail ?? undefined
+          ? (oldCustodianEmail ?? undefined)
           : undefined,
       });
     }
@@ -1375,7 +1375,7 @@ export async function reserveBooking({
     if (bookingFound.custodianUser?.email) {
       const custodian = bookingFound?.custodianUser
         ? `${bookingFound.custodianUser.firstName} ${bookingFound.custodianUser.lastName}`
-        : bookingFound.custodianTeamMember?.name ?? "";
+        : (bookingFound.custodianTeamMember?.name ?? "");
 
       /** Prepare email content */
       const subject = `✅ Booking reserved (${bookingFound.name}) - shelf.nu`;
@@ -2029,7 +2029,7 @@ export async function checkinBooking({
         const assetsWithKitInfo = assetRows.map((a) => ({
           id: a.id,
           title: a.title,
-          kit: a.kitId ? kitMap.get(a.kitId) ?? null : null,
+          kit: a.kitId ? (kitMap.get(a.kitId) ?? null) : null,
         }));
 
         // Separate complete kits from individual assets
@@ -2152,7 +2152,7 @@ export async function checkinBooking({
     if (updatedBooking.custodianUser?.email) {
       const custodian = updatedBooking?.custodianUser
         ? `${updatedBooking.custodianUser.firstName} ${updatedBooking.custodianUser.lastName}`
-        : updatedBooking.custodianTeamMember?.name ?? "";
+        : (updatedBooking.custodianTeamMember?.name ?? "");
 
       const subject = `🎉 Booking completed (${updatedBooking.name}) - shelf.nu`;
       const text = completedBookingEmailContent({
@@ -2440,7 +2440,7 @@ export async function partialCheckinBooking({
     const assetsWithKitInfo = partialAssetRows.map((a) => ({
       id: a.id,
       title: a.title,
-      kit: a.kitId ? partialKitMap.get(a.kitId) ?? null : null,
+      kit: a.kitId ? (partialKitMap.get(a.kitId) ?? null) : null,
     }));
 
     // Separate complete kits from individual assets
@@ -3205,7 +3205,7 @@ export async function extendBooking({
     if (updatedBooking?.custodianUser?.email) {
       const custodian = updatedBooking?.custodianUser
         ? `${updatedBooking.custodianUser.firstName} ${updatedBooking.custodianUser.lastName}`
-        : updatedBooking.custodianTeamMember?.name ?? "";
+        : (updatedBooking.custodianTeamMember?.name ?? "");
 
       const text = extendBookingEmailContent({
         bookingName: updatedBooking.name,

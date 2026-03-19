@@ -99,8 +99,8 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       createdAt: new Date(orgData.createdAt as string),
       updatedAt: new Date(orgData.updatedAt as string),
       ssoDetails: Array.isArray((orgData as any).ssoDetails)
-        ? (orgData as any).ssoDetails[0] ?? null
-        : (orgData as any).ssoDetails ?? null,
+        ? ((orgData as any).ssoDetails[0] ?? null)
+        : ((orgData as any).ssoDetails ?? null),
     };
 
     const [admins, tierLimit, { data: user }] = await Promise.all([
@@ -224,8 +224,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       createdAt: new Date(orgData.createdAt as string),
       updatedAt: new Date(orgData.updatedAt as string),
       ssoDetails: Array.isArray((orgData as any).ssoDetails)
-        ? (orgData as any).ssoDetails[0] ?? null
-        : (orgData as any).ssoDetails ?? null,
+        ? ((orgData as any).ssoDetails[0] ?? null)
+        : ((orgData as any).ssoDetails ?? null),
     };
 
     const [tierLimit, { data: user }] = await Promise.all([

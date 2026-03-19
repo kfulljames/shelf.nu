@@ -41,9 +41,8 @@ let loader: (typeof import("~/routes/_layout+/assets.$assetId.activity[.csv]"))[
 const requirePermissionMock = vi.mocked(requirePermission);
 
 beforeAll(async () => {
-  ({ loader } = await import(
-    "~/routes/_layout+/assets.$assetId.activity[.csv]"
-  ));
+  ({ loader } =
+    await import("~/routes/_layout+/assets.$assetId.activity[.csv]"));
 });
 
 describe("app/routes/_layout+/assets.$assetId.activity[.csv] loader", () => {
