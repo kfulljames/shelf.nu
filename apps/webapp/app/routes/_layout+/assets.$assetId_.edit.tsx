@@ -26,6 +26,7 @@ import {
   enforceFieldLocking,
   getLockedFieldsForAsset,
 } from "~/modules/integration/field-locking.server";
+import { logUserEditAndEnqueueWriteBack } from "~/modules/integration/service.server";
 import { buildTagsSet } from "~/modules/tag/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { extractBarcodesFromFormData } from "~/utils/barcode-form-data.server";
@@ -247,6 +248,16 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       valuation,
       organizationId,
       request,
+    });
+
+    // Log edit + enqueue write-back for synced assets (fire-and-forget)
+    void logUserEditAndEnqueueWriteBack({
+      assetId: id,
+      organizationId,
+      userId: authSession.userId,
+      fieldChanges: Object.fromEntries(
+        fieldsBeingUpdated.map((f) => [f, { old: null, new: null }])
+      ),
     });
 
     sendNotification({

@@ -61,6 +61,8 @@ declare global {
       FULL_CALENDAR_LICENSE_KEY: string;
       SHOW_HOW_DID_YOU_FIND_US: string;
       COLLECT_BUSINESS_INTEL: string;
+      ASSETMESH_API_URL: string;
+      ASSETMESH_API_KEY: string;
     }
   }
 }
@@ -271,6 +273,16 @@ export const SEND_ONBOARDING_EMAIL =
 
 export const CHROME_EXECUTABLE_PATH = getEnv("CHROME_EXECUTABLE_PATH", {
   isSecret: false,
+  isRequired: false,
+});
+
+// AssetMesh integration
+export const ASSETMESH_API_URL = getEnv("ASSETMESH_API_URL", {
+  isSecret: true,
+  isRequired: false,
+});
+export const ASSETMESH_API_KEY = getEnv("ASSETMESH_API_KEY", {
+  isSecret: true,
   isRequired: false,
 });
 

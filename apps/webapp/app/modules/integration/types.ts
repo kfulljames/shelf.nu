@@ -68,3 +68,28 @@ export type IngestionResponse = {
     failed: number;
   };
 };
+
+/**
+ * Schema for the delta sync completion request.
+ * Called by AssetMesh after a full delta push to indicate which
+ * golden records are still active. Records not in this list
+ * will be archived.
+ */
+export const deltaSyncCompleteSchema = z.object({
+  /** All golden record IDs that are currently active in the source */
+  activeGoldenRecordIds: z.array(z.string().min(1)),
+  /** Source name for scoping (e.g. "connectwise") */
+  sourceName: z.string().min(1),
+});
+
+export type DeltaSyncCompleteRequest = z.infer<typeof deltaSyncCompleteSchema>;
+
+/**
+ * Write-back job status type.
+ */
+export type WriteBackStatus =
+  | "pending"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "conflict";

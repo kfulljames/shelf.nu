@@ -1,4 +1,3 @@
-import type { Organization } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { db } from "~/database/db.server";
 import type { ErrorLabel } from "~/utils/error";
@@ -510,26 +509,356 @@ export async function enqueueWriteBack({
   });
 }
 
+// ─── Write-Back Worker ───────────────────────────────────────────────
+
+/**
+ * Process pending write-back jobs.
+ *
+ * This is called by a scheduled job or API endpoint.
+ * It picks up pending jobs, sends them to AssetMesh T0 API,
+ * and updates their status.
+ *
+ * @param t0ApiUrl - The AssetMesh T0 API base URL
+ * @param t0ApiKey - API key for authenticating with T0
+ * @param batchSize - Max jobs to process per run
+ */
+export async function processWriteBackQueue({
+  t0ApiUrl,
+  t0ApiKey,
+  batchSize = 10,
+}: {
+  t0ApiUrl: string;
+  t0ApiKey: string;
+  batchSize?: number;
+}) {
+  // Fetch pending jobs, oldest first
+  const jobs = await db.writeBackQueue.findMany({
+    where: {
+      status: "pending",
+      attempts: { lt: db.writeBackQueue.fields.maxAttempts },
+    },
+    orderBy: { createdAt: "asc" },
+    take: batchSize,
+  });
+
+  const results: Array<{ id: string; status: string }> = [];
+
+  for (const job of jobs) {
+    try {
+      // Mark as processing
+      await db.writeBackQueue.update({
+        where: { id: job.id },
+        data: { status: "processing", attempts: job.attempts + 1 },
+      });
+
+      // Send to T0 API
+      const response = await fetch(`${t0ApiUrl}/api/write-back`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${t0ApiKey}`,
+        },
+        body: JSON.stringify({
+          goldenRecordId: job.goldenRecordId,
+          fieldChanges: job.fieldChanges,
+          assetId: job.assetId,
+          organizationId: job.organizationId,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`T0 API returned ${response.status}: ${errorText}`);
+      }
+
+      // Mark as completed
+      await db.writeBackQueue.update({
+        where: { id: job.id },
+        data: { status: "completed", processedAt: new Date() },
+      });
+
+      // Audit log
+      await db.integrationAuditLog.create({
+        data: {
+          organizationId: job.organizationId,
+          assetId: job.assetId,
+          action: "write_back",
+          source: "shelf",
+          fieldChanges: job.fieldChanges as Prisma.InputJsonValue,
+          userId: job.createdBy,
+        },
+      });
+
+      results.push({ id: job.id, status: "completed" });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error";
+      const newAttempts = job.attempts + 1;
+      const isFinalAttempt = newAttempts >= job.maxAttempts;
+
+      await db.writeBackQueue.update({
+        where: { id: job.id },
+        data: {
+          status: isFinalAttempt ? "failed" : "pending",
+          lastError: errorMessage,
+        },
+      });
+
+      results.push({
+        id: job.id,
+        status: isFinalAttempt ? "failed" : "retry",
+      });
+    }
+  }
+
+  return { processed: results.length, results };
+}
+
+/**
+ * Get write-back queue status summary for an organization.
+ */
+export async function getWriteBackQueueStatus(organizationId: string) {
+  const [pending, processing, failed] = await Promise.all([
+    db.writeBackQueue.count({
+      where: { organizationId, status: "pending" },
+    }),
+    db.writeBackQueue.count({
+      where: { organizationId, status: "processing" },
+    }),
+    db.writeBackQueue.count({
+      where: { organizationId, status: "failed" },
+    }),
+  ]);
+
+  return { pending, processing, failed };
+}
+
+// ─── Archive-on-Disappear ────────────────────────────────────────────
+
+/**
+ * Archive assets that are no longer present in the source system.
+ *
+ * Called after a full delta sync. Any ExternalAssetLink for the given
+ * source whose goldenRecordId is NOT in the active list will have
+ * its asset archived (soft-deleted by setting status to a special state).
+ *
+ * We don't hard-delete — archived assets can be restored if they
+ * reappear in a future sync.
+ */
+export async function archiveMissingAssets({
+  organizationId,
+  sourceName,
+  activeGoldenRecordIds,
+}: {
+  organizationId: string;
+  sourceName: string;
+  activeGoldenRecordIds: string[];
+}) {
+  // Find all links for this org+source that are NOT in the active list
+  const linksToArchive = await db.externalAssetLink.findMany({
+    where: {
+      organizationId,
+      sourceName,
+      goldenRecordId: { notIn: activeGoldenRecordIds },
+      syncStatus: { not: "archived" },
+    },
+    select: { id: true, assetId: true, goldenRecordId: true },
+  });
+
+  if (linksToArchive.length === 0) return { archived: 0 };
+
+  // Archive each asset in a transaction
+  await db.$transaction(async (tx) => {
+    for (const link of linksToArchive) {
+      // Mark the external link as archived
+      await tx.externalAssetLink.update({
+        where: { id: link.id },
+        data: { syncStatus: "archived" },
+      });
+
+      // Audit log
+      await tx.integrationAuditLog.create({
+        data: {
+          organizationId,
+          assetId: link.assetId,
+          action: "sync_archive",
+          source: "assetmesh",
+          metadata: {
+            goldenRecordId: link.goldenRecordId,
+            sourceName,
+            reason: "Asset no longer present in source system",
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
+  });
+
+  return { archived: linksToArchive.length };
+}
+
+/**
+ * Restore a previously archived asset (when it reappears in source).
+ */
+export async function restoreArchivedAsset(
+  organizationId: string,
+  goldenRecordId: string
+) {
+  const link = await db.externalAssetLink.findUnique({
+    where: {
+      organizationId_goldenRecordId: { organizationId, goldenRecordId },
+    },
+  });
+
+  if (!link || link.syncStatus !== "archived") return null;
+
+  await db.externalAssetLink.update({
+    where: { id: link.id },
+    data: { syncStatus: "synced", lastSyncedAt: new Date() },
+  });
+
+  await db.integrationAuditLog.create({
+    data: {
+      organizationId,
+      assetId: link.assetId,
+      action: "sync_create", // Reappearance logged as create
+      source: "assetmesh",
+      metadata: {
+        goldenRecordId,
+        reason: "Asset reappeared in source system",
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  return link;
+}
+
+// ─── User Edit Audit Logging ─────────────────────────────────────────
+
+/**
+ * Log a user edit on an asset to the IntegrationAuditLog.
+ * Also enqueues a write-back if the asset is synced.
+ *
+ * Call this after a successful asset update.
+ */
+export async function logUserEditAndEnqueueWriteBack({
+  assetId,
+  organizationId,
+  userId,
+  fieldChanges,
+}: {
+  assetId: string;
+  organizationId: string;
+  userId: string;
+  fieldChanges: Record<string, { old: string | null; new: string | null }>;
+}) {
+  // Check if the asset has an external link
+  const link = await db.externalAssetLink.findFirst({
+    where: { assetId },
+    select: { goldenRecordId: true, sourceName: true },
+  });
+
+  if (!link) return null; // Not a synced asset, nothing to do
+
+  // Log the edit
+  await db.integrationAuditLog.create({
+    data: {
+      organizationId,
+      assetId,
+      action: "user_edit",
+      source: "user",
+      fieldChanges: fieldChanges as unknown as Prisma.InputJsonValue,
+      userId,
+    },
+  });
+
+  // Enqueue write-back to T0
+  await enqueueWriteBack({
+    organizationId,
+    assetId,
+    goldenRecordId: link.goldenRecordId,
+    fieldChanges,
+    userId,
+  });
+
+  // Mark the link as pending write-back
+  await db.externalAssetLink.updateMany({
+    where: { assetId },
+    data: { syncStatus: "pending" },
+  });
+
+  return link;
+}
+
 // ─── Sync Log Queries ────────────────────────────────────────────────
 
 /**
- * Get recent sync logs for an organization (for MSP dashboard).
+ * Get paginated sync logs for an organization (for sync log UI).
  */
-export async function getSyncLogs({
+export async function getSyncLogsForOrganization({
   organizationId,
-  take = 20,
+  page = 1,
+  perPage = 20,
+  status,
 }: {
-  organizationId: Organization["id"];
+  organizationId: string;
+  page?: number;
+  perPage?: number;
+  status?: string | null;
+}) {
+  const where: Prisma.SyncLogWhereInput = {
+    organizationId,
+    ...(status && status !== "ALL" ? { status } : {}),
+  };
+
+  const [syncLogs, totalSyncLogs] = await Promise.all([
+    db.syncLog.findMany({
+      where,
+      orderBy: { startedAt: "desc" },
+      skip: (page - 1) * perPage,
+      take: perPage,
+      include: {
+        integrationSource: {
+          select: { name: true, displayName: true },
+        },
+      },
+    }),
+    db.syncLog.count({ where }),
+  ]);
+
+  return { syncLogs, totalSyncLogs };
+}
+
+/**
+ * Get integration audit log entries for an asset.
+ */
+export async function getIntegrationAuditLog({
+  assetId,
+  organizationId,
+  take = 50,
+}: {
+  assetId?: string;
+  organizationId: string;
   take?: number;
 }) {
-  return db.syncLog.findMany({
-    where: { organizationId },
-    orderBy: { startedAt: "desc" },
-    take,
-    include: {
-      integrationSource: {
-        select: { name: true, displayName: true },
-      },
+  return db.integrationAuditLog.findMany({
+    where: {
+      organizationId,
+      ...(assetId ? { assetId } : {}),
     },
+    orderBy: { createdAt: "desc" },
+    take,
+  });
+}
+
+/**
+ * Get integration sources for an organization.
+ */
+export async function getIntegrationSources(organizationId: string) {
+  return db.integrationSource.findMany({
+    where: { organizationId },
+    include: {
+      _count: { select: { syncLogs: true } },
+    },
+    orderBy: { createdAt: "desc" },
   });
 }
