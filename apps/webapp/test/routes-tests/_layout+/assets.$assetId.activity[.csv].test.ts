@@ -32,6 +32,10 @@ vi.mock("lottie-react", () => ({
   __esModule: true,
   default: vi.fn(() => null),
 }));
+// why: prevent eager Prisma client initialization via csv.server imports
+vi.mock("~/database/db.server", () => ({
+  db: {},
+}));
 
 let loader: (typeof import("~/routes/_layout+/assets.$assetId.activity[.csv]"))["loader"];
 const requirePermissionMock = vi.mocked(requirePermission);

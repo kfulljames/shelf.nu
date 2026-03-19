@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// why: prevent eager Prisma client initialization on import
+vi.mock("~/database/db.server", () => ({
+  db: {},
+}));
+
 import {
   createAssetScanNote,
   createAuditCreationNote,
