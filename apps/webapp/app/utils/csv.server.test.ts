@@ -33,6 +33,10 @@ vi.mock("~/database/supabase.server", () => ({
 vi.mock("lottie-react", () => ({
   default: () => null,
 }));
+// why: prevent eager Prisma client initialization via transitive imports
+vi.mock("~/database/db.server", () => ({
+  db: {},
+}));
 
 const parseFormDataMock = vi.mocked(parseFormData);
 

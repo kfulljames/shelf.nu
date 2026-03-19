@@ -19,6 +19,10 @@ vi.mock("~/database/supabase.server", () => ({
     return sbMock.client;
   },
 }));
+// why: prevent eager Prisma client initialization via kit/service.server
+vi.mock("~/database/db.server", () => ({
+  db: {},
+}));
 
 vi.mock("~/utils/roles.server", () => ({
   requirePermission: vi.fn(),
