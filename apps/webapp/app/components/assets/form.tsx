@@ -91,6 +91,10 @@ type Props = Partial<
   tags?: Tag[];
   barcodes?: Pick<Barcode, "id" | "value" | "type">[];
   referer?: string | null;
+  /** Field names locked by an external integration (read-only) */
+  lockedFields?: string[];
+  /** Name of the integration source that locked fields */
+  integrationSource?: string | null;
 };
 
 export const AssetForm = ({
@@ -108,6 +112,8 @@ export const AssetForm = ({
   tags,
   barcodes,
   referer,
+  lockedFields = [],
+  integrationSource,
 }: Props) => {
   const navigation = useNavigation();
   const { canUseBarcodes } = useBarcodePermissions();
@@ -173,6 +179,8 @@ export const AssetForm = ({
   const [, validateFile] = useAtom(assetImageValidateFileAtom);
   const [, updateDynamicTitle] = useAtom(updateDynamicTitleAtom);
 
+  const isFieldLocked = (fieldName: string) => lockedFields.includes(fieldName);
+
   const { currency, asset } = useLoaderData<AssetEditLoaderData>();
   const isKitAsset = Boolean(asset?.kit);
   const locationDisabled = disabled || isKitAsset;
@@ -215,6 +223,17 @@ export const AssetForm = ({
         {qrId ? <input type="hidden" name="qrId" value={qrId} /> : null}
         <RefererRedirectInput fieldName="redirectTo" referer={referer} />
 
+        {lockedFields.length > 0 && integrationSource ? (
+          <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 p-3">
+            <p className="text-sm text-blue-800">
+              <span className="mr-1 font-medium">
+                Synced from {integrationSource}.
+              </span>
+              Some fields are managed externally and cannot be edited.
+            </p>
+          </div>
+        ) : null}
+
         <div className="flex items-start justify-between border-b pb-5">
           <div className=" ">
             <h2 className="mb-1 text-[18px] font-semibold">Basic fields</h2>
@@ -234,15 +253,20 @@ export const AssetForm = ({
             label="Name"
             hideLabel
             name="title"
-            disabled={disabled}
+            disabled={disabled || isFieldLocked("title")}
             error={
               actionData?.errors?.title?.message || zo.errors.title()?.message
             }
-            autoFocus
+            autoFocus={!isFieldLocked("title")}
             onChange={updateDynamicTitle}
             className="w-full"
             defaultValue={title || ""}
             required={true}
+            title={
+              isFieldLocked("title")
+                ? `This field is managed by ${integrationSource}`
+                : undefined
+            }
           />
         </FormRow>
 
@@ -351,9 +375,14 @@ export const AssetForm = ({
               defaultValue={description || ""}
               hideLabel
               placeholder="Add a description for your asset."
-              disabled={disabled}
+              disabled={disabled || isFieldLocked("description")}
               data-test-id="assetDescription"
               className="w-full"
+              title={
+                isFieldLocked("description")
+                  ? `This field is managed by ${integrationSource}`
+                  : undefined
+              }
             />
           </FormRow>
         </div>

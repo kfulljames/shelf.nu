@@ -25,6 +25,7 @@ export type BarcodeType =
 export type TagUseFor = "ASSET" | "BOOKING";
 export type Roles = "USER" | "ADMIN";
 export type OrganizationType = "PERSONAL" | "TEAM";
+export type OrgTier = "STANDARD" | "MSP" | "CLIENT";
 export type QrIdDisplayPreference = "QR_ID" | "SAM_ID";
 export type OrganizationRoles = "ADMIN" | "BASE" | "OWNER" | "SELF_SERVICE";
 export type InviteStatuses =
@@ -309,6 +310,7 @@ export type OrganizationRow = {
   qrIdDisplayPreference: QrIdDisplayPreference;
   showShelfBranding: boolean;
   customEmailFooter: string | null;
+  orgTier: OrgTier;
   createdAt: string;
   updatedAt: string;
 };
@@ -2066,6 +2068,7 @@ export type Database = {
       TagUseFor: TagUseFor;
       Roles: Roles;
       OrganizationType: OrganizationType;
+      OrgTier: OrgTier;
       QrIdDisplayPreference: QrIdDisplayPreference;
       OrganizationRoles: OrganizationRoles;
       InviteStatuses: InviteStatuses;

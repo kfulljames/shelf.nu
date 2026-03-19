@@ -216,6 +216,9 @@ model Asset {
   auditEntries AuditAsset[]
   auditScans   AuditScan[]
 
+  // AssetMesh integration
+  externalLinks ExternalAssetLink[]
+
   // Unique constraint for organization-scoped sequential IDs
   @@unique([organizationId, sequentialId], name: "asset_org_sequential_unique")
   // Special GIN index for optimization of simple search queries
@@ -742,6 +745,12 @@ model Organization {
 
   usersWithLastSelected User[] @relation("lastSelectedOrg")
   roleChangeLogs     RoleChangeLog[]
+
+  // AssetMesh integration
+  orgTier             OrgTier           @default(STANDARD)
+  parentRelations     OrgRelationship[] @relation("ChildOrg")
+  childRelations      OrgRelationship[] @relation("ParentOrg")
+  integrationSources  IntegrationSource[]
 
   // Migration flag to track if sequential IDs have been generated for this organization's existing assets
   hasSequentialIdsMigrated Boolean @default(false)
@@ -1662,4 +1671,147 @@ model RoleChangeLog {
 
   @@index([userId, organizationId])
   @@index([organizationId, createdAt])
+}
+
+// ─── AssetMesh Integration Models ────────────────────────────────────
+
+enum OrgTier {
+  STANDARD // Regular shelf.nu org
+  MSP // Managed Service Provider (parent)
+  CLIENT // Client org managed by MSP
+}
+
+// MSP ↔ Client org relationship
+model OrgRelationship {
+  id String @id @default(cuid())
+
+  parentOrg   Organization @relation("ParentOrg", fields: [parentOrgId], references: [id], onDelete: Cascade)
+  parentOrgId String
+  childOrg    Organization @relation("ChildOrg", fields: [childOrgId], references: [id], onDelete: Cascade)
+  childOrgId  String
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([parentOrgId, childOrgId])
+  @@index([childOrgId])
+}
+
+// Integration source configuration per org
+model IntegrationSource {
+  id String @id @default(cuid())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+
+  name        String // "connectwise", "ninjarmm", etc.
+  displayName String // "ConnectWise Manage"
+  apiKeyHash  String // hashed API key for inbound auth
+  isActive    Boolean @default(true)
+
+  lastSyncAt      DateTime?
+  syncIntervalMin Int       @default(15)
+  config          Json? // source-specific config (field mappings, etc.)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  syncLogs SyncLog[]
+
+  @@unique([organizationId, name])
+}
+
+// Sync log per integration run
+model SyncLog {
+  id String @id @default(cuid())
+
+  integrationSource   IntegrationSource @relation(fields: [integrationSourceId], references: [id], onDelete: Cascade)
+  integrationSourceId String
+
+  organizationId String
+
+  status          String @default("pending") // pending | running | success | partial | failed
+  recordsCreated  Int    @default(0)
+  recordsUpdated  Int    @default(0)
+  recordsArchived Int    @default(0)
+  recordsFailed   Int    @default(0)
+  duration        Int? // milliseconds
+  errors          Json? // array of error details
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([integrationSourceId, startedAt])
+  @@index([organizationId, startedAt])
+}
+
+// Golden record mapping (asset ↔ external source record)
+model ExternalAssetLink {
+  id String @id @default(cuid())
+
+  asset   Asset  @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  assetId String
+
+  organizationId String
+
+  goldenRecordId String // stable ID from AssetMesh
+  sourceName     String // "connectwise", "ninjarmm", etc.
+  sourceRecordId String // original ID in source system
+
+  lockedFields String[] // field names locked from editing in Shelf
+  metadata     Json? // unmapped source data
+
+  lastSyncedAt DateTime?
+  syncStatus   String    @default("synced") // synced | pending | conflict
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, goldenRecordId])
+  @@index([assetId])
+  @@index([organizationId, sourceName])
+}
+
+// Write-back queue for Shelf → AssetMesh edits
+model WriteBackQueue {
+  id String @id @default(cuid())
+
+  organizationId String
+  assetId        String
+  goldenRecordId String
+
+  fieldChanges Json // { fieldName: { old: value, new: value } }
+
+  status      String @default("pending") // pending | processing | completed | failed | conflict
+  attempts    Int    @default(0)
+  maxAttempts Int    @default(3)
+  lastError   String?
+
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+  createdBy   String? // userId who made the edit
+
+  @@index([organizationId, status])
+  @@index([status, createdAt])
+}
+
+// Audit log for all sync and edit operations
+model IntegrationAuditLog {
+  id String @id @default(cuid())
+
+  organizationId String
+  assetId        String?
+
+  action String // sync_create | sync_update | sync_archive | user_edit | write_back | conflict_resolved
+  source String // "assetmesh" | "shelf" | "user"
+
+  fieldChanges Json? // { fieldName: { old: value, new: value } }
+  userId       String? // if user-initiated
+  metadata     Json? // additional context
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([assetId, createdAt])
 }

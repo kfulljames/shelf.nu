@@ -2,8 +2,7 @@
 
 > **Status:** Planning
 > **Overall Confidence:** ~95%
-> **Repository:** [assetmesh-io](https://github.com/Stealth-Peanut/assetmesh-io)
-> **Date:** 2026-03-19
+> **Repository:** [assetmesh-io](https://github.com/Stealth-Peanut/assetmesh-io) > **Date:** 2026-03-19
 
 ---
 
