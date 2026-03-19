@@ -154,9 +154,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     // Get current user's organization role for updates filtering
     const currentOrganizationUserRoles = (
       user?.userOrganizations as any[]
-    )?.find(
-      (userOrg: any) => userOrg.organization.id === organizationId
-    )?.roles;
+    )?.find((userOrg: any) => userOrg.organization.id === organizationId)
+      ?.roles;
 
     // Check if current user has OWNER or ADMIN role in the organization
     const isOwner = currentOrganizationUserRoles?.includes("OWNER");

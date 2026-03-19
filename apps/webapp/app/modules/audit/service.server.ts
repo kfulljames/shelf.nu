@@ -1242,10 +1242,8 @@ export async function getAuditScans({
         isExpected: auditAsset?.expected ?? false,
         assetTitle: scan.asset?.title ?? "",
         auditAssetId: auditAsset?.id ?? null,
-        auditNotesCount: auditAsset?.id ? (notesCounts[auditAsset.id] ?? 0) : 0,
-        auditImagesCount: auditAsset?.id
-          ? (imagesCounts[auditAsset.id] ?? 0)
-          : 0,
+        auditNotesCount: auditAsset?.id ? notesCounts[auditAsset.id] ?? 0 : 0,
+        auditImagesCount: auditAsset?.id ? imagesCounts[auditAsset.id] ?? 0 : 0,
       };
     });
   } catch (cause) {

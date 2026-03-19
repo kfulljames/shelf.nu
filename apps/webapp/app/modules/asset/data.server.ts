@@ -203,7 +203,7 @@ export async function simpleModeLoader({
   ]);
 
   const currentUserTeamMember = isSelfService
-    ? (teamMembers.find((tm) => tm.userId === userId) ?? null)
+    ? teamMembers.find((tm) => tm.userId === userId) ?? null
     : null;
 
   assets = await updateAssetsWithBookingCustodians(assets);
@@ -214,8 +214,8 @@ export async function simpleModeLoader({
         ? `${user.firstName}'s inventory`
         : `Your inventory`
       : currentOrganization?.name
-        ? `${currentOrganization?.name}'s inventory`
-        : "Your inventory",
+      ? `${currentOrganization?.name}'s inventory`
+      : "Your inventory",
   };
 
   const modelName = {
@@ -470,7 +470,7 @@ export async function advancedModeLoader({
   ]);
 
   const currentUserTeamMember = isSelfService
-    ? (teamMembersData.teamMembers.find((tm) => tm.userId === userId) ?? null)
+    ? teamMembersData.teamMembers.find((tm) => tm.userId === userId) ?? null
     : null;
 
   const header: HeaderData = {
@@ -479,8 +479,8 @@ export async function advancedModeLoader({
         ? `${user.firstName}'s inventory`
         : `Your inventory`
       : currentOrganization?.name
-        ? `${currentOrganization?.name}'s inventory`
-        : "Your inventory",
+      ? `${currentOrganization?.name}'s inventory`
+      : "Your inventory",
   };
 
   const modelName = {

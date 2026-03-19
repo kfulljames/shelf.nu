@@ -186,8 +186,8 @@ export async function createWorkingHoursOverride({
         workingHoursId,
         date: new Date(date).toISOString(),
         isOpen,
-        openTime: isOpen ? (openTime ?? null) : null,
-        closeTime: isOpen ? (closeTime ?? null) : null,
+        openTime: isOpen ? openTime ?? null : null,
+        closeTime: isOpen ? closeTime ?? null : null,
         reason: reason ?? null,
       })
       .select()
@@ -234,8 +234,8 @@ export async function updateWorkingHoursOverride({
   try {
     const updateData: Record<string, unknown> = {
       isOpen,
-      openTime: isOpen ? (openTime ?? null) : null,
-      closeTime: isOpen ? (closeTime ?? null) : null,
+      openTime: isOpen ? openTime ?? null : null,
+      closeTime: isOpen ? closeTime ?? null : null,
       updatedAt: new Date().toISOString(),
     };
 

@@ -92,18 +92,18 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         p_selected_values:
           selectedValuesArray.length > 0 ? selectedValuesArray : null,
         p_use_for:
-          modelFilters.name === "tag" ? (modelFilters.useFor ?? null) : null,
+          modelFilters.name === "tag" ? modelFilters.useFor ?? null : null,
         p_deleted_at:
           modelFilters.name === "teamMember"
-            ? (modelFilters.deletedAt ?? null)
+            ? modelFilters.deletedAt ?? null
             : null,
         p_admin_owner_only:
           modelFilters.name === "teamMember"
-            ? (modelFilters.userWithAdminAndOwnerOnly ?? false)
+            ? modelFilters.userWithAdminAndOwnerOnly ?? false
             : false,
         p_users_only:
           modelFilters.name === "teamMember"
-            ? (modelFilters.usersOnly ?? false)
+            ? modelFilters.usersOnly ?? false
             : false,
       }
     );
