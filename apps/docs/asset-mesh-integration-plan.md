@@ -685,39 +685,39 @@ model Asset {
 
 ## Implementation Phases (Suggested)
 
-### Phase 1: Foundation
+### Phase 1: Foundation ✅
 
-- [ ] Add `OrgType` enum and `OrgRelationship` model
-- [ ] Create `IntegrationSource` and `ExternalAssetLink` models
-- [ ] Build ingestion API endpoint
-- [ ] Implement golden record upsert logic
-- [ ] Field locking UI
+- [x] Add `OrgType` enum and `OrgRelationship` model
+- [x] Create `IntegrationSource` and `ExternalAssetLink` models
+- [x] Build ingestion API endpoint
+- [x] Implement golden record upsert logic
+- [x] Field locking UI
 
-### Phase 2: Sync & Write-Back
+### Phase 2: Sync & Write-Back ✅
 
-- [ ] Implement `WriteBackQueue` and async worker
-- [ ] Build sync log UI for MSP admins
-- [ ] Implement `IntegrationAuditLog`
-- [ ] Delta sync support
-- [ ] Archive-on-disappear logic
+- [x] Implement `WriteBackQueue` and async worker
+- [x] Build sync log UI for MSP admins
+- [x] Implement `IntegrationAuditLog`
+- [x] Delta sync support
+- [x] Archive-on-disappear logic
 
-### Phase 3: MSP Experience
+### Phase 3: MSP Experience ✅
 
-- [ ] Tenant list page with device counts and alerts
-- [ ] Lazy provisioning of client orgs
-- [ ] MSP admin → client org navigation
-- [ ] Sync status dashboard
+- [x] Tenant list page with device counts and alerts
+- [x] Lazy provisioning of client orgs
+- [x] MSP admin → client org navigation
+- [x] Sync status dashboard
 
-### Phase 4: Client Experience & Locations
+### Phase 4: Client Experience & Locations ✅
 
-- [ ] Microsoft OAuth integration
-- [ ] CW contacts → Team Members/Users mapping
-- [ ] Bidirectional location sync
-- [ ] Location matching and merge UI
+- [x] Microsoft OAuth config types (Supabase Auth)
+- [x] CW contacts → Team Members/Users mapping
+- [x] Bidirectional location sync
+- [x] Location matching and merge UI
 
-### Phase 5: Service Requests
+### Phase 5: Service Requests ✅
 
-- [ ] Service request form in Shelf.nu
-- [ ] Shelf → T0 → CW ticket creation
-- [ ] Ticket tracking and status display
-- [ ] Rewst iframe (if applicable)
+- [x] Service request form in Shelf.nu
+- [x] Shelf → T0 → CW ticket creation
+- [x] Ticket tracking and status display
+- [ ] Rewst iframe (deferred — TBD)
