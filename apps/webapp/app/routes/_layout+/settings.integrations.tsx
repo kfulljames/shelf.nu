@@ -59,6 +59,8 @@ export default function IntegrationsLayout() {
 
   const items = [
     { to: "sync-logs", content: "Sync Logs" },
+    { to: "service-requests", content: "Service Requests" },
+    { to: "location-merges", content: "Location Merges" },
     ...(isMsp
       ? [
           { to: "tenants", content: "Tenants" },

@@ -110,6 +110,9 @@ model User {
 
   assetFilterPresets AssetFilterPreset[]
 
+  // Service requests
+  serviceRequests ServiceRequest[]
+
   // Role change audit log
   roleChangesReceived  RoleChangeLog[] @relation("roleChangeTarget")
   roleChangesPerformed RoleChangeLog[] @relation("roleChangeActor")
@@ -217,7 +220,8 @@ model Asset {
   auditScans   AuditScan[]
 
   // AssetMesh integration
-  externalLinks ExternalAssetLink[]
+  externalLinks   ExternalAssetLink[]
+  serviceRequests ServiceRequest[]
 
   // Unique constraint for organization-scoped sequential IDs
   @@unique([organizationId, sequentialId], name: "asset_org_sequential_unique")
@@ -652,8 +656,9 @@ model TeamMember {
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   deletedAt      DateTime?
-  bookings       Booking[]
-  assetReminders AssetReminder[]
+  bookings        Booking[]
+  assetReminders  AssetReminder[]
+  serviceRequests ServiceRequest[] @relation("AssignedTechnician")
 
   // Special GIN index for optimization of simple search queries
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
@@ -750,7 +755,10 @@ model Organization {
   orgTier             OrgTier           @default(STANDARD)
   parentRelations     OrgRelationship[] @relation("ChildOrg")
   childRelations      OrgRelationship[] @relation("ParentOrg")
-  integrationSources  IntegrationSource[]
+  integrationSources     IntegrationSource[]
+  contactImportLogs      ContactImportLog[]
+  locationMergeProposals LocationMergeProposal[]
+  serviceRequests        ServiceRequest[]
 
   // Migration flag to track if sequential IDs have been generated for this organization's existing assets
   hasSequentialIdsMigrated Boolean @default(false)
@@ -1814,4 +1822,107 @@ model IntegrationAuditLog {
 
   @@index([organizationId, createdAt])
   @@index([assetId, createdAt])
+}
+
+// ─── Phase 4: Contact Import & Location Sync ──────────────────────
+
+// Log of contact imports from external sources (CW, Ninja, etc.)
+model ContactImportLog {
+  id String @id @default(cuid())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+
+  sourceName    String // "connectwise", "ninjarmm"
+  totalContacts Int    @default(0)
+  imported      Int    @default(0)
+  skipped       Int    @default(0)
+  failed        Int    @default(0)
+
+  status String @default("pending") // pending | running | completed | failed
+
+  errors    Json? // array of error details
+  startedAt DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([organizationId, startedAt])
+}
+
+// Location merge request — tracks proposed merges of duplicate locations
+model LocationMergeProposal {
+  id String @id @default(cuid())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+
+  sourceLocationId String // the duplicate location to merge FROM
+  targetLocationId String // the location to merge INTO
+
+  sourceName      String // where the duplicate came from
+  similarityScore Float  @default(0) // 0-1 fuzzy match score
+  status          String @default("pending") // pending | approved | rejected | merged
+
+  resolvedBy   String? // userId who resolved it
+  resolvedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([organizationId, sourceLocationId, targetLocationId])
+  @@index([organizationId, status])
+}
+
+// ─── Phase 5: Service Requests ────────────────────────────────────
+
+model ServiceRequest {
+  id String @id @default(cuid())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+
+  asset   Asset  @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  assetId String
+
+  // Who requested it
+  requestedBy   User   @relation(fields: [requestedById], references: [id])
+  requestedById String
+
+  // Assigned technician (optional)
+  assignedTo   TeamMember? @relation("AssignedTechnician", fields: [assignedToId], references: [id])
+  assignedToId String?
+
+  title       String
+  description String?
+  priority    ServiceRequestPriority @default(MEDIUM)
+  status      ServiceRequestStatus   @default(OPEN)
+
+  // External ticket tracking (CW/PSA)
+  externalTicketId  String? // CW ticket ID
+  externalTicketUrl String? // URL to CW ticket
+
+  // Resolution
+  resolutionNotes String?
+  resolvedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, status])
+  @@index([assetId])
+  @@index([requestedById])
+}
+
+enum ServiceRequestPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ServiceRequestStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_ON_PARTS
+  ESCALATED
+  RESOLVED
+  CLOSED
 }

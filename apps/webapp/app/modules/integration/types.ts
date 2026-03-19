@@ -93,3 +93,87 @@ export type WriteBackStatus =
   | "completed"
   | "failed"
   | "conflict";
+
+// ─── Phase 4: Contact Import Schema ────────────────────────────────
+
+export const contactImportSchema = z.object({
+  contacts: z
+    .array(
+      z.object({
+        externalId: z.string(),
+        firstName: z.string().min(1),
+        lastName: z.string().min(1),
+        email: z.string().email().optional(),
+        phone: z.string().optional(),
+        contactType: z.string().default("general"),
+        sourceName: z.string(),
+        shouldCreateUser: z.boolean().default(false),
+      })
+    )
+    .min(1)
+    .max(1000),
+});
+
+export type ContactImportRequest = z.infer<typeof contactImportSchema>;
+
+// ─── Phase 4: Location Sync Schema ─────────────────────────────────
+
+export const locationSyncSchema = z.object({
+  locations: z
+    .array(
+      z.object({
+        externalId: z.string(),
+        name: z.string().min(1),
+        address: z.string().optional(),
+        sourceName: z.string(),
+      })
+    )
+    .min(1)
+    .max(500),
+});
+
+export type LocationSyncRequest = z.infer<typeof locationSyncSchema>;
+
+// ─── Phase 4: Microsoft OAuth Config ────────────────────────────────
+
+/**
+ * Configuration for Microsoft OAuth integration.
+ * Stored in IntegrationSource.config when sourceName is "microsoft".
+ *
+ * The actual OAuth flow is handled by Supabase Auth —
+ * these types define the configuration that MSP admins set up.
+ */
+export type MicrosoftOAuthConfig = {
+  /** Azure AD tenant ID */
+  tenantId: string;
+  /** Azure AD application (client) ID */
+  clientId: string;
+  /** Allowed email domains for SSO */
+  allowedDomains: string[];
+  /** Whether to auto-provision users on first login */
+  autoProvision: boolean;
+  /** Default role for auto-provisioned users */
+  defaultRole: "BASE" | "SELF_SERVICE";
+};
+
+export const microsoftOAuthConfigSchema = z.object({
+  tenantId: z.string().min(1),
+  clientId: z.string().min(1),
+  allowedDomains: z.array(z.string().min(1)),
+  autoProvision: z.boolean().default(false),
+  defaultRole: z.enum(["BASE", "SELF_SERVICE"]).default("SELF_SERVICE"),
+});
+
+// ─── Phase 5: Service Request Schema ────────────────────────────────
+
+export const createServiceRequestSchema = z.object({
+  assetId: z.string().min(1),
+  title: z.string().min(1, "Title is required"),
+  description: z.string().optional(),
+  priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).default("MEDIUM"),
+  assignedToId: z.string().optional(),
+});
+
+export type CreateServiceRequestInput = z.infer<
+  typeof createServiceRequestSchema
+>;
