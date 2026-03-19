@@ -271,7 +271,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
     const organizationName =
       organizationMembership?.organization?.name ??
-      (user.createdWithInvite ? user.businessIntel?.companyName ?? null : null);
+      (user.createdWithInvite
+        ? (user.businessIntel?.companyName ?? null)
+        : null);
 
     const verifiedOrganizationId =
       organizationMembership?.organizationId ?? null;
@@ -526,8 +528,8 @@ export default function Onboarding() {
   const jobTitleDefault = businessIntel?.jobTitle ?? null;
   const teamSizeDefault = businessIntel?.teamSize ?? null;
   const companyNameDefault = requireCompanyName
-    ? businessIntel?.companyName ?? ""
-    : organizationName ?? businessIntel?.companyName ?? "";
+    ? (businessIntel?.companyName ?? "")
+    : (organizationName ?? businessIntel?.companyName ?? "");
   const referralSourceDefault =
     businessIntel?.howDidYouHearAboutUs ?? user?.referralSource ?? "";
 
@@ -538,8 +540,8 @@ export default function Onboarding() {
   const [customizeOpen, setCustomizeOpen] = useState(
     Boolean(
       businessIntel?.primaryUseCase ||
-        businessIntel?.currentSolution ||
-        businessIntel?.timeline
+      businessIntel?.currentSolution ||
+      businessIntel?.timeline
     )
   );
 

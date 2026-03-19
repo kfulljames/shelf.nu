@@ -363,7 +363,7 @@ export async function getTeamMemberForCustodianFilter({
 
     const teamMemberExcludedSelected = excludedResult.data ?? [];
     const teamMembersSelected =
-      selectedTeamMembers.length > 0 ? selectedResult.data ?? [] : [];
+      selectedTeamMembers.length > 0 ? (selectedResult.data ?? []) : [];
 
     const teamMembers = (
       [

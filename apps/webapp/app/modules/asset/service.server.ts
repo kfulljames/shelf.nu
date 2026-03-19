@@ -1349,9 +1349,9 @@ export async function updateAsset({
 
     const trackedFieldUpdates = Boolean(
       typeof title !== "undefined" ||
-        typeof description !== "undefined" ||
-        typeof categoryId !== "undefined" ||
-        typeof valuation !== "undefined"
+      typeof description !== "undefined" ||
+      typeof categoryId !== "undefined" ||
+      typeof valuation !== "undefined"
     );
 
     const assetBeforeUpdate = await fetchAssetBeforeUpdate({
@@ -2603,7 +2603,7 @@ export async function fetchAssetsForExport({
     return assets.map((asset) => {
       const custody = custodyByAsset.get(asset.id);
       const custodian = custody
-        ? custodianMap.get(custody.teamMemberId) ?? null
+        ? (custodianMap.get(custody.teamMemberId) ?? null)
         : null;
       // Destructure to rename `value` -> `valuation` for downstream compat
       const { value: valuation, ...restAsset } = asset;
@@ -2616,10 +2616,10 @@ export async function fetchAssetsForExport({
           ? new Date(asset.mainImageExpiration)
           : null,
         category: asset.categoryId
-          ? categoryMap.get(asset.categoryId) ?? null
+          ? (categoryMap.get(asset.categoryId) ?? null)
           : null,
         location: asset.locationId
-          ? locationMap.get(asset.locationId) ?? null
+          ? (locationMap.get(asset.locationId) ?? null)
           : null,
         notes: (notesByAsset.get(asset.id) ?? []).map((n) => ({
           ...n,
@@ -3416,10 +3416,10 @@ export async function updateAssetsWithBookingCustodians<T extends Asset>(
           {
             id: b.id,
             custodianUser: b.custodianUserId
-              ? userMap.get(b.custodianUserId) ?? null
+              ? (userMap.get(b.custodianUserId) ?? null)
               : null,
             custodianTeamMember: b.custodianTeamMemberId
-              ? tmMap.get(b.custodianTeamMemberId) ?? null
+              ? (tmMap.get(b.custodianTeamMemberId) ?? null)
               : null,
           },
         ])
@@ -3855,7 +3855,7 @@ export async function bulkCheckInAssets({
     const tmMap = new Map(
       (teamMembers ?? []).map((tm: any) => [
         tm.id,
-        { ...tm, user: tm.userId ? userMap.get(tm.userId) ?? null : null },
+        { ...tm, user: tm.userId ? (userMap.get(tm.userId) ?? null) : null },
       ])
     );
     const custodyByAsset = new Map(
@@ -4020,8 +4020,8 @@ export async function bulkUpdateAssetLocation({
     const assets = assetRows.map((a) => ({
       id: a.id,
       title: a.title,
-      location: a.locationId ? locMap.get(a.locationId) ?? null : null,
-      kit: a.kitId ? kitMap.get(a.kitId) ?? null : null,
+      location: a.locationId ? (locMap.get(a.locationId) ?? null) : null,
+      kit: a.kitId ? (kitMap.get(a.kitId) ?? null) : null,
     }));
 
     // Check if any assets belong to kits and prevent bulk location updates

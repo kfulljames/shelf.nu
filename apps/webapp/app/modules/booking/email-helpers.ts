@@ -127,8 +127,9 @@ export async function sendCheckinReminder(
       bookingName: booking.name,
       assetsCount: assetCount,
       custodian:
-        `${booking.custodianUser!.firstName} ${booking.custodianUser
-          ?.lastName}` || (booking.custodianTeamMember?.name as string),
+        `${booking.custodianUser!.firstName} ${
+          booking.custodianUser?.lastName
+        }` || (booking.custodianTeamMember?.name as string),
       from: booking.from!,
       to: booking.to!,
       bookingId: booking.id,
@@ -286,7 +287,7 @@ export async function sendBookingUpdatedEmail({
 
     const custodian = booking.custodianUser
       ? `${booking.custodianUser.firstName} ${booking.custodianUser.lastName}`
-      : booking.custodianTeamMember?.name ?? "";
+      : (booking.custodianTeamMember?.name ?? "");
 
     const subject = `📝 Booking updated (${booking.name}) - shelf.nu`;
 
