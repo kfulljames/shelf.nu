@@ -22,6 +22,11 @@ import {
 } from "~/modules/asset/service.server";
 
 import { getActiveCustomFields } from "~/modules/custom-field/service.server";
+import {
+  enforceFieldLocking,
+  getLockedFieldsForAsset,
+} from "~/modules/integration/field-locking.server";
+import { logUserEditAndEnqueueWriteBack } from "~/modules/integration/service.server";
 import { buildTagsSet } from "~/modules/tag/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { extractBarcodesFromFormData } from "~/utils/barcode-form-data.server";
@@ -113,6 +118,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       subHeading: asset.id,
     };
 
+    // Check if this asset has locked fields from an integration
+    const externalLink = await getLockedFieldsForAsset(id);
+
     return payload({
       asset,
       header,
@@ -125,6 +133,8 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       currency: currentOrganization?.currency,
       customFields,
       referer: getRefererPath(request),
+      lockedFields: externalLink?.lockedFields ?? [],
+      integrationSource: externalLink?.sourceName ?? null,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
@@ -215,6 +225,15 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       ? extractBarcodesFromFormData(formData)
       : [];
 
+    // Enforce field locking for synced assets
+    const fieldsBeingUpdated: string[] = [];
+    if (title) fieldsBeingUpdated.push("title");
+    if (description) fieldsBeingUpdated.push("description");
+    if (category) fieldsBeingUpdated.push("category");
+    if (newLocationId && newLocationId !== currentLocationId)
+      fieldsBeingUpdated.push("location");
+    await enforceFieldLocking(id, fieldsBeingUpdated);
+
     await updateAsset({
       id,
       title,
@@ -229,6 +248,16 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       valuation,
       organizationId,
       request,
+    });
+
+    // Log edit + enqueue write-back for synced assets (fire-and-forget)
+    void logUserEditAndEnqueueWriteBack({
+      assetId: id,
+      organizationId,
+      userId: authSession.userId,
+      fieldChanges: Object.fromEntries(
+        fieldsBeingUpdated.map((f) => [f, { old: null, new: null }])
+      ),
     });
 
     sendNotification({
@@ -257,7 +286,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
 export default function AssetEditPage() {
   const title = useAtomValue(dynamicTitleAtom);
-  const { asset, referer } = useLoaderData<typeof loader>();
+  const { asset, referer, lockedFields, integrationSource } =
+    useLoaderData<typeof loader>();
   const tags = useMemo(
     () => asset.tags?.map((tag) => ({ label: tag.name, value: tag.id })) || [],
     [asset.tags]
@@ -291,6 +321,8 @@ export default function AssetEditPage() {
           tags={tags}
           barcodes={asset.barcodes}
           referer={referer}
+          lockedFields={lockedFields}
+          integrationSource={integrationSource}
         />
       </div>
     </div>

@@ -17,8 +17,9 @@ vi.mock("~/database/db.server", () => ({
   db: {},
 }));
 
-const { removeCustomFieldFromAssetIndexSettings } =
-  await import("./service.server");
+const { removeCustomFieldFromAssetIndexSettings } = await import(
+  "./service.server"
+);
 
 describe("removeCustomFieldFromAssetIndexSettings", () => {
   beforeEach(() => {

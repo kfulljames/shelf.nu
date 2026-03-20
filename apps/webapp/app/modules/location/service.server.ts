@@ -1732,8 +1732,8 @@ export async function updateLocationAssets({
       modifiedAssets = (assetRows ?? []).map((a) => ({
         title: a.title,
         id: a.id,
-        location: a.locationId ? (locMap.get(a.locationId) ?? null) : null,
-        user: a.userId ? (userMap.get(a.userId) ?? null) : null,
+        location: a.locationId ? locMap.get(a.locationId) ?? null : null,
+        user: a.userId ? userMap.get(a.userId) ?? null : null,
       }));
     }
 
@@ -2007,16 +2007,14 @@ export async function updateLocationKits({
         arr.push({
           id: a.id,
           title: a.title,
-          location: a.locationId
-            ? (assetLocMap.get(a.locationId) ?? null)
-            : null,
+          location: a.locationId ? assetLocMap.get(a.locationId) ?? null : null,
         });
         assetsByKit.set(a.kitId, arr);
       }
 
       const kitsToAdd = (kitRows ?? []).map((k) => ({
         ...k,
-        location: k.locationId ? (kitLocMap.get(k.locationId) ?? null) : null,
+        location: k.locationId ? kitLocMap.get(k.locationId) ?? null : null,
         assets: assetsByKit.get(k.id) ?? [],
       }));
 

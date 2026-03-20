@@ -299,8 +299,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         const kit = {
           name: (kitRow?.name ?? "") as string,
           custody: Array.isArray((kitRow as any)?.custody)
-            ? ((kitRow as any).custody[0] ?? null)
-            : ((kitRow as any)?.custody ?? null),
+            ? (kitRow as any).custody[0] ?? null
+            : (kitRow as any)?.custody ?? null,
         };
 
         /**

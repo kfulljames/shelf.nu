@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import {
   AlarmClockIcon,
   BellIcon,
+  CableIcon,
   BoxesIcon,
   CalendarRangeIcon,
   ChartLineIcon,
@@ -223,6 +224,13 @@ export function useSidebarNavItems() {
           to: "/settings/custom-fields",
         },
       ],
+    },
+    {
+      type: "child",
+      title: "Integrations",
+      to: "/settings/integrations/sync-logs",
+      Icon: CableIcon,
+      hidden: isBaseOrSelfService,
     },
   ];
 

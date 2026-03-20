@@ -101,7 +101,8 @@ export type FailureReason = {
     | "Asset Reminder"
     | "Asset Scheduler" // Error related to the image import
     | "Audit"
-    | "Update";
+    | "Update"
+    | "Integration";
   /**
    * The message intended for the user.
    * You can add new lines using \n which will be parsed into paragraphs in the html
@@ -185,13 +186,13 @@ export class ShelfError extends Error {
     this.additionalData = additionalData;
     this.shouldBeCaptured =
       (isLikeShelfError(cause)
-        ? (shouldBeCaptured ?? cause.shouldBeCaptured)
+        ? shouldBeCaptured ?? cause.shouldBeCaptured
         : shouldBeCaptured) ?? true;
     this.status = isLikeShelfError(cause)
       ? status || cause.status || 500
       : isNotFoundError(cause)
-        ? 404
-        : status || 500;
+      ? 404
+      : status || 500;
     this.traceId = traceId || createId();
   }
 }

@@ -112,8 +112,8 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     const auditAsset = {
       ...auditAssetRow,
       asset: Array.isArray(auditAssetRow.asset)
-        ? (auditAssetRow.asset[0] ?? null)
-        : (auditAssetRow.asset ?? null),
+        ? auditAssetRow.asset[0] ?? null
+        : auditAssetRow.asset ?? null,
       auditSession: {
         assignments: (assignmentRows ?? []) as Array<{
           userId: string;

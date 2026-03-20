@@ -10,6 +10,7 @@ import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { CustodyCard } from "~/components/assets/asset-custody-card";
 import { AssetReminderCards } from "~/components/assets/asset-reminder-cards";
+import { ServiceRequestCard } from "~/components/assets/service-request-card";
 import { BarcodeCard } from "~/components/barcode/barcode-card";
 import { CodePreview } from "~/components/code-preview/code-preview";
 import { Switch } from "~/components/forms/switch";
@@ -40,6 +41,7 @@ import { getRemindersForOverviewPage } from "~/modules/asset-reminder/service.se
 import { generateQrObj } from "~/modules/qr/utils.server";
 import { getScanByQrId } from "~/modules/scan/service.server";
 import { parseScanData } from "~/modules/scan/utils.server";
+import { getServiceRequestsForAsset } from "~/modules/service-request/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { checkExhaustiveSwitch } from "~/utils/check-exhaustive-switch";
 import { getClientHint } from "~/utils/client-hints";
@@ -128,10 +130,16 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       organizationId,
     });
 
-    const reminders = await getRemindersForOverviewPage({
-      assetId: id,
-      organizationId,
-    });
+    const [reminders, serviceRequests] = await Promise.all([
+      getRemindersForOverviewPage({
+        assetId: id,
+        organizationId,
+      }),
+      getServiceRequestsForAsset({
+        assetId: id,
+        organizationId,
+      }),
+    ]);
     const booking = asset.bookings.length > 0 ? asset.bookings[0] : undefined;
     const currentBooking: any = null;
 
@@ -166,6 +174,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       timeZone,
       qrObj,
       reminders,
+      serviceRequests,
     });
   } catch (cause) {
     const reason = makeShelfError(cause);
@@ -240,6 +249,7 @@ export default function AssetOverview() {
     lastScan,
     currentOrganization,
     userId,
+    serviceRequests,
   } = useLoaderData<typeof loader>();
   const booking =
     asset.status === AssetStatus.CHECKED_OUT && asset?.bookings?.length
@@ -587,6 +597,11 @@ export default function AssetOverview() {
               </div>
             </Card>
           ) : null}
+
+          <ServiceRequestCard
+            assetId={asset.id}
+            serviceRequests={serviceRequests}
+          />
 
           <CustodyCard
             booking={booking}

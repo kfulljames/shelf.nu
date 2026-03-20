@@ -359,8 +359,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
               return (tmRows ?? []).map((tm: any) => ({
                 ...tm,
                 user: Array.isArray(tm.user)
-                  ? (tm.user[0] ?? null)
-                  : (tm.user ?? null),
+                  ? tm.user[0] ?? null
+                  : tm.user ?? null,
               }));
             })()
           : Promise.resolve([]),

@@ -43,6 +43,7 @@ export enum PermissionEntity {
   audit = "audit",
   auditNote = "auditNote",
   emailSettings = "emailSettings",
+  integration = "integration",
   userData = "user-data", // This is for the user to load their own data.
   update = "update",
   commandPaletteSearch = "command-palette-search",
@@ -92,6 +93,7 @@ export const Role2PermissionMap: {
     [PermissionEntity.custody]: [],
     [PermissionEntity.assetReminders]: [],
     [PermissionEntity.emailSettings]: [],
+    [PermissionEntity.integration]: [],
     [PermissionEntity.userData]: [
       PermissionAction.read,
       PermissionAction.update,
@@ -144,6 +146,7 @@ export const Role2PermissionMap: {
     [PermissionEntity.custody]: [],
     [PermissionEntity.assetReminders]: [],
     [PermissionEntity.emailSettings]: [],
+    [PermissionEntity.integration]: [],
     [PermissionEntity.userData]: [
       PermissionAction.read,
       PermissionAction.update,
@@ -277,6 +280,7 @@ export const Role2PermissionMap: {
       PermissionAction.read,
       PermissionAction.update,
     ],
+    [PermissionEntity.integration]: [PermissionAction.read],
     [PermissionEntity.userData]: [
       PermissionAction.read,
       PermissionAction.update,
@@ -412,6 +416,7 @@ export const Role2PermissionMap: {
       PermissionAction.read,
       PermissionAction.update,
     ],
+    [PermissionEntity.integration]: [PermissionAction.read],
     [PermissionEntity.userData]: [
       PermissionAction.read,
       PermissionAction.update,
