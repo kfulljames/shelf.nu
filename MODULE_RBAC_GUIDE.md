@@ -15,13 +15,13 @@ and auth flow, see [CLAUDE.md](./CLAUDE.md).
 Every MSP in the portal uses the same 5 standard security groups. These provide
 a consistent RBAC model that all modules can rely on:
 
-| Slug | Name | Default Permissions | Priority |
-|------|------|-------------------|----------|
-| `super_admin` | Super Admin | `["*"]` (all permissions) | 50 |
-| `admin` | Admin | `["read", "write", "manage", "configure"]` | 40 |
-| `technician` | Technician | `["read", "write"]` | 30 |
-| `read_only` | Read-only | `["read"]` | 20 |
-| `billing` | Billing | `["read", "billing:read", "billing:write", "billing:manage"]` | 10 |
+| Slug          | Name        | Default Permissions                                           | Priority |
+| ------------- | ----------- | ------------------------------------------------------------- | -------- |
+| `super_admin` | Super Admin | `["*"]` (all permissions)                                     | 50       |
+| `admin`       | Admin       | `["read", "write", "manage", "configure"]`                    | 40       |
+| `technician`  | Technician  | `["read", "write"]`                                           | 30       |
+| `read_only`   | Read-only   | `["read"]`                                                    | 20       |
+| `billing`     | Billing     | `["read", "billing:read", "billing:write", "billing:manage"]` | 10       |
 
 MSP admins map each standard group to an Entra ID security group in their tenant.
 On every login, the user's Entra group membership is resolved against these mappings.
@@ -58,18 +58,18 @@ target module before issuing the token. Your module just reads `groups` and
   "sub": "uuid",
   "email": "user@acme-msp.com",
   "name": "Jane Doe",
-  "role": "msp_admin",                                    // backward-compat coarse role
+  "role": "msp_admin", // backward-compat coarse role
   "tenantId": "uuid",
   "tenantSlug": "acme-msp",
   "modules": ["assets", "billing"],
 
   // --- RBAC claims (pre-resolved for YOUR module) ---
   "groups": ["super_admin", "billing", "billing-approver"], // standard + custom group slugs
-  "permissions": ["*", "billing:approve"],                   // merged permissions for this module
+  "permissions": ["*", "billing:approve"], // merged permissions for this module
 
   // --- Breakglass markers (if applicable) ---
-  "breakglass": true,                                        // present only for breakglass sessions
-  "breakglassExpires": 1709386400,                           // unix timestamp
+  "breakglass": true, // present only for breakglass sessions
+  "breakglassExpires": 1709386400, // unix timestamp
 
   // --- Standard module claims ---
   "aud": "https://your-module.example.com",
@@ -83,15 +83,15 @@ target module before issuing the token. Your module just reads `groups` and
 
 ### Claim details
 
-| Claim | Type | Description |
-|---|---|---|
-| `role` | `string` | Backward-compat coarse role. One of: `superadmin`, `superadmin_readonly`, `msp_admin`, `msp_user`, `client_admin`, `client_user`. |
-| `groups` | `string[]` | Standard group slugs + any module custom group slugs the user belongs to. |
-| `permissions` | `string[]` | Merged permissions from all matched standard groups + module custom groups for this specific module. `"*"` means all permissions. |
-| `breakglass` | `boolean` | Present and `true` only for breakglass sessions. See Breakglass section. |
-| `breakglassExpires` | `number` | Unix timestamp when breakglass session expires. |
-| `isReadonly` | `boolean` | Present and `true` for `superadmin_readonly` users. Block all writes. |
-| `impersonatedBy` | `string` | Present only when a superadmin is impersonating this user. |
+| Claim               | Type       | Description                                                                                                                       |
+| ------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `role`              | `string`   | Backward-compat coarse role. One of: `superadmin`, `superadmin_readonly`, `msp_admin`, `msp_user`, `client_admin`, `client_user`. |
+| `groups`            | `string[]` | Standard group slugs + any module custom group slugs the user belongs to.                                                         |
+| `permissions`       | `string[]` | Merged permissions from all matched standard groups + module custom groups for this specific module. `"*"` means all permissions. |
+| `breakglass`        | `boolean`  | Present and `true` only for breakglass sessions. See Breakglass section.                                                          |
+| `breakglassExpires` | `number`   | Unix timestamp when breakglass session expires.                                                                                   |
+| `isReadonly`        | `boolean`  | Present and `true` for `superadmin_readonly` users. Block all writes.                                                             |
+| `impersonatedBy`    | `string`   | Present only when a superadmin is impersonating this user.                                                                        |
 
 ---
 
@@ -146,14 +146,14 @@ const assets = await db.query.assets.findMany({
 
 ### 4. Role hierarchy (backward compat)
 
-| Role | Typical access |
-|---|---|
-| `superadmin` | Full access, all tenants |
-| `superadmin_readonly` | Read-only, all tenants |
-| `msp_admin` | Full access within their MSP |
-| `msp_user` | Standard access within their MSP |
-| `client_admin` | Full access within their client tenant |
-| `client_user` | Standard access within their client tenant |
+| Role                  | Typical access                             |
+| --------------------- | ------------------------------------------ |
+| `superadmin`          | Full access, all tenants                   |
+| `superadmin_readonly` | Read-only, all tenants                     |
+| `msp_admin`           | Full access within their MSP               |
+| `msp_user`            | Standard access within their MSP           |
+| `client_admin`        | Full access within their client tenant     |
+| `client_user`         | Standard access within their client tenant |
 
 ---
 
@@ -187,10 +187,10 @@ authenticates through the standard `POST /api/auth/local-login` flow.
   "role": "client_admin",
   "tenantId": "client-tenant-id",
   "breakglass": true,
-  "breakglassExpires": 1709301900,    // unix timestamp (15 min from approval)
+  "breakglassExpires": 1709301900, // unix timestamp (15 min from approval)
   "isReadonly": true,
-  "permissions": ["read"],            // defense-in-depth for readonly
-  "exp": 1709301900                   // JWT exp matches breakglass window
+  "permissions": ["read"], // defense-in-depth for readonly
+  "exp": 1709301900 // JWT exp matches breakglass window
 }
 ```
 
@@ -202,7 +202,9 @@ All modules **MUST**:
 2. **Log breakglass sessions prominently** in your audit trail:
    ```ts
    if (payload.breakglass) {
-     console.warn(`[BREAKGLASS] User ${payload.sub} accessing module via breakglass`);
+     console.warn(
+       `[BREAKGLASS] User ${payload.sub} accessing module via breakglass`
+     );
      // Include breakglass: true, breakglassExpires, isReadonly in your audit log
    }
    ```
@@ -219,6 +221,7 @@ Authorization: Bearer <module-scoped-jwt>
 ```
 
 Response:
+
 ```jsonc
 {
   "active": true,
@@ -231,6 +234,7 @@ Response:
 ```
 
 Use this to:
+
 - Verify the breakglass claim is backed by a real session
 - Fetch context (reason, approver, readonly status) for your own audit logs
 - Implement module-specific breakglass policies (e.g. block exports, disable billing)
@@ -264,10 +268,10 @@ documentation:
 ```markdown
 ## Custom Groups for [Your Module]
 
-| Group Slug | Name | Permissions | Description |
-|------------|------|-------------|-------------|
-| billing-approver | Billing Approver | billing:approve | Can approve invoices over $1000 |
-| report-admin | Report Admin | reports:create, reports:schedule | Can create and schedule reports |
+| Group Slug       | Name             | Permissions                      | Description                     |
+| ---------------- | ---------------- | -------------------------------- | ------------------------------- |
+| billing-approver | Billing Approver | billing:approve                  | Can approve invoices over $1000 |
+| report-admin     | Report Admin     | reports:create, reports:schedule | Can create and schedule reports |
 ```
 
 MSP admins create these custom groups in the portal under

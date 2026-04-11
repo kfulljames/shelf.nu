@@ -76,8 +76,8 @@ Authorization: Bearer <module-scoped-jwt>
   "credentials": {
     "authMethod": "oauth2_token",
     "baseUrl": "https://acme.immy.bot/api/v1",
-    "accessToken": "<short-lived-oauth2-token>",  // short-lived (~1 hour)
-    "expiresIn": 3600                      // seconds until expiry
+    "accessToken": "<short-lived-oauth2-token>", // short-lived (~1 hour)
+    "expiresIn": 3600 // seconds until expiry
   }
 }
 ```
@@ -101,13 +101,13 @@ Authorization: Bearer <module-scoped-jwt>
 
 ### Error responses
 
-| Status | Meaning |
-|--------|---------|
-| 400 | Integration does not support credential vending (use proxy instead) |
-| 401 | Invalid or expired JWT |
-| 403 | User has no tenant assigned |
-| 404 | Integration not found or not configured for this tenant |
-| 502 | Token exchange with vendor failed |
+| Status | Meaning                                                             |
+| ------ | ------------------------------------------------------------------- |
+| 400    | Integration does not support credential vending (use proxy instead) |
+| 401    | Invalid or expired JWT                                              |
+| 403    | User has no tenant assigned                                         |
+| 404    | Integration not found or not configured for this tenant             |
+| 502    | Token exchange with vendor failed                                   |
 
 ---
 
@@ -128,7 +128,8 @@ const data = await res.json();
 ### API-key vendors (ConnectWise example)
 
 ```ts
-const { companyId, publicKey, privateKey, clientId } = credentials.apiCredentials;
+const { companyId, publicKey, privateKey, clientId } =
+  credentials.apiCredentials;
 const basicAuth = btoa(`${companyId}+${publicKey}:${privateKey}`);
 
 const res = await fetch(`${credentials.baseUrl}/company/configurations`, {
@@ -166,7 +167,11 @@ For OAuth2 vendors, the vended `accessToken` expires after the `expiresIn` perio
 3. Retry the failed vendor API call with the new token
 
 ```ts
-async function fetchWithRefresh(url: string, slug: string, moduleToken: string) {
+async function fetchWithRefresh(
+  url: string,
+  slug: string,
+  moduleToken: string
+) {
   let creds = await getVendedCredentials(slug, moduleToken);
   let res = await fetch(url, {
     headers: { Authorization: `Bearer ${creds.accessToken}` },
@@ -186,7 +191,7 @@ async function fetchWithRefresh(url: string, slug: string, moduleToken: string) 
 async function getVendedCredentials(slug: string, moduleToken: string) {
   const res = await fetch(
     `${PORTAL_URL}/api/v1/integrations/${slug}/credentials`,
-    { headers: { Authorization: `Bearer ${moduleToken}` } },
+    { headers: { Authorization: `Bearer ${moduleToken}` } }
   );
   const { credentials } = await res.json();
   return credentials;
@@ -197,10 +202,10 @@ async function getVendedCredentials(slug: string, moduleToken: string) {
 
 ## Credential Vending vs Proxy — When to Use Which
 
-| Approach | Endpoint | Use when |
-|----------|----------|----------|
+| Approach               | Endpoint                                      | Use when                                                                                |
+| ---------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------- |
 | **Credential vending** | `GET /api/v1/integrations/{slug}/credentials` | Module needs to make many vendor API calls directly (better performance, lower latency) |
-| **Proxy** | `POST /api/v1/integrations/{slug}/proxy` | Module makes occasional calls, or you prefer the portal to handle auth entirely |
+| **Proxy**              | `POST /api/v1/integrations/{slug}/proxy`      | Module makes occasional calls, or you prefer the portal to handle auth entirely         |
 
 Both approaches are available for all integrations. The proxy never exposes
 credentials; credential vending exposes only short-lived tokens for OAuth2 vendors.
@@ -226,7 +231,7 @@ export async function handler(req: Request) {
   //    short-lived access token. The raw client_secret never reaches this module.
   const credsRes = await fetch(
     `${PORTAL_URL}/api/v1/integrations/immybot/credentials`,
-    { headers: { Authorization: `Bearer ${moduleToken}` } },
+    { headers: { Authorization: `Bearer ${moduleToken}` } }
   );
 
   if (!credsRes.ok) {
@@ -253,7 +258,7 @@ export async function handler(req: Request) {
   if (!computersRes.ok) {
     return Response.json(
       { error: `ImmyBot API error: ${computersRes.status}` },
-      { status: 502 },
+      { status: 502 }
     );
   }
 
@@ -290,73 +295,73 @@ function extractMacAddresses(computer: Record<string, unknown>): string[] {
 
 ### ImmyBot
 
-| Field | Value |
-|-------|-------|
-| Slug | `immybot` |
-| Auth method | `oauth2_token` |
-| Base URL format | `https://{subdomain}.immy.bot/api/v1` |
-| Token lifetime | ~1 hour (Azure AD default) |
-| Swagger docs | `https://{subdomain}.immy.bot/swagger` |
-| Key endpoints | `/computers`, `/tenants`, `/deployments` |
+| Field           | Value                                    |
+| --------------- | ---------------------------------------- |
+| Slug            | `immybot`                                |
+| Auth method     | `oauth2_token`                           |
+| Base URL format | `https://{subdomain}.immy.bot/api/v1`    |
+| Token lifetime  | ~1 hour (Azure AD default)               |
+| Swagger docs    | `https://{subdomain}.immy.bot/swagger`   |
+| Key endpoints   | `/computers`, `/tenants`, `/deployments` |
 
 ### NinjaRMM
 
-| Field | Value |
-|-------|-------|
-| Slug | `ninja` |
-| Auth method | `oauth2_token` |
-| Base URL format | `https://{host}/api/v2` |
-| Token lifetime | ~1 hour |
-| Key endpoints | `/devices`, `/organizations`, `/devices/{id}` |
+| Field           | Value                                         |
+| --------------- | --------------------------------------------- |
+| Slug            | `ninja`                                       |
+| Auth method     | `oauth2_token`                                |
+| Base URL format | `https://{host}/api/v2`                       |
+| Token lifetime  | ~1 hour                                       |
+| Key endpoints   | `/devices`, `/organizations`, `/devices/{id}` |
 
 ### Datto RMM
 
-| Field | Value |
-|-------|-------|
-| Slug | `datto` |
-| Auth method | `oauth2_token` |
-| Base URL format | `https://{host}/api/v2` |
-| Token lifetime | ~1 hour |
-| Key endpoints | `/account/devices`, `/account/sites` |
+| Field           | Value                                |
+| --------------- | ------------------------------------ |
+| Slug            | `datto`                              |
+| Auth method     | `oauth2_token`                       |
+| Base URL format | `https://{host}/api/v2`              |
+| Token lifetime  | ~1 hour                              |
+| Key endpoints   | `/account/devices`, `/account/sites` |
 
 ### N-central
 
-| Field | Value |
-|-------|-------|
-| Slug | `ncentral` |
-| Auth method | `oauth2_token` (JWT exchange) |
-| Base URL format | `https://{host}/api` |
-| Token lifetime | varies |
-| Key endpoints | `/devices`, `/customers` |
+| Field           | Value                         |
+| --------------- | ----------------------------- |
+| Slug            | `ncentral`                    |
+| Auth method     | `oauth2_token` (JWT exchange) |
+| Base URL format | `https://{host}/api`          |
+| Token lifetime  | varies                        |
+| Key endpoints   | `/devices`, `/customers`      |
 
 ### Microsoft Entra (Graph)
 
-| Field | Value |
-|-------|-------|
-| Slug | `entra` |
-| Auth method | `oauth2_token` |
-| Base URL | `https://graph.microsoft.com/v1.0` |
-| Token lifetime | ~1 hour |
-| Key endpoints | `/users`, `/devices`, `/groups` |
+| Field          | Value                              |
+| -------------- | ---------------------------------- |
+| Slug           | `entra`                            |
+| Auth method    | `oauth2_token`                     |
+| Base URL       | `https://graph.microsoft.com/v1.0` |
+| Token lifetime | ~1 hour                            |
+| Key endpoints  | `/users`, `/devices`, `/groups`    |
 
 ### ConnectWise PSA
 
-| Field | Value |
-|-------|-------|
-| Slug | `connectwise` |
-| Auth method | `api_key` |
-| Base URL format | `https://{host}/v4_6_release/apis/3.0` |
-| Auth header | `Basic {base64(companyId+publicKey:privateKey)}` + `clientId` header |
-| Key endpoints | `/company/configurations`, `/service/tickets` |
+| Field           | Value                                                                |
+| --------------- | -------------------------------------------------------------------- |
+| Slug            | `connectwise`                                                        |
+| Auth method     | `api_key`                                                            |
+| Base URL format | `https://{host}/v4_6_release/apis/3.0`                               |
+| Auth header     | `Basic {base64(companyId+publicKey:privateKey)}` + `clientId` header |
+| Key endpoints   | `/company/configurations`, `/service/tickets`                        |
 
 ### Huntress
 
-| Field | Value |
-|-------|-------|
-| Slug | `huntress` |
-| Auth method | `api_key` |
-| Base URL | `https://api.huntress.io/v1` |
-| Auth header | `Basic {base64(apiKey:apiSecret)}` |
+| Field         | Value                                            |
+| ------------- | ------------------------------------------------ |
+| Slug          | `huntress`                                       |
+| Auth method   | `api_key`                                        |
+| Base URL      | `https://api.huntress.io/v1`                     |
+| Auth header   | `Basic {base64(apiKey:apiSecret)}`               |
 | Key endpoints | `/organizations`, `/agents`, `/incident_reports` |
 
 ---
@@ -365,10 +370,10 @@ function extractMacAddresses(computer: Record<string, unknown>): string[] {
 
 ### What the module receives
 
-| Vendor type | What is vended | Raw secret exposed? |
-|-------------|----------------|---------------------|
+| Vendor type                                      | What is vended                  | Raw secret exposed?                    |
+| ------------------------------------------------ | ------------------------------- | -------------------------------------- |
 | OAuth2 (ImmyBot, Ninja, Datto, N-central, Entra) | Short-lived access token (~1hr) | **No** — client_secret stays in portal |
-| API-key (ConnectWise, Huntress) | Raw API keys | **Yes** — no token exchange available |
+| API-key (ConnectWise, Huntress)                  | Raw API keys                    | **Yes** — no token exchange available  |
 
 ### Trust boundaries
 
@@ -404,10 +409,10 @@ during migration.
 
 ## Environment Variables (Module-Side)
 
-| Variable | Description |
-|----------|-------------|
+| Variable     | Description                                                                    |
+| ------------ | ------------------------------------------------------------------------------ |
 | `JWT_SECRET` | Shared HMAC key for local JWT validation (optional if using remote validation) |
-| `PORTAL_URL` | Portal base URL, e.g. `https://msp.bluesnoot.com` |
+| `PORTAL_URL` | Portal base URL, e.g. `https://msp.bluesnoot.com`                              |
 
 ---
 
