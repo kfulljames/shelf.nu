@@ -43,6 +43,8 @@ export async function verifyPortalToken(token: string): Promise<PortalClaims> {
   try {
     const JWKS = getJWKSClient();
 
+    // Validate issuer. Audience is checked manually below because
+    // the portal may set aud to the module's SERVER_URL or omit it.
     const { payload } = await jose.jwtVerify(token, JWKS, {
       issuer: "msp-portal",
     });
@@ -53,6 +55,21 @@ export async function verifyPortalToken(token: string): Promise<PortalClaims> {
         message: "Expected module_scoped token",
         label: "Auth",
       });
+    }
+
+    // Validate audience if present — must match our SERVER_URL
+    if (payload.aud && payload.aud !== SERVER_URL) {
+      // aud can be a string or string[]
+      const audiences = Array.isArray(payload.aud)
+        ? payload.aud
+        : [payload.aud];
+      if (!audiences.includes(SERVER_URL)) {
+        throw new ShelfError({
+          cause: null,
+          message: `Token audience mismatch: expected ${SERVER_URL}`,
+          label: "Auth",
+        });
+      }
     }
 
     return payload as unknown as PortalClaims;
