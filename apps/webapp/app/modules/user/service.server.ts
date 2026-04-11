@@ -1244,6 +1244,8 @@ export async function createUserAccountForTesting(
     permissions: [],
     isReadonly: false,
     impersonatedBy: null,
+    breakglass: false,
+    breakglassExpires: null,
     expiresAt: Math.floor(Date.now() / 1000) + 3600,
   };
 }

@@ -3,6 +3,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { provisionUserFromPortal } from "~/modules/user/portal-provisioning.server";
 import { setCookie } from "~/utils/cookies.server";
+import { Logger } from "~/utils/logger";
 import {
   exchangeAuthCode,
   verifyPortalToken,
@@ -34,13 +35,26 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     throw new Response("Module access denied", { status: 403 });
   }
 
-  // 4. Auto-provision user + org in Shelf DB
+  // 4. Log breakglass sessions prominently (MANDATORY per MODULE_RBAC_GUIDE)
+  if (claims.breakglass) {
+    Logger.warn(
+      `[BREAKGLASS] User ${claims.sub} (${claims.email}) accessing Shelf ` +
+        `via breakglass session. Expires: ${claims.breakglassExpires}. ` +
+        `Readonly: ${claims.isReadonly}. Tenant: ${claims.tenantId}.`
+    );
+  }
+
+  // 5. Auto-provision user + org in Shelf DB
   const { user, organization } = await provisionUserFromPortal(claims, token);
 
-  // 5. Map portal role to shelf role
-  const shelfRole = mapPortalRoleToShelfRole(claims.role, claims.permissions);
+  // 6. Map portal role to shelf role (considers permissions + groups)
+  const shelfRole = mapPortalRoleToShelfRole(
+    claims.role,
+    claims.permissions,
+    claims.groups
+  );
 
-  // 6. Create local session
+  // 7. Create local session
   context.setSession({
     portalToken: token,
     userId: user.id,
@@ -56,10 +70,12 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     permissions: claims.permissions,
     isReadonly: claims.isReadonly || false,
     impersonatedBy: claims.impersonatedBy || null,
+    breakglass: claims.breakglass || false,
+    breakglassExpires: claims.breakglassExpires || null,
     expiresAt: claims.exp,
   });
 
-  // 7. Redirect to assets (strip ?code= from URL)
+  // 8. Redirect to assets (strip ?code= from URL)
   return redirect("/assets", {
     headers: [
       setCookie(await setSelectedOrganizationIdCookie(organization.id)),

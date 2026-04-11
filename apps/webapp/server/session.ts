@@ -16,6 +16,8 @@ export type AuthSession = {
   permissions: string[];
   isReadonly: boolean;
   impersonatedBy: string | null;
+  breakglass: boolean;
+  breakglassExpires: number | null;
   expiresAt: number;
 };
 

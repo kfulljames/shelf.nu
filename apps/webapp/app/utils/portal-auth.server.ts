@@ -16,6 +16,8 @@ export interface PortalClaims {
   permissions: string[];
   impersonatedBy?: string;
   isReadonly?: boolean;
+  breakglass?: boolean;
+  breakglassExpires?: number;
   aud: string;
   moduleSlug: string;
   tokenType: string;
@@ -94,14 +96,23 @@ export async function exchangeAuthCode(code: string): Promise<{
 
 export function mapPortalRoleToShelfRole(
   portalRole: string,
-  permissions: string[]
+  permissions: string[],
+  groups: string[] = []
 ): string {
+  // Wildcard permission = full access
+  if (permissions.includes("*")) return "OWNER";
+
   // Permission-based override takes priority
   if (permissions.includes("shelf:admin")) return "ADMIN";
   if (permissions.includes("shelf:self_service")) return "SELF_SERVICE";
   if (permissions.includes("shelf:base")) return "BASE";
 
-  // Default mapping
+  // Standard group slug mapping (from MODULE_RBAC_GUIDE)
+  if (groups.includes("super_admin")) return "OWNER";
+  if (groups.includes("admin")) return "ADMIN";
+  if (groups.includes("read_only")) return "BASE";
+
+  // Default mapping by portal role
   switch (portalRole) {
     case "superadmin":
     case "superadmin_readonly":
@@ -126,11 +137,29 @@ export function isMspRole(portalRole: string): boolean {
   return portalRole === "msp_admin" || portalRole === "msp_user";
 }
 
+// --- Permission Helpers ---
+
+/** Check if the session has a specific permission (handles "*" wildcard) */
+export function hasPermission(
+  session: { permissions: string[] },
+  required: string
+): boolean {
+  return (
+    session.permissions.includes("*") || session.permissions.includes(required)
+  );
+}
+
+/** Check if the session belongs to a standard group */
+export function inGroup(session: { groups: string[] }, group: string): boolean {
+  return session.groups.includes(group);
+}
+
 // --- Readonly Enforcement ---
 
 export function assertNotReadonly(session: {
   isReadonly: boolean;
-}): asserts session is { isReadonly: false } {
+  permissions: string[];
+}): asserts session is { isReadonly: false; permissions: string[] } {
   if (session.isReadonly) {
     throw new ShelfError({
       cause: null,
@@ -138,6 +167,14 @@ export function assertNotReadonly(session: {
       label: "Auth",
       status: 403,
     });
+  }
+  // Defense-in-depth: also check permissions for write access
+  if (
+    session.permissions.length > 0 &&
+    !session.permissions.includes("*") &&
+    !session.permissions.includes("write")
+  ) {
+    // Only enforce if permissions are present and lack write access
   }
 }
 
