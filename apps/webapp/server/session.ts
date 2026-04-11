@@ -2,11 +2,20 @@ import { createCookieSessionStorage } from "react-router";
 import { env } from "~/utils/env";
 
 export type AuthSession = {
-  accessToken: string;
-  refreshToken: string;
+  portalToken: string;
   userId: string;
+  portalUserId: string;
   email: string;
-  expiresIn: number;
+  name: string;
+  role: string;
+  shelfRole: string;
+  tenantId: string | null;
+  tenantSlug: string;
+  modules: string[];
+  groups: string[];
+  permissions: string[];
+  isReadonly: boolean;
+  impersonatedBy: string | null;
   expiresAt: number;
 };
 

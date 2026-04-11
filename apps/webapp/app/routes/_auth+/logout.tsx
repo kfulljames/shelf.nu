@@ -1,20 +1,14 @@
 import type { ActionFunctionArgs } from "react-router";
 import { redirect } from "react-router";
-import { z } from "zod";
 
-import { assertIsPost, parseData } from "~/utils/http.server";
+import { assertIsPost } from "~/utils/http.server";
+import { getPortalLaunchUrl } from "~/utils/portal-auth.server";
 
-export async function action({ context, request }: ActionFunctionArgs) {
+export function action({ context, request }: ActionFunctionArgs) {
   assertIsPost(request);
-  const { redirectTo } = parseData(
-    await request.formData(),
-    z.object({
-      redirectTo: z.string().optional(),
-    })
-  );
 
   context.destroySession();
-  return redirect(redirectTo || "/login");
+  return redirect(getPortalLaunchUrl());
 }
 
 export function loader() {

@@ -15,13 +15,6 @@ import { sbDb } from "~/database/supabase.server";
 import { SOFT_DELETED_EMAIL_DOMAIN } from "~/emails/email.worker.server";
 import { sendEmail } from "~/emails/mail.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
-import {
-  deleteAuthAccount,
-  createEmailAuthAccount,
-  confirmExistingAuthAccount,
-  signInWithEmail,
-  updateAccountPassword,
-} from "~/modules/auth/service.server";
 
 import { DEFAULT_MAX_IMAGE_UPLOAD_SIZE } from "~/utils/constants";
 import { dateTimeInUnix } from "~/utils/date-time-in-unix";
@@ -222,7 +215,6 @@ export async function createUserOrAttachOrg({
   email,
   organizationId,
   roles,
-  password,
   firstName,
   lastName,
   createdWithInvite = false,
@@ -230,7 +222,7 @@ export async function createUserOrAttachOrg({
   Partial<Pick<User, "lastName">> & {
     organizationId: Organization["id"];
     roles: OrganizationRoles[];
-    password: string;
+    password?: string;
     createdWithInvite: boolean;
   }) {
   try {
@@ -244,35 +236,14 @@ export async function createUserOrAttachOrg({
 
     if (findError) throw findError;
 
-    // If no User exists, create one.
-    // First try creating a fresh auth account. If that fails (email already
-    // exists in Supabase from a previous unconfirmed signup), fall back to
-    // confirming the existing auth account. The invite JWT (sent to the
-    // user's email) serves as proof of email ownership.
+    // If no User exists, create one in the app DB.
+    // Portal manages authentication — no Supabase Auth account needed.
     if (!shelfUser?.id) {
-      let authAccount = await createEmailAuthAccount(email, password).catch(
-        () => null
-      );
-
-      if (!authAccount) {
-        authAccount = await confirmExistingAuthAccount(email, password).catch(
-          () => null
-        );
-      }
-
-      if (!authAccount) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "We are facing some issue with your account. " +
-            "Please try again or contact support.",
-          label,
-        });
-      }
+      const userId = generateId();
 
       const newUser = await createUser({
         email,
-        userId: authAccount.id,
+        userId,
         username: randomUsernameFromEmail(email),
         organizationId,
         roles,
@@ -891,15 +862,7 @@ export async function updateUser(
 
     if (tmUpdateError) throw tmUpdateError;
 
-    if (
-      updateUserPayload.password &&
-      updateUserPayload.password.trim() !== ""
-    ) {
-      await updateAccountPassword(
-        updateUserPayload.id,
-        updateUserPayload.password
-      );
-    }
+    // Password management is handled by the portal — no local password updates
 
     return updatedUser;
   } catch (cause) {
@@ -943,26 +906,6 @@ export async function updateUserEmail({
   newEmail: string;
 }) {
   try {
-    /**
-     * Update the user in supabase auth
-     */
-    const { error } = await getSupabaseAdmin().auth.admin.updateUserById(
-      userId,
-      {
-        email: newEmail,
-      }
-    );
-
-    if (error) {
-      throw new ShelfError({
-        cause: error,
-        message:
-          "Failed to update email in auth. Please try again and if the issue persists, contact support",
-        additionalData: { userId, newEmail, currentEmail },
-        label,
-      });
-    }
-
     /** Update the user in the DB */
     const { data: updatedUser, error: updateError } = await sbDb
       .from("User")
@@ -972,14 +915,9 @@ export async function updateUserEmail({
       .single();
 
     if (updateError) {
-      // On failure, revert the change of the user update in auth
-      void getSupabaseAdmin().auth.admin.updateUserById(userId, {
-        email: currentEmail,
-      });
-
       throw new ShelfError({
         cause: updateError,
-        message: "Failed to update email in shelf",
+        message: "Failed to update email",
         additionalData: { userId, newEmail, currentEmail },
         label,
       });
@@ -1276,38 +1214,38 @@ export { defaultUserCategories };
 /** THis function is used just for integration tests as it combines the creation of auth account and user entry */
 export async function createUserAccountForTesting(
   email: string,
-  password: string,
+  _password: string,
   username: string
 ): Promise<AuthSession | null> {
-  const authAccount = await createEmailAuthAccount(email, password).catch(
-    () => null
-  );
-
-  if (!authAccount) {
-    return null;
-  }
-
-  const authSession = await signInWithEmail(email, password).catch(() => null);
-
-  // user account created but no session
-  // we should delete the user account to allow retry create account again
-  if (!authSession) {
-    await deleteAuthAccount(authAccount.id);
-    return null;
-  }
+  const userId = generateId();
 
   const user = await createUser({
-    email: authSession.email,
-    userId: authSession.userId,
+    email,
+    userId,
     username,
   }).catch(() => null);
 
   if (!user) {
-    await deleteAuthAccount(authAccount.id);
     return null;
   }
 
-  return authSession;
+  return {
+    portalToken: "test-token",
+    userId,
+    portalUserId: userId,
+    email,
+    name: username,
+    role: "msp_admin",
+    shelfRole: "ADMIN",
+    tenantId: null,
+    tenantSlug: "test",
+    modules: ["shelf"],
+    groups: [],
+    permissions: [],
+    isReadonly: false,
+    impersonatedBy: null,
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+  };
 }
 
 export async function revokeAccessToOrganization({

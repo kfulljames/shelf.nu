@@ -148,6 +148,10 @@ export async function getOrganizationsBySsoDomain(emailDomain: string) {
         const sso = ssoDetailMap.get(org.ssoDetailsId!) ?? null;
         return {
           ...org,
+          // Portal columns — not in Supabase types until migration runs
+          portalTenantId: (org as any).portalTenantId ?? null,
+          portalTenantSlug: (org as any).portalTenantSlug ?? null,
+          parentPortalTenantId: (org as any).parentPortalTenantId ?? null,
           createdAt: new Date(org.createdAt),
           updatedAt: new Date(org.updatedAt),
           barcodesEnabledAt: org.barcodesEnabledAt
@@ -1365,4 +1369,80 @@ function filterRelevantSubscriptions(
     (sub) =>
       isTierSubscription(sub) || isAddonForOrganization(sub, organizationId)
   );
+}
+
+// --- Portal Multi-Tenant Org Visibility ---
+
+/**
+ * Returns the organizations visible to a user based on their portal role.
+ *
+ * - superadmin / superadmin_readonly: all TEAM orgs
+ * - msp_admin / msp_user: MSP org + all client orgs under the MSP
+ * - client_admin / client_user: own client org only
+ */
+export async function getOrganizationsForPortalUser({
+  portalRole,
+  portalTenantId,
+}: {
+  portalRole: string;
+  portalTenantId: string | null;
+}) {
+  // Portal columns use `as any` until Supabase types are regenerated after migration
+
+  // Superadmin: see all orgs
+  if (portalRole === "superadmin" || portalRole === "superadmin_readonly") {
+    const { data, error: fetchError } = await (sbDb.from("Organization") as any)
+      .select("id, name, type, portalTenantId, portalTenantSlug")
+      .eq("type", "TEAM")
+      .order("name");
+
+    if (fetchError) throw fetchError;
+    return (data || []) as Array<{
+      id: string;
+      name: string;
+      type: string;
+      portalTenantId: string | null;
+      portalTenantSlug: string | null;
+    }>;
+  }
+
+  // MSP roles: see MSP org + all client orgs under this MSP
+  if (portalRole === "msp_admin" || portalRole === "msp_user") {
+    if (!portalTenantId) return [];
+
+    const { data, error: fetchError } = await (sbDb.from("Organization") as any)
+      .select("id, name, type, portalTenantId, portalTenantSlug")
+      .eq("type", "TEAM")
+      .or(
+        `portalTenantId.eq.${portalTenantId},parentPortalTenantId.eq.${portalTenantId}`
+      )
+      .order("name");
+
+    if (fetchError) throw fetchError;
+    return (data || []) as Array<{
+      id: string;
+      name: string;
+      type: string;
+      portalTenantId: string | null;
+      portalTenantSlug: string | null;
+    }>;
+  }
+
+  // Client roles: own org only
+  if (!portalTenantId) return [];
+
+  const { data, error: fetchError } = await (sbDb.from("Organization") as any)
+    .select("id, name, type, portalTenantId, portalTenantSlug")
+    .eq("type", "TEAM")
+    .eq("portalTenantId", portalTenantId)
+    .order("name");
+
+  if (fetchError) throw fetchError;
+  return (data || []) as Array<{
+    id: string;
+    name: string;
+    type: string;
+    portalTenantId: string | null;
+    portalTenantSlug: string | null;
+  }>;
 }

@@ -10,12 +10,7 @@ import { initEnv } from "~/utils/env";
 import { ShelfError } from "~/utils/error";
 
 import { logger } from "./logger";
-import {
-  ensureHostHeaders,
-  protect,
-  refreshSession,
-  urlShortener,
-} from "./middleware";
+import { ensureHostHeaders, protect, urlShortener } from "./middleware";
 import { runWithRequestCache } from "./request-cache.server";
 import { authSessionKey, createSessionStorage } from "./session";
 import type { FlashData, SessionData } from "./session";
@@ -123,37 +118,20 @@ export default createHonoServer<ServerEnv>({
     );
 
     /**
-     * Add refresh session middleware
-     *
-     */
-    server.use("*", refreshSession());
-
-    /**
      * Add protected routes middleware
-     *
+     * Portal handles authentication — no login page, redirect to portal
      */
     server.use(
       "*",
       protect({
-        onFailRedirectTo: "/login",
         publicPaths: [
           "/",
-          "/_root", // Root layout loader - needed for all pages including public routes
-          "/accept-invite/:path*", // :path* is a wildcard that will match any path after /accept-invite
-          "/forgot-password",
-          "/join",
-          "/login",
-          "/sso-login",
-          "/oauth/callback",
+          "/_root",
+          "/portal-callback",
           "/logout",
-          "/otp",
-          "/resend-otp",
-          "/reset-password",
-          "/send-otp",
           "/healthcheck",
           "/api/public-stats",
           "/api/oss-friends",
-          "/api/stripe-webhook",
           "/qr",
           "/qr/:qrId",
           "/qr/:qrId/not-logged-in",

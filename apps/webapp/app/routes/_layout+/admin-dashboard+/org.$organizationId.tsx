@@ -38,7 +38,13 @@ import { isFormProcessing } from "~/utils/form";
 import { getParams, payload, error, parseData } from "~/utils/http.server";
 import { extractCSVDataFromContentImport } from "~/utils/import.server";
 import { requireAdmin } from "~/utils/roles.server";
-import { validateDomains } from "~/utils/sso.server";
+/** Inline domain validator — sso.server.ts was removed during portal migration */
+function validateDomains(rawDomains: string): string[] {
+  return rawDomains
+    .split(",")
+    .map((d) => d.trim())
+    .filter(Boolean);
+}
 
 export const meta = () => [
   { title: appendToMetaTitle("Organization details") },

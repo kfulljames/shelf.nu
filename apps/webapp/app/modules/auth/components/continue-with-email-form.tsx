@@ -4,7 +4,7 @@ import { z } from "zod";
 import Input from "~/components/forms/input";
 import { Button } from "~/components/shared/button";
 
-import type { action } from "~/routes/_auth+/send-otp";
+// send-otp route removed — portal manages authentication
 import { validEmail } from "~/utils/misc";
 import { tw } from "~/utils/tw";
 export const SendOtpSchema = z.object({
@@ -24,7 +24,7 @@ export const SendOtpSchema = z.object({
 });
 
 export function ContinueWithEmailForm({ mode }: { mode: "login" | "signup" }) {
-  const sendOTP = useFetcher<typeof action>();
+  const sendOTP = useFetcher<any>();
   const { data, state } = sendOTP;
   const zo = useZorm("NewQuestionWizardScreen", SendOtpSchema);
 

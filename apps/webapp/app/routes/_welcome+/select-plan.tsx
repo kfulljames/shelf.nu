@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 import type { Currency, Prisma } from "@prisma/client";
-import { data, type LoaderFunctionArgs, type MetaFunction } from "react-router";
+import {
+  data,
+  redirect,
+  type LoaderFunctionArgs,
+  type MetaFunction,
+} from "react-router";
 import { useLoaderData, useNavigation } from "react-router";
 import { Form } from "~/components/custom-form";
 import { ShelfSymbolLogo } from "~/components/marketing/logos";
@@ -38,6 +43,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId } = authSession;
 
   try {
+    // Portal users skip plan selection — billing is handled externally
+    if (!config.enablePremiumFeatures) {
+      return redirect("/assets");
+    }
+
     await requirePermission({
       userId,
       request,

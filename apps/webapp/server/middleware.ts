@@ -2,15 +2,10 @@ import { createMiddleware } from "hono/factory";
 import { pathToRegexp } from "path-to-regexp";
 import { getSession } from "remix-hono/session";
 
-import {
-  refreshAccessToken,
-  validateSession,
-} from "~/modules/auth/service.server";
 import { SERVER_URL } from "~/utils/env";
-import { ShelfError } from "~/utils/error";
 import { safeRedirect } from "~/utils/http.server";
 import { isQrId } from "~/utils/id";
-import { Logger } from "~/utils/logger";
+import { getPortalLaunchUrl } from "~/utils/portal-auth.server";
 import type { FlashData, SessionData } from "./session";
 import { authSessionKey } from "./session";
 
@@ -63,60 +58,40 @@ export function ensureHostHeaders() {
  */
 export function protect({
   publicPaths,
-  onFailRedirectTo,
 }: {
   publicPaths: string[];
-  onFailRedirectTo: string;
+  onFailRedirectTo?: string;
 }) {
   return createMiddleware(async (c, next) => {
     // Skip authentication for internal Remix/framework routes (manifest, etc.)
-    // These are created by lazy route discovery and should never require auth
     if (c.req.path.startsWith("/__")) {
       return next();
     }
 
-    // TODO: Remove this workaround when migrating to React Router v7 + react-router-hono-server v2
-    // v2 of react-router-hono-server should handle .data suffix internally
-    // For single fetch routes (*.data), strip the .data suffix before checking public paths
-    // This ensures /login.data is treated the same as /login for auth purposes
+    // For single fetch routes (*.data), strip the .data suffix before checking
     const pathToCheck = c.req.path.endsWith(".data")
       ? c.req.path.slice(0, -5)
       : c.req.path;
 
-    const isPublic = pathMatch(publicPaths, pathToCheck);
-
-    if (isPublic) {
+    if (pathMatch(publicPaths, pathToCheck)) {
       return next();
     }
+
     const session = getSession<SessionData, FlashData>(c);
     const auth = session.get(authSessionKey);
 
     if (!auth) {
-      session.flash(
-        "errorMessage",
-        "This content is only available to logged in users."
-      );
-
-      return c.redirect(`${onFailRedirectTo}?redirectTo=${c.req.path}`);
+      // Redirect to portal for authentication
+      return c.redirect(getPortalLaunchUrl());
     }
-    const isValidSession = await validateSession(auth.refreshToken);
 
-    if (!isValidSession) {
-      session.flash(
-        "errorMessage",
-        "Session might have expired. Please log in again."
-      );
+    // Check if portal token is expired
+    if (auth.expiresAt * 1000 < Date.now()) {
       session.unset(authSessionKey);
-      Logger.error(
-        new ShelfError({
-          cause: null,
-          message: "Session might have expired. Please log in again.",
-          label: "Auth",
-          shouldBeCaptured: false,
-        })
-      );
-      return c.redirect(`${onFailRedirectTo}?redirectTo=${c.req.path}`);
+      // Redirect to portal for re-auth
+      return c.redirect(getPortalLaunchUrl());
     }
+
     return next();
   });
 }
@@ -131,42 +106,6 @@ function pathMatch(paths: string[], requestPath: string) {
   }
 
   return false;
-}
-
-function isExpiringSoon(expiresAt: number | undefined) {
-  if (!expiresAt) {
-    return true;
-  }
-
-  return (expiresAt - 60 * 0.1) * 1000 < Date.now(); // 1 minute left before token expires
-}
-
-/**
- * Refresh access token middleware
- *
- */
-export function refreshSession() {
-  return createMiddleware(async (c, next) => {
-    const session = getSession<SessionData, FlashData>(c);
-    const auth = session.get(authSessionKey);
-
-    if (!auth || !isExpiringSoon(auth.expiresAt)) {
-      return next();
-    }
-
-    try {
-      session.set(authSessionKey, await refreshAccessToken(auth.refreshToken));
-    } catch (_cause) {
-      session.flash(
-        "errorMessage",
-        "You have been logged out. Please log in again."
-      );
-
-      session.unset(authSessionKey);
-    }
-
-    return next();
-  });
 }
 
 /**

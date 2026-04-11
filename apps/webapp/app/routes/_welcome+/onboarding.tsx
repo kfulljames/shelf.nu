@@ -30,10 +30,7 @@ import When from "~/components/when/when";
 import { config } from "~/config/shelf.config";
 import { sendEmail } from "~/emails/mail.server";
 import { onboardingEmailText } from "~/emails/onboarding-email";
-import {
-  getAuthUserById,
-  signInWithEmail,
-} from "~/modules/auth/service.server";
+// Auth is handled by portal — no direct Supabase Auth imports needed
 import { upsertBusinessIntel } from "~/modules/business-intel/service.server";
 import {
   ROLE_OPTIONS,
@@ -241,10 +238,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       return redirect("/assets");
     }
 
-    const authUser = await getAuthUserById(userId);
-
-    const userSignedUpWithPassword =
-      authUser.user_metadata.signup_method === "email-password";
+    // Portal users don't sign up with passwords
+    const userSignedUpWithPassword = false;
 
     const organizationMembership = organizationIdParam
       ? (
@@ -435,18 +430,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
-    /**
-     * When setting password as part of onboarding, the session gets destroyed as part of the normal password reset flow.
-     * In this case, we need to create a new session for the user.
-     * We only need to do that if the user didn't sign up using password. In that case the password gets set in the updateUser above
-     */
-    if (user && !metadata.userSignedUpWithPassword) {
-      //making sure new session is created.
-      const authSession = await signInWithEmail(user.email, password as string);
-      if (authSession) {
-        context.setSession(authSession);
-      }
-    }
+    // Portal handles authentication — no local session refresh needed
 
     /** We create the stripe customer when the user gets onboarded.
      * This is to make sure that we have a stripe customer for the user.

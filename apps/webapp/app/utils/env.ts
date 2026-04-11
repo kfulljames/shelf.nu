@@ -32,6 +32,7 @@ declare global {
       SUPABASE_URL: string;
       SUPABASE_SERVICE_ROLE: string;
       SERVER_URL: string;
+      PORTAL_URL: string;
       URL_SHORTENER: string;
       SUPABASE_ANON_PUBLIC: string;
       SESSION_SECRET: string;
@@ -129,9 +130,16 @@ export function initEnv() {
  * Server env
  */
 export const SERVER_URL = getEnv("SERVER_URL").replace(/\/+$/, "");
-export const SUPABASE_SERVICE_ROLE = getEnv("SUPABASE_SERVICE_ROLE");
+export const PORTAL_URL = getEnv("PORTAL_URL", {
+  isSecret: false,
+}).replace(/\/+$/, "");
+export const SUPABASE_SERVICE_ROLE = getEnv("SUPABASE_SERVICE_ROLE", {
+  isSecret: true,
+  isRequired: false,
+});
 export const INVITE_TOKEN_SECRET = getEnv("INVITE_TOKEN_SECRET", {
   isSecret: true,
+  isRequired: false,
 });
 export const URL_SHORTENER = getEnv("URL_SHORTENER", {
   isRequired: false,

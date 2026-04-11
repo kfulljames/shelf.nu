@@ -45,6 +45,19 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId } = authSession;
 
   try {
+    // Only admins and owners can create workspaces
+    if (
+      authSession.shelfRole !== "ADMIN" &&
+      authSession.shelfRole !== "OWNER"
+    ) {
+      throw new ShelfError({
+        cause: null,
+        message: "Only administrators can create workspaces",
+        label: "Auth",
+        status: 403,
+      });
+    }
+
     const { organizationId } = await getSelectedOrganization({
       userId,
       request,

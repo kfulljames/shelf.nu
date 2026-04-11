@@ -26,7 +26,6 @@ import {
 
 import { sendEmail } from "~/emails/mail.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
-import { refreshAccessToken } from "~/modules/auth/service.server";
 import {
   getUserByID,
   getUserWithContact,
@@ -49,7 +48,7 @@ import {
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
-import { getConfiguredSSODomains } from "~/utils/sso.server";
+// SSO domain validation removed — portal manages SSO
 
 // First we define our intent schema
 const IntentSchema = z.object({
@@ -235,7 +234,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
         if (parsedData.type !== "initiateEmailChange")
           throw new Error("Invalid payload type");
 
-        const ssoDomains = await getConfiguredSSODomains();
         const user = await getUserByID(userId, {
           select: {
             id: true,
@@ -245,12 +243,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
           } satisfies Prisma.UserSelect,
         });
         // Validate the payload using our schema
+        // SSO domain restrictions removed — portal manages SSO
         const { email: newEmail } = parseData(
           await request.clone().formData(),
-          createChangeEmailSchema(
-            email,
-            ssoDomains.map((d) => d.domain)
-          ),
+          createChangeEmailSchema(email, []),
           {
             additionalData: { userId },
           }
@@ -335,15 +331,11 @@ export async function action({ context, request }: ActionFunctionArgs) {
         /** Update the user's email */
         await updateUserEmail({ userId, currentEmail: email, newEmail });
 
-        /** Refresh the session so it has the up-to-date email */
-        const { refreshToken } = authSession;
-        const newSession = await refreshAccessToken(refreshToken);
-        context.setSession(newSession);
-        /** Destroy all other sessions */
-        await getSupabaseAdmin().auth.admin.signOut(
-          newSession.accessToken,
-          "others"
-        );
+        /** Update the portal session email */
+        context.setSession({
+          ...authSession,
+          email: newEmail,
+        });
 
         sendNotification({
           title: "Email updated",

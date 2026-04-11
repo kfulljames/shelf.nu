@@ -63,10 +63,10 @@ vi.mock("~/utils/stripe.server", () => ({
   createStripeCustomer: vi.fn(),
 }));
 
-// why: preventing auth service from hitting database when setting password
+// why: auth service stubs — portal manages authentication
 vi.mock("~/modules/auth/service.server", () => ({
-  signInWithEmail: vi.fn(),
-  getAuthUserById: vi.fn(),
+  signInWithEmail: vi.fn().mockRejectedValue(new Error("not available")),
+  getAuthUserById: vi.fn().mockRejectedValue(new Error("not available")),
 }));
 
 const { action } = await import("../../app/routes/_welcome+/onboarding");
@@ -80,7 +80,6 @@ const { upsertBusinessIntel } = await import(
   "~/modules/business-intel/service.server"
 );
 const { createStripeCustomer } = await import("~/utils/stripe.server");
-const { signInWithEmail } = await import("~/modules/auth/service.server");
 
 function createRequestBody(entries: Record<string, string | undefined>) {
   const params = new URLSearchParams();
@@ -136,7 +135,6 @@ describe("onboarding action validation", () => {
       updatedAt: new Date().toISOString(),
     });
     vi.mocked(createStripeCustomer).mockResolvedValue({} as any);
-    vi.mocked(signInWithEmail).mockResolvedValue(null);
   });
 
   function buildRequest(

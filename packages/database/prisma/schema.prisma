@@ -117,11 +117,17 @@ model User {
   roleChangesReceived  RoleChangeLog[] @relation("roleChangeTarget")
   roleChangesPerformed RoleChangeLog[] @relation("roleChangeActor")
 
+  // MSP Portal integration fields
+  portalUserId   String? @unique // MSP Portal sub claim (UUID)
+  portalTenantId String?         // MSP Portal tenant UUID
+  portalRole     String?         // Last known portal role
+
   @@unique([email, username])
   @@index([firstName, lastName])
   // Indexes for foreign keys
   @@index([tierId])
   @@index([lastSelectedOrganizationId])
+  @@index([portalUserId])
 }
 
 model UserContact {
@@ -760,6 +766,11 @@ model Organization {
   locationMergeProposals LocationMergeProposal[]
   serviceRequests        ServiceRequest[]
 
+  // MSP Portal integration fields
+  portalTenantId       String? @unique // MSP Portal tenant UUID
+  portalTenantSlug     String?         // MSP Portal tenant slug
+  parentPortalTenantId String?         // Parent MSP tenant ID (for client orgs)
+
   // Migration flag to track if sequential IDs have been generated for this organization's existing assets
   hasSequentialIdsMigrated Boolean @default(false)
 
@@ -775,6 +786,8 @@ model Organization {
   // Indexes for foreign keys
   @@index([userId])
   @@index([ssoDetailsId])
+  @@index([portalTenantId])
+  @@index([parentPortalTenantId])
 }
 
 model UserOrganization {

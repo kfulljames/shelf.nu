@@ -20,7 +20,7 @@ import type { ErrorLabel } from "~/utils/error";
 import { ShelfError, isLikeShelfError } from "~/utils/error";
 import { getCurrentSearchParams } from "~/utils/http.server";
 import { getParamsValues } from "~/utils/list";
-import { checkDomainSSOStatus, doesSSOUserExist } from "~/utils/sso.server";
+// SSO validation removed — portal manages authentication and access
 import { generateRandomCode, inviteEmailText, splitName } from "./helpers";
 import { processInvitationMessage } from "./message-validator.server";
 import type { InviteWithInviterAndOrg } from "./types";
@@ -36,48 +36,14 @@ const INVITE_EMAIL_SPACING_MS = Math.ceil(
 );
 
 /**
- * Validates invite based on SSO configuration, considering target organization
- * @param email - Email of the user being invited
- * @param organizationId - ID of the organization the user is being invited to
- * @throws ShelfError with appropriate message if invite is not allowed
+ * Validates invite eligibility.
+ * Portal manages SSO and access — no SSO domain checks needed.
  */
 async function validateInvite(
-  email: string,
-  organizationId: string
+  _email: string,
+  _organizationId: string
 ): Promise<void> {
-  const domainStatus = await checkDomainSSOStatus(email);
-
-  // Case 1: Domain not configured for SSO - allow normal invite
-  if (!domainStatus.isConfiguredForSSO) {
-    return;
-  }
-
-  // Case 2: Check if the target organization is the one with SCIM. If it is, don't allow invite as the user needs to be managed via the IDP
-  if (domainStatus.linkedOrganization?.id === organizationId) {
-    throw new ShelfError({
-      cause: null,
-      message:
-        "This email domain uses SCIM SSO for this workspace. Users are managed automatically through your identity provider.",
-      label: "Invite",
-      status: 400,
-      shouldBeCaptured: false,
-    });
-  }
-
-  // Case 3: Domain configured for SSO but not linked to THIS org (Pure SSO)
-  if (domainStatus.isConfiguredForSSO) {
-    const ssoUserExists = await doesSSOUserExist(email);
-    if (!ssoUserExists) {
-      throw new ShelfError({
-        cause: null,
-        message:
-          "This email domain uses SSO authentication. The user needs to sign up via SSO to get access to the organization.",
-        label: "Invite",
-        status: 400,
-        shouldBeCaptured: false,
-      });
-    }
-  }
+  // No-op: portal manages authentication and access control
 }
 
 //can be used in ui when user enters email so that we can tell invitee is already invited
