@@ -138,7 +138,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
         context.destroySession();
 
-        return redirect("/forgot-password");
+        // Password management is handled by the portal
+        return redirect("/assets");
       }
       case "updateUser": {
         if (parsedData.type !== "updateUser")

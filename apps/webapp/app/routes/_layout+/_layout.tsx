@@ -213,6 +213,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         hasUnpaidInvoice: user.hasUnpaidInvoice,
         warnForNoPaymentMethod: user.warnForNoPaymentMethod,
         needsSequentialIdMigration,
+        // Portal context for UI rendering
+        isReadonly: authSession.isReadonly || false,
+        isBreakglass: authSession.breakglass || false,
+        portalRole: authSession.role || null,
         /** THis is used to disable team organizations when the currentOrg is Team and no subscription is present  */
         disabledTeamOrg: isAdmin
           ? false

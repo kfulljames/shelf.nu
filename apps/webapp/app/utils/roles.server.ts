@@ -1,5 +1,6 @@
 import type { SsoDetails } from "@prisma/client";
 import { OrganizationRoles, Roles } from "@prisma/client";
+import type { AppLoadContext } from "react-router";
 import { sbDb } from "~/database/supabase.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
 import { ShelfError } from "./error";
@@ -7,6 +8,7 @@ import type {
   PermissionAction,
   PermissionEntity,
 } from "./permissions/permission.data";
+import { PermissionAction as PA } from "./permissions/permission.data";
 import { validatePermission } from "./permissions/permission.validator.server";
 
 export async function requireUserWithPermission(name: Roles, userId: string) {
@@ -94,19 +96,31 @@ export async function requirePermission({
   request,
   entity,
   action,
+  context,
 }: {
   userId: string;
   request: Request;
   entity: PermissionEntity;
   action: PermissionAction;
+  context?: AppLoadContext;
 }) {
-  /**
-   * This can be very slow and consuming as there are a few queries with a few joins and this running on every loader/action makes it slow
-   * We need to find a  strategy to make it more performant. Idea:
-   * 1. Have a very light weight query that fetches the lastUpdated in relation to userOrganizationRoles. THis can be done both for roles and organizations
-   * 2. Store it in a cookie
-   * 3. If they mismatch, make the big query to check the actual data
-   */
+  // Enforce readonly for portal users on write actions
+  if (context && action !== PA.read) {
+    try {
+      const session = context.getSession();
+      if (session.isReadonly) {
+        throw new ShelfError({
+          cause: null,
+          message: "Your account has read-only access",
+          label: "Auth",
+          status: 403,
+        });
+      }
+    } catch (cause) {
+      // Re-throw ShelfErrors (readonly), ignore session-not-found
+      if (cause instanceof ShelfError) throw cause;
+    }
+  }
 
   const {
     organizationId,

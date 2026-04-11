@@ -51,9 +51,7 @@ export default function QrNotLoggedIn() {
             <Button
               variant="primary"
               className="mb-4 max-w-full"
-              to={encodeURI(
-                `/login?redirectTo=${searchParams.get("redirectTo")}`
-              )}
+              to="/portal-callback"
             >
               Log In
             </Button>
@@ -70,14 +68,7 @@ export default function QrNotLoggedIn() {
         </div>
       </div>
       <div className="mt-6 text-center text-sm text-gray-500">
-        Don't have an account?{" "}
-        <Button
-          variant="link"
-          data-test-id="signupButton"
-          to={encodeURI(`/join?redirectTo=${searchParams.get("redirectTo")}`)}
-        >
-          Sign up
-        </Button>
+        Access is managed through the MSP Portal.
       </div>
     </>
   );
