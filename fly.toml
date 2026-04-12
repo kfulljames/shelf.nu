@@ -7,10 +7,6 @@ swap_size_mb = 512
 [build]
 dockerfile = "Dockerfile"
 
-[deploy]
-strategy = "bluegreen"
-release_command = "npx prisma migrate deploy"
-
 [env]
 NODE_ENV = "production"
 PORT = "8080"
