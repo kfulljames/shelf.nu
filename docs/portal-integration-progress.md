@@ -34,11 +34,11 @@ lands. Status markers:
 
 ## Stage 2 — Breakglass
 
-| Chunk                               | Status  | Notes                                                                                                                                                                                  |
-| ----------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2.1 Breakglass banner               | ✅ done | `apps/webapp/app/components/breakglass/breakglass-banner.tsx` + layout wiring + `usePortalSession`/`useReadonly` hooks. Commit `93d5612`.                                              |
-| 2.2 Read-only writeblock middleware | ✅ done | `enforceReadonly` in `apps/webapp/server/middleware.ts`. Blocks POST/PUT/PATCH/DELETE for readonly sessions; excludes `/logout`, `/portal-callback`, `/healthcheck`. Commit `93d5612`. |
-| 2.3 Audit log breakglass context    | ❌ TODO | No audit-log plumbing wired. Needs a hunt for existing audit patterns in Shelf.                                                                                                        |
+| Chunk                               | Status           | Notes                                                                                                                                                                                                                                                                                                                |
+| ----------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2.1 Breakglass banner               | ✅ done          | `apps/webapp/app/components/breakglass/breakglass-banner.tsx` + layout wiring + `usePortalSession`/`useReadonly` hooks. Commit `93d5612`.                                                                                                                                                                            |
+| 2.2 Read-only writeblock middleware | ✅ done          | `enforceReadonly` in `apps/webapp/server/middleware.ts`. Blocks POST/PUT/PATCH/DELETE for readonly sessions; excludes `/logout`, `/portal-callback`, `/healthcheck`. Commit `93d5612`.                                                                                                                               |
+| 2.3 Audit log breakglass context    | ✅ done (scoped) | Shelf has no persistent access-audit table. The plan's intent is implemented as structured warn-level events via `Logger.warn({ event, ... })`. `enforceReadonly` emits `portal.readonly_block` on every blocked write; `portal-callback.tsx` emits `portal.breakglass_login` on breakglass entry. Commit `63da427`. |
 
 ## Stage 3 — Multi-client switcher
 
@@ -85,6 +85,12 @@ lands. Status markers:
   registered in `beforeAll` and re-applied after each `resetHandlers` call.
 - **Per-tenant credential cache** (`credentials.server.ts`) is in-process.
   It's reset between tests via `__resetVendedCredentialsCacheForTest()`.
+- **Pre-existing test failures** in
+  `apps/webapp/app/modules/user/service.server.test.ts`
+  (6 cases in `createUserOrAttachOrg`) fail on this branch AND on the
+  parent commit — a copy-drift between an error message in the source
+  and its fixture. Unrelated to the portal integration work. Worth
+  fixing separately.
 
 ## Decisions still deferred (called out in the plan, unblock before coding)
 
