@@ -115,3 +115,42 @@ lands. Status markers:
   Requires a live Postgres to run `prisma migrate`.
 - **Cron authentication for scheduled syncs** (Chunk 4.4). See
   "Stage 4, 4.4" above.
+- **Operator-editable portal URL.** `PORTAL_URL` is currently env-only.
+  Future: a small admin-only UI surface to view/edit it (and any other
+  bootstrap config) without redeploying. The URL itself isn't sensitive
+  so plain DB storage is fine; the same mechanism should apply per-field
+  encryption (AES-GCM, key from env or KMS) the moment any sensitive
+  setting is added.
+
+## Secrets posture (current vs. future)
+
+Today, **Shelf holds no long-lived secret that talks to the portal**.
+This is by design — the credential-vending model means every portal
+call is authenticated by either:
+
+- the user's short-lived module-scoped JWT (carried in the session
+  cookie, signed not encrypted, expires in 30 min), or
+- a one-time `?code=` from the launch redirect (not stored), or
+- nothing at all (`/.well-known/jwks.json` is public).
+
+That makes encryption-at-rest a non-issue for the portal integration
+**as it stands**. Vendor API keys (ConnectWise, ImmyBot, Ninja, Entra)
+live encrypted in the **portal's** DB and are never copied to Shelf;
+only short-lived vended tokens reach Shelf, and they live in-memory
+only (`credentials.server.ts` cache), never on disk.
+
+The picture changes the moment Shelf needs to call the portal **without
+a logged-in user**:
+
+- Nightly cron sync (Chunk 4.4) that pulls fresh ConnectWise companies.
+- Inbound webhooks from the portal that need HMAC verification.
+- Any background job that touches the portal API.
+
+For those, Shelf would need a portal-issued **service-account token**
+or a shared **webhook HMAC secret**. Neither is defined in
+`MODULE_INTEGRATION.md` today, so the design has to come from the
+portal side first. When it lands, the storage rule is: **AES-GCM at
+rest, with the encryption key supplied via env / KMS** — never
+plaintext in the DB. A `SystemConfig` (or similar) singleton with
+per-field `encrypted: boolean` is the right shape; building it before
+there's an actual sensitive value to store would be premature.
