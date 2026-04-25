@@ -34,6 +34,7 @@ process.env.SUPABASE_ANON_PUBLIC = "{ANON_PUBLIC}";
 process.env.SUPABASE_SERVICE_ROLE = "{SERVICE_ROLE}";
 process.env.SUPABASE_URL = "https://supabase-project.supabase.co";
 process.env.SERVER_URL = "http://localhost:3000";
+process.env.PORTAL_URL = "https://portal.test";
 process.env.APP_NAME = "Shelf";
 process.env.ENABLE_PREMIUM_FEATURES = "true";
 process.env.STRIPE_SECRET_KEY = "stripe-secret-key";
