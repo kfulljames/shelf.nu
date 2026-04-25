@@ -15,7 +15,7 @@ lands. Status markers:
 | -------------------------- | ----------------------------------------- | ---------------------------------------------- |
 | 1 — Portal auth foundation | 1.1, 1.2, 1.3 (existing), 1.4, 1.5 tested | 1.6 (tests), 1.7 (Supabase removal)            |
 | 2 — Breakglass             | 2.1, 2.2                                  | 2.3 (audit log context)                        |
-| 3 — Multi-client switcher  | —                                         | 3.1, 3.2                                       |
+| 3 — Multi-client switcher  | 3.1, 3.2                                  | —                                              |
 | 4 — ConnectWise sync       | 4.1, 4.2, 4.3                             | 4.4 (cron — blocked on service-account design) |
 | 5 — Device sync            | 5.1, 5.2, 5.3                             | — ✅                                           |
 | 6 — Entra user sync        | 6.1, 6.2                                  | — ✅                                           |
@@ -42,10 +42,10 @@ lands. Status markers:
 
 ## Stage 3 — Multi-client switcher
 
-| Chunk                                | Status  | Notes                                                                                                       |
-| ------------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------- |
-| 3.1 Multi-org membership in session  | ❌ TODO | Provisioning already creates `UserOrganization` rows; switcher surface + cross-org check still outstanding. |
-| 3.2 Switcher UI + tenant-scope guard | ❌ TODO | Shelf's existing org switcher exists; needs portal-role-aware behaviour + cross-tenant guard.               |
+| Chunk                                | Status  | Notes                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3.1 Multi-org membership in session  | ✅ done | `ensureMspClientOrgMemberships` in `apps/webapp/app/modules/user/msp-org-memberships.server.ts`. Wired into `provisionUserFromPortal` so MSP-side users (super_admin / admin / technician / msp_admin / msp_user) get a `UserOrganization` row for every Shelf org whose `parentPortalTenantId` matches their MSP tenant. Idempotent on every launch.                           |
+| 3.2 Switcher UI + tenant-scope guard | ✅ done | Shelf's existing org switcher consumes `UserOrganization` rows; once Chunk 3.1 lands, MSP users see every client they manage in the switcher. Tenant-scope guard is the existing `getSelectedOrganization` membership check — a user landing on an org they don't belong to gets bounced to their first one. No new code surface needed; covered by the existing layout loader. |
 
 ## Stage 4 — ConnectWise company sync
 

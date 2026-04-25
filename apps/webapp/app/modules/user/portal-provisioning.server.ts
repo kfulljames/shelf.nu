@@ -10,6 +10,7 @@ import {
   fetchTenantInfo,
 } from "~/utils/portal-auth.server";
 import { randomUsernameFromEmail } from "~/utils/user";
+import { ensureMspClientOrgMemberships } from "./msp-org-memberships.server";
 import { defaultFields } from "../asset-index-settings/helpers";
 import { defaultUserCategories } from "../category/default-categories";
 import { getDefaultWeeklySchedule } from "../working-hours/service.server";
@@ -101,6 +102,15 @@ export async function provisionUserFromPortal(
   // 3. Ensure user is linked to org with correct role
   const shelfRole = mapPortalRoleToShelfRole(claims.role, claims.permissions);
   await ensureUserOrgMembership(user.id, organization.id, shelfRole);
+
+  // 4. MSP-side users see every client tenant their MSP manages.
+  // Idempotent — runs every launch but only writes diffs.
+  await ensureMspClientOrgMemberships({
+    userId: user.id,
+    mspTenantId: claims.tenantId,
+    portalRole: claims.role,
+    shelfRole,
+  });
 
   return { user, organization };
 }
