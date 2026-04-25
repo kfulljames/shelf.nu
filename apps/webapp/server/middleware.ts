@@ -109,6 +109,47 @@ function pathMatch(paths: string[], requestPath: string) {
 }
 
 /**
+ * Block write requests (POST / PUT / PATCH / DELETE) when the current
+ * session carries the portal's `isReadonly` claim. Required by the
+ * portal RBAC guide for breakglass sessions: "Respect `isReadonly` —
+ * block all write operations when `isReadonly: true`."
+ */
+export function enforceReadonly({ publicPaths }: { publicPaths: string[] }) {
+  return createMiddleware(async (c, next) => {
+    const method = c.req.method.toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+      return next();
+    }
+
+    const pathToCheck = c.req.path.endsWith(".data")
+      ? c.req.path.slice(0, -5)
+      : c.req.path;
+
+    if (pathMatch(publicPaths, pathToCheck)) {
+      return next();
+    }
+
+    const session = getSession<SessionData, FlashData>(c);
+    const auth = session.get(authSessionKey);
+
+    if (!auth || !auth.isReadonly) {
+      return next();
+    }
+
+    return c.json(
+      {
+        error: {
+          title: "Read-only access",
+          message:
+            "Your session is read-only. Write actions are disabled for the duration of this breakglass session.",
+        },
+      },
+      403
+    );
+  });
+}
+
+/**
  * Cache middleware
  *
  * @param seconds - The number of seconds to cache

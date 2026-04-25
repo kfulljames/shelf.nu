@@ -10,7 +10,12 @@ import { initEnv } from "~/utils/env";
 import { ShelfError } from "~/utils/error";
 
 import { logger } from "./logger";
-import { ensureHostHeaders, protect, urlShortener } from "./middleware";
+import {
+  enforceReadonly,
+  ensureHostHeaders,
+  protect,
+  urlShortener,
+} from "./middleware";
 import { runWithRequestCache } from "./request-cache.server";
 import { authSessionKey, createSessionStorage } from "./session";
 import type { FlashData, SessionData } from "./session";
@@ -137,6 +142,18 @@ export default createHonoServer<ServerEnv>({
           "/qr/:qrId/not-logged-in",
           "/qr/:qrId/contact-owner",
         ],
+      })
+    );
+
+    /**
+     * Block mutations for read-only portal sessions (breakglass).
+     * Runs after `protect` so the session is guaranteed to exist on
+     * any path that reaches this middleware.
+     */
+    server.use(
+      "*",
+      enforceReadonly({
+        publicPaths: ["/logout", "/portal-callback", "/healthcheck"],
       })
     );
   },

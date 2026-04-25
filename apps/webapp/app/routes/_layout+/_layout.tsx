@@ -19,6 +19,7 @@ import { ClientOnly } from "remix-utils/client-only";
 import { AtomsResetHandler } from "~/atoms/atoms-reset-handler";
 import { feedbackModalOpenAtom } from "~/atoms/feedback";
 import { switchingWorkspaceAtom } from "~/atoms/switching-workspace";
+import { BreakglassBanner } from "~/components/breakglass/breakglass-banner";
 import { ErrorContent } from "~/components/errors";
 
 import FeedbackModal from "~/components/feedback/feedback-modal";
@@ -216,6 +217,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         // Portal context for UI rendering
         isReadonly: authSession.isReadonly || false,
         isBreakglass: authSession.breakglass || false,
+        breakglassExpires: authSession.breakglassExpires ?? null,
         portalRole: authSession.role || null,
         /** THis is used to disable team organizations when the currentOrg is Team and no subscription is present  */
         disabledTeamOrg: isAdmin
@@ -272,6 +274,9 @@ export default function App() {
     minimizedSidebar,
     needsSequentialIdMigration,
     currentOrganizationId,
+    isBreakglass,
+    breakglassExpires,
+    isReadonly,
   } = useLoaderData<typeof loader>();
   const workspaceSwitching = useAtomValue(switchingWorkspaceAtom);
   const [feedbackModalOpen, setFeedbackModalOpen] = useAtom(
@@ -292,6 +297,12 @@ export default function App() {
         <AtomsResetHandler />
         <AppSidebar id="navigation" />
         <SidebarInset id="main-content" tabIndex={-1}>
+          {isBreakglass ? (
+            <BreakglassBanner
+              expiresAt={breakglassExpires}
+              isReadonly={isReadonly}
+            />
+          ) : null}
           {warnForNoPaymentMethod ? <MissingPaymentMethodBanner /> : null}
           {hasUnpaidInvoice ? <UnpaidInvoiceBanner /> : null}
           {disabledTeamOrg ? (
