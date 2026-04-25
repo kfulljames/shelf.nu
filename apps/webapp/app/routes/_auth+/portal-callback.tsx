@@ -3,6 +3,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { provisionUserFromPortal } from "~/modules/user/portal-provisioning.server";
 import { setCookie } from "~/utils/cookies.server";
+import { safeRedirect } from "~/utils/http.server";
 import { Logger } from "~/utils/logger";
 import {
   exchangeAuthCode,
@@ -80,8 +81,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     expiresAt: claims.exp,
   });
 
-  // 8. Redirect to assets (strip ?code= from URL)
-  return redirect("/assets", {
+  // 8. Redirect back to wherever the portal sent the user, falling
+  // back to /assets when no returnTo was supplied. safeRedirect blocks
+  // off-host destinations even though `returnTo` is set by our own
+  // captureAuthCode middleware — defense in depth.
+  const requestedReturnTo = url.searchParams.get("returnTo");
+  const target = requestedReturnTo
+    ? safeRedirect(requestedReturnTo, "/assets")
+    : "/assets";
+
+  return redirect(target, {
     headers: [
       setCookie(await setSelectedOrganizationIdCookie(organization.id)),
     ],

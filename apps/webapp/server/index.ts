@@ -11,6 +11,7 @@ import { ShelfError } from "~/utils/error";
 
 import { logger } from "./logger";
 import {
+  captureAuthCode,
   enforceReadonly,
   ensureHostHeaders,
   protect,
@@ -121,6 +122,13 @@ export default createHonoServer<ServerEnv>({
         },
       })
     );
+
+    /**
+     * Catch ?code= on any GET URL and forward to /portal-callback.
+     * Runs before `protect` so unauthenticated requests carrying a
+     * fresh auth code are not bounced back to the portal.
+     */
+    server.use("*", captureAuthCode());
 
     /**
      * Add protected routes middleware

@@ -97,6 +97,46 @@ export function protect({
   });
 }
 
+/**
+ * Catch portal auth-code redirects on any URL.
+ *
+ * The portal can redirect a user back to any URL inside the module
+ * (`/assets/abc-123?code=…`, `/?code=…`, etc.) — not just a fixed
+ * callback route. This middleware intercepts the auth code wherever
+ * it lands, then redirects to the dedicated `/portal-callback` route
+ * with the original path preserved as `returnTo`. The callback route
+ * does the exchange, provisioning and session-set, then redirects
+ * back to the original path.
+ *
+ * Skipping the callback path itself avoids a redirect loop.
+ */
+export function captureAuthCode() {
+  return createMiddleware(async (c, next) => {
+    const method = c.req.method.toUpperCase();
+    if (method !== "GET" && method !== "HEAD") return next();
+
+    const url = new URL(c.req.url);
+    const code = url.searchParams.get("code");
+    if (!code) return next();
+
+    if (url.pathname === "/portal-callback") return next();
+
+    // Build the original path without the ?code so the user lands on
+    // a clean URL after the exchange. Other params are preserved.
+    const stripped = new URLSearchParams(url.searchParams);
+    stripped.delete("code");
+    const returnTo =
+      url.pathname + (stripped.toString() ? `?${stripped.toString()}` : "");
+
+    const callback = new URL("/portal-callback", url);
+    callback.searchParams.set("code", code);
+    if (returnTo && returnTo !== "/") {
+      callback.searchParams.set("returnTo", returnTo);
+    }
+    return c.redirect(callback.toString());
+  });
+}
+
 function pathMatch(paths: string[], requestPath: string) {
   for (const path of paths) {
     const regex = pathToRegexp(path);

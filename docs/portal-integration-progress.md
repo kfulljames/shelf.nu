@@ -11,26 +11,26 @@ lands. Status markers:
 
 ## Summary
 
-| Stage                      | Chunks done                          | Chunks remaining                                          |
-| -------------------------- | ------------------------------------ | --------------------------------------------------------- |
-| 1 — Portal auth foundation | 1.1, 1.2, 1.3 (existing), 1.5 tested | 1.4 (global catcher), 1.6 (tests), 1.7 (Supabase removal) |
-| 2 — Breakglass             | 2.1, 2.2                             | 2.3 (audit log context)                                   |
-| 3 — Multi-client switcher  | —                                    | 3.1, 3.2                                                  |
-| 4 — ConnectWise sync       | 4.1, 4.2, 4.3                        | 4.4 (cron — blocked on service-account design)            |
-| 5 — Device sync            | 5.1, 5.2, 5.3                        | — ✅                                                      |
-| 6 — Entra user sync        | 6.1, 6.2                             | — ✅                                                      |
+| Stage                      | Chunks done                               | Chunks remaining                               |
+| -------------------------- | ----------------------------------------- | ---------------------------------------------- |
+| 1 — Portal auth foundation | 1.1, 1.2, 1.3 (existing), 1.4, 1.5 tested | 1.6 (tests), 1.7 (Supabase removal)            |
+| 2 — Breakglass             | 2.1, 2.2                                  | 2.3 (audit log context)                        |
+| 3 — Multi-client switcher  | —                                         | 3.1, 3.2                                       |
+| 4 — ConnectWise sync       | 4.1, 4.2, 4.3                             | 4.4 (cron — blocked on service-account design) |
+| 5 — Device sync            | 5.1, 5.2, 5.3                             | — ✅                                           |
+| 6 — Entra user sync        | 6.1, 6.2                                  | — ✅                                           |
 
 ## Stage 1 — Portal auth foundation
 
-| Chunk                                    | Status                | Notes                                                                                                                                                                                                |
-| ---------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1.1 JWKS verifier                        | 🟡 covered by tests   | Code already existed in `apps/webapp/app/utils/portal-auth.server.ts` from commit `7441b69`. Uses `jose.createRemoteJWKSet`; `jose` handles JWKS caching internally. Tested in `e13ec93`, `dad93f1`. |
-| 1.2 Portal config + auth-exchange client | 🟡 covered by tests   | `exchangeAuthCode` in same file. Config constants read from `~/utils/env`. Tested in `dad93f1`.                                                                                                      |
-| 1.3 JWT session cookie                   | 🏚 existing           | Implemented via react-router-hono-server `context.setSession` (see `apps/webapp/server/session.ts`). No extra tests yet.                                                                             |
-| 1.4 Global auth-code catcher             | ❌ TODO               | Current implementation handles `?code=` only on `/portal-callback`. Plan wanted a middleware catching `?code=` on any route. Acceptable to defer if portal redirect target is configurable.          |
-| 1.5 Role mapping + session hydration     | ✅ tested             | `mapPortalRoleToShelfRole`. Tested in `e13ec93`.                                                                                                                                                     |
-| 1.6 First-launch provisioning            | 🏚 existing, untested | 429 lines in `apps/webapp/app/modules/user/portal-provisioning.server.ts`. Uses Supabase client (not Prisma). No tests yet.                                                                          |
-| 1.7 Supabase removal                     | ❌ TODO               | `portal-provisioning.server.ts` still uses `sbDb`. Supabase deps remain in `package.json`. Destructive cutover deferred.                                                                             |
+| Chunk                                    | Status                | Notes                                                                                                                                                                                                                                  |
+| ---------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.1 JWKS verifier                        | 🟡 covered by tests   | Code already existed in `apps/webapp/app/utils/portal-auth.server.ts` from commit `7441b69`. Uses `jose.createRemoteJWKSet`; `jose` handles JWKS caching internally. Tested in `e13ec93`, `dad93f1`.                                   |
+| 1.2 Portal config + auth-exchange client | 🟡 covered by tests   | `exchangeAuthCode` in same file. Config constants read from `~/utils/env`. Tested in `dad93f1`.                                                                                                                                        |
+| 1.3 JWT session cookie                   | 🏚 existing           | Implemented via react-router-hono-server `context.setSession` (see `apps/webapp/server/session.ts`). No extra tests yet.                                                                                                               |
+| 1.4 Global auth-code catcher             | ✅ done               | `captureAuthCode` Hono middleware in `apps/webapp/server/middleware.ts`; redirects `?code=` on any GET URL to `/portal-callback?code=…&returnTo=…`. `portal-callback.tsx` honors `returnTo` via `safeRedirect`. Tested in this commit. |
+| 1.5 Role mapping + session hydration     | ✅ tested             | `mapPortalRoleToShelfRole`. Tested in `e13ec93`.                                                                                                                                                                                       |
+| 1.6 First-launch provisioning            | 🏚 existing, untested | 429 lines in `apps/webapp/app/modules/user/portal-provisioning.server.ts`. Uses Supabase client (not Prisma). No tests yet.                                                                                                            |
+| 1.7 Supabase removal                     | ❌ TODO               | `portal-provisioning.server.ts` still uses `sbDb`. Supabase deps remain in `package.json`. Destructive cutover deferred.                                                                                                               |
 
 ## Stage 2 — Breakglass
 
