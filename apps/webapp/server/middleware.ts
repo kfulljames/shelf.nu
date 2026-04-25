@@ -5,8 +5,9 @@ import { getSession } from "remix-hono/session";
 import { SERVER_URL } from "~/utils/env";
 import { safeRedirect } from "~/utils/http.server";
 import { isQrId } from "~/utils/id";
+import { Logger } from "~/utils/logger";
 import { getPortalLaunchUrl } from "~/utils/portal-auth.server";
-import type { FlashData, SessionData } from "./session";
+import type { AuthSession, FlashData, SessionData } from "./session";
 import { authSessionKey } from "./session";
 
 /**
@@ -109,10 +110,33 @@ function pathMatch(paths: string[], requestPath: string) {
 }
 
 /**
+ * Structured context about the current portal session. Emitted
+ * alongside any security-relevant middleware event so downstream log
+ * aggregation has a consistent shape to filter on.
+ */
+function portalAuditContext(auth: AuthSession) {
+  return {
+    portalUserId: auth.portalUserId,
+    userId: auth.userId,
+    tenantId: auth.tenantId,
+    role: auth.role,
+    shelfRole: auth.shelfRole,
+    breakglass: auth.breakglass,
+    breakglassExpires: auth.breakglassExpires,
+    isReadonly: auth.isReadonly,
+    impersonatedBy: auth.impersonatedBy,
+  };
+}
+
+/**
  * Block write requests (POST / PUT / PATCH / DELETE) when the current
  * session carries the portal's `isReadonly` claim. Required by the
  * portal RBAC guide for breakglass sessions: "Respect `isReadonly` —
  * block all write operations when `isReadonly: true`."
+ *
+ * Also emits a structured warn line so every blocked attempt is
+ * visible in observability — Shelf has no persistent access-audit
+ * table today, so the logger is the audit trail for Chunk 2.3.
  */
 export function enforceReadonly({ publicPaths }: { publicPaths: string[] }) {
   return createMiddleware(async (c, next) => {
@@ -135,6 +159,13 @@ export function enforceReadonly({ publicPaths }: { publicPaths: string[] }) {
     if (!auth || !auth.isReadonly) {
       return next();
     }
+
+    Logger.warn({
+      event: "portal.readonly_block",
+      method,
+      path: c.req.path,
+      ...portalAuditContext(auth),
+    });
 
     return c.json(
       {

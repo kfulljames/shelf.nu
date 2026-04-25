@@ -37,11 +37,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
   // 4. Log breakglass sessions prominently (MANDATORY per MODULE_RBAC_GUIDE)
   if (claims.breakglass) {
-    Logger.warn(
-      `[BREAKGLASS] User ${claims.sub} (${claims.email}) accessing Shelf ` +
-        `via breakglass session. Expires: ${claims.breakglassExpires}. ` +
-        `Readonly: ${claims.isReadonly}. Tenant: ${claims.tenantId}.`
-    );
+    Logger.warn({
+      event: "portal.breakglass_login",
+      portalUserId: claims.sub,
+      email: claims.email,
+      tenantId: claims.tenantId,
+      breakglass: true,
+      breakglassExpires: claims.breakglassExpires ?? null,
+      isReadonly: claims.isReadonly ?? false,
+      impersonatedBy: claims.impersonatedBy ?? null,
+    });
   }
 
   // 5. Auto-provision user + org in Shelf DB
