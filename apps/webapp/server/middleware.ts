@@ -5,8 +5,9 @@ import { getSession } from "remix-hono/session";
 import { SERVER_URL } from "~/utils/env";
 import { safeRedirect } from "~/utils/http.server";
 import { isQrId } from "~/utils/id";
+import { Logger } from "~/utils/logger";
 import { getPortalLaunchUrl } from "~/utils/portal-auth.server";
-import type { FlashData, SessionData } from "./session";
+import type { AuthSession, FlashData, SessionData } from "./session";
 import { authSessionKey } from "./session";
 
 /**
@@ -96,6 +97,46 @@ export function protect({
   });
 }
 
+/**
+ * Catch portal auth-code redirects on any URL.
+ *
+ * The portal can redirect a user back to any URL inside the module
+ * (`/assets/abc-123?code=…`, `/?code=…`, etc.) — not just a fixed
+ * callback route. This middleware intercepts the auth code wherever
+ * it lands, then redirects to the dedicated `/portal-callback` route
+ * with the original path preserved as `returnTo`. The callback route
+ * does the exchange, provisioning and session-set, then redirects
+ * back to the original path.
+ *
+ * Skipping the callback path itself avoids a redirect loop.
+ */
+export function captureAuthCode() {
+  return createMiddleware(async (c, next) => {
+    const method = c.req.method.toUpperCase();
+    if (method !== "GET" && method !== "HEAD") return next();
+
+    const url = new URL(c.req.url);
+    const code = url.searchParams.get("code");
+    if (!code) return next();
+
+    if (url.pathname === "/portal-callback") return next();
+
+    // Build the original path without the ?code so the user lands on
+    // a clean URL after the exchange. Other params are preserved.
+    const stripped = new URLSearchParams(url.searchParams);
+    stripped.delete("code");
+    const returnTo =
+      url.pathname + (stripped.toString() ? `?${stripped.toString()}` : "");
+
+    const callback = new URL("/portal-callback", url);
+    callback.searchParams.set("code", code);
+    if (returnTo && returnTo !== "/") {
+      callback.searchParams.set("returnTo", returnTo);
+    }
+    return c.redirect(callback.toString());
+  });
+}
+
 function pathMatch(paths: string[], requestPath: string) {
   for (const path of paths) {
     const regex = pathToRegexp(path);
@@ -106,6 +147,77 @@ function pathMatch(paths: string[], requestPath: string) {
   }
 
   return false;
+}
+
+/**
+ * Structured context about the current portal session. Emitted
+ * alongside any security-relevant middleware event so downstream log
+ * aggregation has a consistent shape to filter on.
+ */
+function portalAuditContext(auth: AuthSession) {
+  return {
+    portalUserId: auth.portalUserId,
+    userId: auth.userId,
+    tenantId: auth.tenantId,
+    role: auth.role,
+    shelfRole: auth.shelfRole,
+    breakglass: auth.breakglass,
+    breakglassExpires: auth.breakglassExpires,
+    isReadonly: auth.isReadonly,
+    impersonatedBy: auth.impersonatedBy,
+  };
+}
+
+/**
+ * Block write requests (POST / PUT / PATCH / DELETE) when the current
+ * session carries the portal's `isReadonly` claim. Required by the
+ * portal RBAC guide for breakglass sessions: "Respect `isReadonly` —
+ * block all write operations when `isReadonly: true`."
+ *
+ * Also emits a structured warn line so every blocked attempt is
+ * visible in observability — Shelf has no persistent access-audit
+ * table today, so the logger is the audit trail for Chunk 2.3.
+ */
+export function enforceReadonly({ publicPaths }: { publicPaths: string[] }) {
+  return createMiddleware(async (c, next) => {
+    const method = c.req.method.toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+      return next();
+    }
+
+    const pathToCheck = c.req.path.endsWith(".data")
+      ? c.req.path.slice(0, -5)
+      : c.req.path;
+
+    if (pathMatch(publicPaths, pathToCheck)) {
+      return next();
+    }
+
+    const session = getSession<SessionData, FlashData>(c);
+    const auth = session.get(authSessionKey);
+
+    if (!auth || !auth.isReadonly) {
+      return next();
+    }
+
+    Logger.warn({
+      event: "portal.readonly_block",
+      method,
+      path: c.req.path,
+      ...portalAuditContext(auth),
+    });
+
+    return c.json(
+      {
+        error: {
+          title: "Read-only access",
+          message:
+            "Your session is read-only. Write actions are disabled for the duration of this breakglass session.",
+        },
+      },
+      403
+    );
+  });
 }
 
 /**

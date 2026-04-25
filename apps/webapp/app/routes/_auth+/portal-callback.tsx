@@ -3,6 +3,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { provisionUserFromPortal } from "~/modules/user/portal-provisioning.server";
 import { setCookie } from "~/utils/cookies.server";
+import { safeRedirect } from "~/utils/http.server";
 import { Logger } from "~/utils/logger";
 import {
   exchangeAuthCode,
@@ -37,11 +38,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
   // 4. Log breakglass sessions prominently (MANDATORY per MODULE_RBAC_GUIDE)
   if (claims.breakglass) {
-    Logger.warn(
-      `[BREAKGLASS] User ${claims.sub} (${claims.email}) accessing Shelf ` +
-        `via breakglass session. Expires: ${claims.breakglassExpires}. ` +
-        `Readonly: ${claims.isReadonly}. Tenant: ${claims.tenantId}.`
-    );
+    Logger.warn({
+      event: "portal.breakglass_login",
+      portalUserId: claims.sub,
+      email: claims.email,
+      tenantId: claims.tenantId,
+      breakglass: true,
+      breakglassExpires: claims.breakglassExpires ?? null,
+      isReadonly: claims.isReadonly ?? false,
+      impersonatedBy: claims.impersonatedBy ?? null,
+    });
   }
 
   // 5. Auto-provision user + org in Shelf DB
@@ -75,8 +81,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     expiresAt: claims.exp,
   });
 
-  // 8. Redirect to assets (strip ?code= from URL)
-  return redirect("/assets", {
+  // 8. Redirect back to wherever the portal sent the user, falling
+  // back to /assets when no returnTo was supplied. safeRedirect blocks
+  // off-host destinations even though `returnTo` is set by our own
+  // captureAuthCode middleware — defense in depth.
+  const requestedReturnTo = url.searchParams.get("returnTo");
+  const target = requestedReturnTo
+    ? safeRedirect(requestedReturnTo, "/assets")
+    : "/assets";
+
+  return redirect(target, {
     headers: [
       setCookie(await setSelectedOrganizationIdCookie(organization.id)),
     ],
